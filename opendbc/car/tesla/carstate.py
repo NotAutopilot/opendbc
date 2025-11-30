@@ -263,12 +263,13 @@ class CarState(CarStateBase):
       if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
         party_messages.append(("EPAS_sysStatus", 25))
 
+      # Allow missing AP messages for HW1/Pre-AP to avoid CAN Error if AP is offline/missing
       if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
         ap_messages = []
       else:
         ap_messages = [
-          ("DAS_control", 25),
-          ("DAS_steeringControl", 25),
+          ("DAS_control", 0),
+          ("DAS_steeringControl", 0),
         ]
 
       return {
