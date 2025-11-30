@@ -259,7 +259,9 @@ class CarState(CarStateBase):
         ("DI_torque1", 0),
       ]
 
-      party_messages = []
+      party_messages = [
+        ("ESP_B", 0),
+      ]
       if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
         party_messages.append(("EPAS_sysStatus", 25))
 
