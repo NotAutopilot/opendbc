@@ -21,8 +21,8 @@ static bool tesla_legacy_stock_lkas = false;
 static bool tesla_legacy_stock_lkas_prev = false;
 
 // Pre-AP specific state
-static int pedal_can = -1;
-static int pedal_pressed = 0; // For pedal interceptor
+// static int pedal_can = -1;
+// static int pedal_pressed = 0; // For pedal interceptor
 
 /*
 static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
@@ -109,9 +109,9 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
      // Threshold estimation: 0.05 * val - 22.8.  If > 0 it's pressed.
      // Just checking raw value > threshold. 
      // Tinkla used complex formula, but simplified check:
-     if (pedal_can == -1) {
-        pedal_can = msg->bus;
-     }
+     // if (pedal_can == -1) {
+     //    pedal_can = msg->bus;
+     // }
      // Update gas_pressed if pedal is used
      // gas_pressed = pedal_pressed > threshold? 
      // For now, rely on stock gas pressed signal if available, or implement pedal checks if needed.
