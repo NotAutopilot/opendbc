@@ -310,6 +310,8 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
 // Revert to standard bool signature for blocking only
 static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
+  UNUSED(bus_num);
+  UNUSED(addr);
   // We handle forwarding manually in rx_hook.
   // Here we just block everything we don't want forwarded by DEFAULT mechanism (if any).
   // OpenPilot usually doesn't forward by default unless configured?
