@@ -21,8 +21,8 @@ static bool tesla_legacy_stock_lkas = false;
 static bool tesla_legacy_stock_lkas_prev = false;
 
 // Pre-AP specific state
-// static int pedal_can = -1;
-// static int pedal_pressed = 0; // For pedal interceptor
+static int pedal_can = -1;
+static int pedal_pressed = 0; // For pedal interceptor
 
 /*
 static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
@@ -98,23 +98,22 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
 
   // Gas pressed for Pre-AP
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x108U)) {
-    gas_pressed = msg->data[6] != 0U;
+    if (!tesla_enable_pedal) {
+      gas_pressed = msg->data[6] != 0U;
+    }
   }
   
   // Pedal Interceptor
   if (tesla_preap && tesla_enable_pedal && (msg->addr == 0x552)) {
-     // Pedal pressed logic from Tinkla
-     // pedalPressed = (int)((((GET_BYTES_04(to_push) & 0xFF00) >> 8) + ((GET_BYTES_04(to_push) & 0xFF) << 8)) * 0.050796813 -22.85856576);
-     // int pedal_val = ((msg->data[0] << 8) | msg->data[1]); 
+     int pedal_val = ((msg->data[0] << 8) | msg->data[1]);
      // Threshold estimation: 0.05 * val - 22.8.  If > 0 it's pressed.
-     // Just checking raw value > threshold. 
-     // Tinkla used complex formula, but simplified check:
-     // if (pedal_can == -1) {
-     //    pedal_can = msg->bus;
-     // }
-     // Update gas_pressed if pedal is used
-     // gas_pressed = pedal_pressed > threshold? 
-     // For now, rely on stock gas pressed signal if available, or implement pedal checks if needed.
+     // Just checking raw value > threshold (approx 450). 
+     pedal_pressed = pedal_val;
+     gas_pressed = (pedal_pressed > 450);
+
+     if (pedal_can == -1) {
+        pedal_can = msg->bus;
+     }
   }
 
   if (((tesla_external_panda) && (msg->bus == 0U) && (msg->addr == 0x1f8U)) ||
@@ -238,11 +237,10 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   if (tesla_preap && tesla_enable_pedal && (msg->addr == 0x551)) {
      // Basic checks for pedal
      if (!controls_allowed) {
-       // if (msg->data ... ) check if trying to apply gas
-       // Simplification: check if all bytes are 0 or similar if disabled? 
-       // Real check:
-       // GAS_INTERCEPTOR
-       // violation |= longitudinal_interceptor_checks(desired_gas, limits);
+       int pedal_cmd = ((msg->data[0] << 8) | msg->data[1]);
+       if (pedal_cmd > 0) {
+         violation = true;
+       }
      }
   }
 
