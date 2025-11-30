@@ -244,19 +244,19 @@ class CarState(CarStateBase):
       chassis_messages = [
         ("ESP_B", 50),
         ("BrakeMessage", 50),
-        ("DI_state", 10),
-        ("DI_torque2", 100),
-        ("GTW_carState", 10),
-        ("STW_ANGLHP_STAT", 100),
-        ("SDM1", 10),
-        ("RCM_status", 10),
+        ("DI_state", 0),
+        ("DI_torque2", 50),
+        ("GTW_carState", 0),
+        ("STW_ANGLHP_STAT", 0),
+        ("SDM1", 0),
+        ("RCM_status", 0),
       ]
       
       if CP.carFingerprint != CAR.TESLA_MODEL_S_HW3:
-        chassis_messages.append(("EPAS_sysStatus", 25))
+        chassis_messages.append(("EPAS_sysStatus", 0))
 
       pt_messages = [
-        ("DI_torque1", 100),
+        ("DI_torque1", 50),
       ]
 
       party_messages = []
