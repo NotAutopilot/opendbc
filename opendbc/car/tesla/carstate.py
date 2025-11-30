@@ -17,7 +17,7 @@ class CarState(CarStateBase):
       if self.CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
         CANBUS.chassis = 1
         CANBUS.radar = 5
-      elif self.CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
+      elif self.CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
         CANBUS.powertrain = CANBUS.party
         CANBUS.autopilot_powertrain = CANBUS.autopilot_party
 
@@ -217,10 +217,16 @@ class CarState(CarStateBase):
       ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
 
     # AEB
-    ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      ret.stockAeb = False
+    else:
+      ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
 
     # LKAS
-    ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      ret.stockLkas = False
+    else:
+      ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
 
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
