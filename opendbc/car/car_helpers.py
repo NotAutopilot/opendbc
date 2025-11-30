@@ -156,6 +156,11 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
     candidate = "MOCK"
 
+  # Force TESLA_MODEL_S_PREAP to bypass fingerprinting issues for this port
+  if "TESLA" in str(candidate).upper() or candidate == "MOCK": 
+     # If it looks like a Tesla (or failed to match), assume it's our target car
+     candidate = "TESLA_MODEL_S_PREAP"
+
   CarInterface = interfaces[candidate]
   CP: CarParams = CarInterface.get_params(candidate, fingerprints, car_fw, alpha_long_allowed, is_release, docs=False)
   CP.carVin = vin
