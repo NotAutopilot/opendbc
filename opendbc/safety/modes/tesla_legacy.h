@@ -103,7 +103,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   if (tesla_preap && tesla_enable_pedal && (msg->addr == 0x552)) {
      // Pedal pressed logic from Tinkla
      // pedalPressed = (int)((((GET_BYTES_04(to_push) & 0xFF00) >> 8) + ((GET_BYTES_04(to_push) & 0xFF) << 8)) * 0.050796813 -22.85856576);
-     int pedal_val = ((msg->data[0] << 8) | msg->data[1]); 
+     // int pedal_val = ((msg->data[0] << 8) | msg->data[1]); 
      // Threshold estimation: 0.05 * val - 22.8.  If > 0 it's pressed.
      // Just checking raw value > threshold. 
      // Tinkla used complex formula, but simplified check:
