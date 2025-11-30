@@ -266,32 +266,14 @@ class CarState(CarStateBase):
       if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
         party_messages.append(("EPAS_sysStatus", 25))
 
-      # Allow missing AP messages for HW1/Pre-AP to avoid CAN Error if AP is offline/missing
-      # Also consolidate for HW1 because Pre-AP often fingerprints as HW1
+      # Fix for Pre-AP/HW1: Redirect AP parser to Bus 0 so it sees traffic (ESP_B) and becomes valid.
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_PREAP, CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
-        # Force AP parsers to listen on Bus 0 (Party) where we know traffic exists (ESP_B)
-        # Consolidate all into one parser to ensure consistency and avoid timeouts
-        all_messages = chassis_messages + pt_messages + party_messages + [
+        ap_bus = CANBUS.party
+        ap_messages = [
           ("ESP_B", 0),
           ("DAS_control", 0),
           ("DAS_steeringControl", 0),
         ]
-        # Remove duplicates (by name) - minimal logic
-        seen = set()
-        unique_messages = []
-        for name, freq in all_messages:
-            if name not in seen:
-                unique_messages.append((name, freq))
-                seen.add(name)
-        
-        cp_common = CANParser(DBC[CP.carFingerprint][Bus.party], unique_messages, CANBUS.party)
-        return {
-            Bus.party: cp_common,
-            Bus.ap_party: cp_common,
-            Bus.pt: cp_common,
-            Bus.ap_pt: cp_common,
-            Bus.chassis: cp_common,
-        }
       else:
         ap_bus = CANBUS.autopilot_party
         ap_messages = [
@@ -299,13 +281,13 @@ class CarState(CarStateBase):
           ("DAS_steeringControl", 0),
         ]
 
-        return {
-          Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
-          Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_messages, ap_bus),
-          Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CANBUS.powertrain),
-          Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, CANBUS.autopilot_powertrain),
-          Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
-        }
+      return {
+        Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_messages, ap_bus),
+        Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CANBUS.powertrain),
+        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain),
+        Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
+      }
 
     return {
       Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
