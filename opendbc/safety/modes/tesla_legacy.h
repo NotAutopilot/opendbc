@@ -24,6 +24,7 @@ static bool tesla_legacy_stock_lkas_prev = false;
 static int pedal_can = -1;
 static int pedal_pressed = 0; // For pedal interceptor
 
+/*
 static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
   int addr = GET_ADDR(to_push);
   int len = GET_LEN(to_push);
@@ -65,6 +66,7 @@ static uint8_t tesla_legacy_compute_crc(uint32_t MLB, uint32_t MHB, int msg_len)
   crc = crc ^ 0xFF;
   return crc;
 }
+*/
 
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
 
