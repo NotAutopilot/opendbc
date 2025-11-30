@@ -242,10 +242,10 @@ class CarState(CarStateBase):
   def get_can_parsers(CP):
     if CP.carFingerprint in LEGACY_CARS:
       chassis_messages = [
-        ("ESP_B", 50),
-        ("BrakeMessage", 50),
+        ("ESP_B", 0),
+        ("BrakeMessage", 0),
         ("DI_state", 0),
-        ("DI_torque2", 50),
+        ("DI_torque2", 0),
         ("GTW_carState", 0),
         ("STW_ANGLHP_STAT", 0),
         ("SDM1", 0),
@@ -256,7 +256,7 @@ class CarState(CarStateBase):
         chassis_messages.append(("EPAS_sysStatus", 0))
 
       pt_messages = [
-        ("DI_torque1", 50),
+        ("DI_torque1", 0),
       ]
 
       party_messages = []
