@@ -162,7 +162,7 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
 
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   // Handle forwarding (Manual injection)
-  tesla_legacy_handle_forwarding(msg);
+  // tesla_legacy_handle_forwarding(msg);
 
   // Steering angle: (0.1 * val) - 819.2 in deg.
   if (!tesla_external_panda && (msg->bus == 0U) && (msg->addr == 0x370U)) {
