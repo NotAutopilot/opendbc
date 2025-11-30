@@ -61,6 +61,11 @@ class CarInterface(CarInterfaceBase):
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW3)),
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW3 | TeslaSafetyFlags.FLAG_EXTERNAL_PANDA)),
       ]
+    elif candidate == CAR.TESLA_MODEL_S_PREAP:
+      ret.safetyConfigs = [
+        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL)),
+      ]
+      ret.radarUnavailable = False
 
     ret.steerLimitTimer = 0.4
     ret.steerActuatorDelay = 0.1
