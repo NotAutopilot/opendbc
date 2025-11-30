@@ -63,7 +63,7 @@ class CarInterface(CarInterfaceBase):
       ]
     elif candidate == CAR.TESLA_MODEL_S_PREAP:
       ret.safetyConfigs = [
-        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL)),
+        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL | TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE)),
       ]
       ret.radarUnavailable = False
 
