@@ -79,6 +79,7 @@ static uint8_t tesla_legacy_compute_crc(uint32_t MLB, uint32_t MHB, int msg_len)
 }
 */
 
+/*
 // Handles manual forwarding modification since safety hooks don't allow modification
 static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
   int bus_num = GET_BUS(to_fwd);
@@ -159,10 +160,11 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
     }
   }
 }
+*/
 
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   // Handle forwarding (Manual injection)
-  tesla_legacy_handle_forwarding(msg);
+  // tesla_legacy_handle_forwarding(msg);
 
   // Steering angle: (0.1 * val) - 819.2 in deg.
   if (!tesla_external_panda && (msg->bus == 0U) && (msg->addr == 0x370U)) {
