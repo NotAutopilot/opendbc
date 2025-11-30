@@ -44,6 +44,7 @@ static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
   return checksum;
 }
 
+/*
 static uint8_t tesla_legacy_compute_crc(uint32_t MLB, uint32_t MHB, int msg_len) {
   static const int crc_lookup[256] = { 0x00, 0x1D, 0x3A, 0x27, 0x74, 0x69, 0x4E, 0x53, 0xE8, 0xF5, 0xD2, 0xCF, 0x9C, 0x81, 0xA6, 0xBB, 
     0xCD, 0xD0, 0xF7, 0xEA, 0xB9, 0xA4, 0x83, 0x9E, 0x25, 0x38, 0x1F, 0x02, 0x51, 0x4C, 0x6B, 0x76, 
@@ -74,6 +75,7 @@ static uint8_t tesla_legacy_compute_crc(uint32_t MLB, uint32_t MHB, int msg_len)
   crc = crc ^ 0xFF;
   return crc;
 }
+*/
 
 // Handles manual forwarding modification since safety hooks don't allow modification
 static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
@@ -131,16 +133,7 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
     bool forward = true;
     // Filter logic:
     if (!tesla_external_panda && !tesla_hw1 && (addr == 0x27dU)) forward = false;
-    if (!tesla_external_panda && (addr == 0x488U) && !tesla_legacy_stock_lkas) forward = true; // Allow OP steering? Wait, logic was "block if !stock". But we want OP to pass.
-    // Since OP sends on Bus 2 (internal), it's TX. TX is not RX.
-    // This hook is for EXTERNAL Bus 2 -> Bus 0.
-    // If Pre-AP has nothing on Bus 2, this is moot.
-    // But if we use Bus 2 for pedal command (which we do), we might want to forward 0x551 from 2 -> 0?
-    // teslacan_legacy.py sends 0x551 on Bus 2.
-    // If we want it on Bus 0 (to reach interceptor on Bus 0?), we must forward.
-    // `safety_tesla.h` RX hook listens on 0 OR 2 for pedal.
-    // If interceptor is on 0, we need 0x551 on 0.
-    // If we send 0x551 on 2, we must forward 2->0.
+    if (!tesla_external_panda && (addr == 0x488U) && !tesla_legacy_stock_lkas) forward = true; 
     
     if (forward) {
         CANPacket_t to_send;
@@ -252,66 +245,100 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
 
 
 static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
-  // ... (Keep same as before) ...
   const AngleSteeringLimits TESLA_STEERING_LIMITS = {
-    .max_angle = 3600,
+    .max_angle = 3600,  // 360 deg, EPAS faults above this
     .angle_deg_to_can = 10,
     .frequency = 50U,
   };
+
+  // NOTE: based off TESLA_MODEL_S_HW3 to match openpilot
   const AngleSteeringParams TESLA_LEGACY_STEERING_PARAMS = {
-    .slip_factor = -0.0005666493436310427,
+    .slip_factor = -0.0005666493436310427,  // calc_slip_factor(VM)
     .steer_ratio = 15.,
     .wheelbase = 2.96,
   };
+
   const LongitudinalLimits TESLA_LONG_LIMITS = {
-    .max_accel = 425,
-    .min_accel = 288,
-    .inactive_accel = 375,
+    .max_accel = 425,       // 2 m/s^2
+    .min_accel = 288,       // -3.48 m/s^2
+    .inactive_accel = 375,  // 0. m/s^2
   };
 
   bool tx = true;
   bool violation = false;
 
+  // Steering control: (0.1 * val) - 1638.35 in deg.
   if (!tesla_external_panda && (msg->addr == 0x488U)) {
+    // We use 1/10 deg as a unit here
     int raw_angle_can = ((msg->data[0] & 0x7FU) << 8) | msg->data[1];
     int desired_angle = raw_angle_can - 16384;
     int steer_control_type = msg->data[2] >> 6;
-    bool steer_control_enabled = steer_control_type == 1;
+    bool steer_control_enabled = steer_control_type == 1;  // ANGLE_CONTROL
 
     if (steer_angle_cmd_checks_vm(desired_angle, steer_control_enabled, TESLA_STEERING_LIMITS, TESLA_LEGACY_STEERING_PARAMS)) {
       violation = true;
     }
-    bool valid_steer_control_type = (steer_control_type == 0) || (steer_control_type == 1);
-    if (!valid_steer_control_type) violation = true;
-    if (tesla_legacy_stock_lkas) violation = true;
+
+    bool valid_steer_control_type = (steer_control_type == 0) ||  // NONE
+                                    (steer_control_type == 1);    // ANGLE_CONTROL
+    if (!valid_steer_control_type) {
+      violation = true;
+    }
+
+    if (tesla_legacy_stock_lkas) {
+      // Don't allow any steering commands when stock LKAS is active
+      violation = true;
+    }
   }
 
+  // DAS_control: longitudinal control message
   if ((tesla_external_panda || tesla_hw1 || tesla_preap) && (msg->addr == das_control_msg)) {
+    // No AEB events may be sent by openpilot
     int aeb_event = msg->data[2] & 0x03U;
-    if (aeb_event != 0) violation = true;
-    if (tesla_legacy_stock_aeb) violation = true;
+    if (aeb_event != 0) {
+      violation = true;
+    }
+
+    // Don't send long/cancel messages when the stock AEB system is active
+    if (tesla_legacy_stock_aeb) {
+      violation = true;
+    }
+
     int raw_accel_max = ((msg->data[6] & 0x1FU) << 4) | (msg->data[5] >> 4);
     int raw_accel_min = ((msg->data[5] & 0x0FU) << 5) | (msg->data[4] >> 3);
-    if ((raw_accel_max < TESLA_LONG_LIMITS.inactive_accel) && (raw_accel_min < TESLA_LONG_LIMITS.inactive_accel)) violation = true;
+
+    // Prevent both acceleration from being negative, as this could cause the car to reverse after coming to standstill
+    if ((raw_accel_max < TESLA_LONG_LIMITS.inactive_accel) && (raw_accel_min < TESLA_LONG_LIMITS.inactive_accel)) {
+      violation = true;
+    }
+
+    // Don't allow any acceleration limits above the safety limits
     violation |= longitudinal_accel_checks(raw_accel_max, TESLA_LONG_LIMITS);
     violation |= longitudinal_accel_checks(raw_accel_min, TESLA_LONG_LIMITS);
   }
   
+  // Pedal Interceptor
   if (tesla_preap && tesla_enable_pedal && (msg->addr == 0x551)) {
+     // Basic checks for pedal
      if (!controls_allowed) {
        int pedal_cmd = ((msg->data[0] << 8) | msg->data[1]);
-       if (pedal_cmd > 0) violation = true;
+       if (pedal_cmd > 0) {
+         violation = true;
+       }
      }
   }
 
-  if (violation) tx = false;
+  if (violation) {
+    tx = false;
+  }
+
   return tx;
 }
 
 // Revert to standard bool signature for blocking only
 static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
-  UNUSED(bus_num);
-  UNUSED(addr);
+  (void)bus_num;
+  (void)addr;
   // We handle forwarding manually in rx_hook.
   // Here we just block everything we don't want forwarded by DEFAULT mechanism (if any).
   // OpenPilot usually doesn't forward by default unless configured?
@@ -320,7 +347,6 @@ static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
 }
 
 static safety_config tesla_legacy_init(uint16_t param) {
-  // ... (Keep same as before) ...
   const int TESLA_FLAG_EXTERNAL_PANDA = 2;
   const int TESLA_FLAG_HW1 = 4;
   const int TESLA_FLAG_HW2 = 8;
@@ -329,6 +355,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   const int TESLA_FLAG_ENABLE_PEDAL = 64;
   const int TESLA_FLAG_RADAR_BEHIND_NOSECONE = 128;
 
+  // Extract flags
   tesla_external_panda = GET_FLAG(param, TESLA_FLAG_EXTERNAL_PANDA);
   tesla_hw1 = GET_FLAG(param, TESLA_FLAG_HW1);
   tesla_hw2 = GET_FLAG(param, TESLA_FLAG_HW2);
@@ -341,75 +368,103 @@ static safety_config tesla_legacy_init(uint16_t param) {
     radar_position = 1;
   }
 
+  // Initialize state variables
   tesla_legacy_stock_aeb = false;
   tesla_legacy_stock_lkas = false;
   tesla_legacy_stock_lkas_prev = false;
   chassis_bus = 0U;
   di_torque1_msg = 0x106U;
 
+  // Set DAS control message address
   das_control_msg = tesla_external_panda ? 0x2bfU : 0x2b9U;
   if (tesla_preap) das_control_msg = 0x2b9U;
 
-  // ... (Same message definitions) ...
+  // Define message arrays (keeping them as is)
   static const CanMsg TESLA_TX_LEGACY_MSGS[] = {
-    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},
-    {0x27D, 0, 3, .check_relay = true, .disable_static_blocking = true},
+    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x27D, 0, 3, .check_relay = true, .disable_static_blocking = true},  // APS_eacMonitor
   };
+
   static const CanMsg TESLA_LEGACY_PT_MSGS[] = {
-    {0x2bf, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    {0x2bf, 0, 8, .check_relay = true, .disable_static_blocking = true},  // DAS_control
   };
+
   static const CanMsg TESLA_TX_LEGACY_HW1_MSGS[] = {
-    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},
-    {0x2b9, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x2b9, 0, 8, .check_relay = true, .disable_static_blocking = true},  // DAS_control
   };
+  
   static const CanMsg TESLA_TX_PREAP_MSGS[] = {
-    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},
-    {0x2B9, 0, 8, .check_relay = true, .disable_static_blocking = true},
-    {0x551, 0, 6, .check_relay = true, .disable_static_blocking = true},
+    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x2B9, 0, 8, .check_relay = true, .disable_static_blocking = true},  // DAS_control
+    {0x551, 0, 6, .check_relay = true, .disable_static_blocking = true},  // Pedal
+    // Add radar messages if needed for emulation
   };
 
+  // Define RX check arrays (keeping them as is)
   static RxCheck tesla_legacy_pt_rx_checks[] = {
-    {.msg = {{0x106, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x1f8, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x2bf, 2, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x256, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-  };
-  static RxCheck tesla_legacy_hw1_rx_checks[] = {
-    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x2b9, 2, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-  };
-  static RxCheck tesla_legacy_hw2_rx_checks[] = {
-    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-  };
-  static RxCheck tesla_legacy_hw3_rx_checks[] = {
-    {.msg = {{0x370, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x155, 1, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20a, 1, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 1, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-  };
-  static RxCheck tesla_preap_rx_checks[] = {
-    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
-    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x106, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque1
+    {.msg = {{0x1f8, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x2bf, 2, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DAS_control
+    {.msg = {{0x256, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
   };
 
-  if (tesla_external_panda && (tesla_hw3 || tesla_hw2)) return BUILD_SAFETY_CFG(tesla_legacy_pt_rx_checks, TESLA_LEGACY_PT_MSGS);
-  if (tesla_hw3) { chassis_bus = 1U; return BUILD_SAFETY_CFG(tesla_legacy_hw3_rx_checks, TESLA_TX_LEGACY_MSGS); }
-  if (tesla_hw1) { di_torque1_msg = 0x108U; return BUILD_SAFETY_CFG(tesla_legacy_hw1_rx_checks, TESLA_TX_LEGACY_HW1_MSGS); }
-  if (tesla_preap) { di_torque1_msg = 0x108U; return BUILD_SAFETY_CFG(tesla_preap_rx_checks, TESLA_TX_PREAP_MSGS); }
+  static RxCheck tesla_legacy_hw1_rx_checks[] = {
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque1
+    {.msg = {{0x2b9, 2, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DAS_control
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus (25hz)
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_private1
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
+    {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DAS_steeringControl
+  };
+
+  static RxCheck tesla_legacy_hw2_rx_checks[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus (25hz)
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_private1
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
+    {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DAS_steeringControl
+  };
+
+  static RxCheck tesla_legacy_hw3_rx_checks[] = {
+    {.msg = {{0x370, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus (100hz)
+    {.msg = {{0x155, 1, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_private1
+    {.msg = {{0x20a, 1, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x368, 1, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
+    {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DAS_steeringControl
+  };
+  
+  static RxCheck tesla_preap_rx_checks[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus (25Hz)
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque1 (100Hz)
+    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque2 (100Hz)
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage (50Hz)
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state (10Hz)
+    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState (10Hz)
+  };
+
+  // Determine configuration based on hardware type
+  if (tesla_external_panda && (tesla_hw3 || tesla_hw2)) {
+    return BUILD_SAFETY_CFG(tesla_legacy_pt_rx_checks, TESLA_LEGACY_PT_MSGS);
+  }
+
+  if (tesla_hw3) {
+    chassis_bus = 1U;
+    return BUILD_SAFETY_CFG(tesla_legacy_hw3_rx_checks, TESLA_TX_LEGACY_MSGS);
+  }
+
+  if (tesla_hw1) {
+    di_torque1_msg = 0x108U;
+    return BUILD_SAFETY_CFG(tesla_legacy_hw1_rx_checks, TESLA_TX_LEGACY_HW1_MSGS);
+  }
+  
+  if (tesla_preap) {
+    di_torque1_msg = 0x108U;
+    return BUILD_SAFETY_CFG(tesla_preap_rx_checks, TESLA_TX_PREAP_MSGS);
+  }
+
+  // Default case: HW2
   return BUILD_SAFETY_CFG(tesla_legacy_hw2_rx_checks, TESLA_TX_LEGACY_MSGS);
 }
 
