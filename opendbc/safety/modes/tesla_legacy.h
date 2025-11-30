@@ -8,7 +8,9 @@
 #define WORD_TO_BYTE_ARRAY(dst8, src32) 0[dst8] = ((src32) & 0xFFU); 1[dst8] = (((src32) >> 8U) & 0xFFU); 2[dst8] = (((src32) >> 16U) & 0xFFU); 3[dst8] = (((src32) >> 24U) & 0xFFU)
 
 // Forward declaration
+#if defined(STM32H7) || defined(STM32F4)
 void can_send(CANPacket_t *to_push, uint8_t bus_number, bool skip_tx_hook);
+#endif
 
 static bool tesla_external_panda = false;
 static bool tesla_hw1 = false;
@@ -101,7 +103,9 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
         WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
         WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
         to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
         can_send(&to_send, 1, true);
+#endif
     }
     
     if (addr == 0x118) { // DI_torque2
@@ -119,7 +123,9 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
         WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
         WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
         to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
         can_send(&to_send, 1, true);
+#endif
     }
   }
 
@@ -147,7 +153,9 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
         uint32_t RDHR = GET_BYTES_48(to_fwd);
         WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
         WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+#if defined(STM32H7) || defined(STM32F4)
         can_send(&to_send, 0, true);
+#endif
     }
   }
 }
