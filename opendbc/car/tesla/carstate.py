@@ -267,7 +267,8 @@ class CarState(CarStateBase):
         party_messages.append(("EPAS_sysStatus", 25))
 
       # Allow missing AP messages for HW1/Pre-AP to avoid CAN Error if AP is offline/missing
-      if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      # Also consolidate for HW1 because Pre-AP often fingerprints as HW1
+      if CP.carFingerprint in (CAR.TESLA_MODEL_S_PREAP, CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
         # Force AP parsers to listen on Bus 0 (Party) where we know traffic exists (ESP_B)
         # Consolidate all into one parser to ensure consistency and avoid timeouts
         all_messages = chassis_messages + pt_messages + party_messages + [
