@@ -257,6 +257,7 @@ class CarState(CarStateBase):
 
       pt_messages = [
         ("DI_torque1", 0),
+        ("ESP_B", 0), # Ensure pt parser is valid if DI_torque1 is missing
       ]
 
       party_messages = [
@@ -267,8 +268,16 @@ class CarState(CarStateBase):
 
       # Allow missing AP messages for HW1/Pre-AP to avoid CAN Error if AP is offline/missing
       if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-        ap_messages = []
+        # Force AP parsers to listen on Bus 0 (Party) where we know traffic exists (ESP_B)
+        # This prevents canError due to silent Bus 2
+        ap_bus = CANBUS.party
+        ap_messages = [
+          ("ESP_B", 0),
+          ("DAS_control", 0),
+          ("DAS_steeringControl", 0),
+        ]
       else:
+        ap_bus = CANBUS.autopilot_party
         ap_messages = [
           ("DAS_control", 0),
           ("DAS_steeringControl", 0),
@@ -276,9 +285,9 @@ class CarState(CarStateBase):
 
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
-        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_messages, CANBUS.autopilot_party),
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_messages, ap_bus),
         Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CANBUS.powertrain),
-        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, CANBUS.autopilot_powertrain),
+        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, CANBUS.autopilot_powertrain if CP.carFingerprint != CAR.TESLA_MODEL_S_PREAP else CANBUS.party),
         Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
       }
 
