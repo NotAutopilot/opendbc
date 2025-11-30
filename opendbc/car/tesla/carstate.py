@@ -263,10 +263,13 @@ class CarState(CarStateBase):
       if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
         party_messages.append(("EPAS_sysStatus", 25))
 
-      ap_messages = [
-        ("DAS_control", 25),
-        ("DAS_steeringControl", 25),
-      ]
+      if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+        ap_messages = []
+      else:
+        ap_messages = [
+          ("DAS_control", 25),
+          ("DAS_steeringControl", 25),
+        ]
 
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
