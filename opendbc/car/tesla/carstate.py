@@ -276,6 +276,10 @@ class CarState(CarStateBase):
           ("DAS_control", 0),
           ("DAS_steeringControl", 0),
         ]
+        # Comma Pedal on Bus 2 for Pre-AP
+        if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+          ap_messages.append(("GAS_SENSOR", 0))
+          ap_bus = CANBUS.autopilot_party # Bus 2
       else:
         ap_bus = CANBUS.autopilot_party
         ap_messages = [
