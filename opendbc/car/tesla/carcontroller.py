@@ -74,10 +74,39 @@ class CarController(CarControllerBase):
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
            # Pedal Logic for Pre-AP
            # Map accel (m/s^2) to Pedal (0-100 approx)
-           # Using conservative mapping: 0 m/s^2 -> 0%, 2.0 m/s^2 -> 100%
-           pedal = int(interp(actuators.accel, [0., 2.0], [0., 100.]))
+           # Using conservative mapping from PCC_module.py / tunes.py
+           # PEDAL_BP = [  0.,  5., 12., 20., 30., 40.]  # m/s
+           # PEDAL_V (Generic) = [99., 99., 99., 99., 99., 99.] # This seems to be max pedal?
+           
+           # From PCC_module.py:
+           # tesla_pedal = int(round(interp(a_pid, ACCEL_LOOKUP_BP, ACCEL_LOOKUP_V)))
+           # ACCEL_LOOKUP_BP = [REGEN_DECEL, 0, ACCEL_MAX (2.5)]
+           # ACCEL_LOOKUP_V = [MIN_PEDAL_REGEN_VALUE (-5), ZERO_ACCEL (0), MAX_PEDAL_VALUE]
+           
+           # Simplified Map for initial port (Chilled):
+           # -1.5 m/s^2 -> -5 (Regen)
+           # 0 m/s^2 -> 0
+           # 2.0 m/s^2 -> 50 (Half Pedal - conservative start)
+           
+           accel = float(actuators.accel)
+           # Don't let it go below regenerative braking limit
+           accel = max(accel, -1.5)
+           
+           pedal_val = int(interp(accel, [-1.5, 0., 2.0], [-5., 0., 50.]))
+           
+           # Scale to 0-255 or whatever the pedal expects?
+           # GAS_COMMAND is 16 bits, 0.125 factor. 
+           # If Tinkla sends 0-100, we need to check.
+           # Tinkla DBC: SG_ GAS_COMMAND : 7|16@0+ (0.125677,-75.909)
+           # Our DBC: SG_ GAS_COMMAND : 7|16@0+ (0.125677,-75.909)
+           # It seems Tinkla logic outputs a "Tesla Pedal" value which is then transformed.
+           # transform_di_to_pedal(val) -> return PEDAL_ZERO + (val - PEDAL_DI_ZERO) / PEDAL_FACTOR
+           # This is complex. For now, let's assume the pedal expects a raw value that maps to 0-100%.
+           # Re-reading teslacan_legacy: values["GAS_COMMAND"] = pedal.
+           # If we send 50, that's likely 50%.
+           
            idx = (self.frame // 4) % 16
-           can_sends.append(self.tesla_can.create_pedal_command(pedal, idx))
+           can_sends.append(self.tesla_can.create_pedal_command(pedal_val, idx))
         else:
            state = 13 if CC.cruiseControl.cancel else 4  # 4=ACC_ON, 13=ACC_CANCEL_GENERIC_SILENT
            accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))

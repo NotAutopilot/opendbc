@@ -288,6 +288,14 @@ class CarState(CarStateBase):
             ("ESP_B", 0),
           ]
           ap_bus = CANBUS.party # Bus 0 - Pedal is on Bus 0
+        
+        # HW1 with autopilot_disabled (Pre-AP emulation) or genuine HW1
+        # If it's actually a Pre-AP car masquerading as HW1, it won't have DAS messages either
+        # But we should trust the fingerprint unless forced otherwise.
+        # The user specifically mentioned their car fingerprints as HW1 but IS Pre-AP (Legacy)
+        # To handle this safely: if we detect Pre-AP signals or if the user forces it, we might need adjustments.
+        # For now, we stick to the CAR.TESLA_MODEL_S_PREAP check which the user seems to be using/forcing.
+        
       else:
         ap_bus = CANBUS.autopilot_party
         ap_messages = [
