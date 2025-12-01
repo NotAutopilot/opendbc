@@ -35,6 +35,7 @@ class CarController(CarControllerBase):
       self.packers = {CANBUS.party: CANPacker(dbc_names[Bus.party]), CANBUS.powertrain: CANPacker(dbc_names[Bus.pt])}
       
       if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+        self.packers[CANBUS.autopilot_party] = CANPacker(dbc_names[Bus.party])
         self.tesla_can = TeslaCANPreAP(self.packers)
       else:
         self.tesla_can = TeslaCANRaven(self.packers)
