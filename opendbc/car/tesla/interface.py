@@ -66,6 +66,8 @@ class CarInterface(CarInterfaceBase):
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL | TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE)),
       ]
       ret.radarUnavailable = False
+      if alpha_long:
+        ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
     ret.steerLimitTimer = 0.4
     ret.steerActuatorDelay = 0.1
