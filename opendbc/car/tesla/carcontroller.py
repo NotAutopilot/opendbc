@@ -36,7 +36,8 @@ class CarController(CarControllerBase):
       
       if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
         self.packers[CANBUS.autopilot_party] = CANPacker(dbc_names[Bus.party])
-        self.tesla_can = TeslaCANPreAP(self.packers)
+        self.pedal_packer = CANPacker("comma_pedal")
+        self.tesla_can = TeslaCANPreAP(self.packers, self.pedal_packer)
       else:
         self.tesla_can = TeslaCANRaven(self.packers)
         

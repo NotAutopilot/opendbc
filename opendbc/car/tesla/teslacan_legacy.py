@@ -58,6 +58,10 @@ class TeslaCANRaven:
 
 
 class TeslaCANPreAP(TeslaCANRaven):
+  def __init__(self, packers, pedal_packer):
+    super().__init__(packers)
+    self.pedal_packer = pedal_packer
+
   def create_pedal_command(self, pedal, idx):
     # GAS_COMMAND 0x200 (512)
     # Use CANBUS.autopilot_party (2) for Pre-AP pedal command
@@ -67,5 +71,5 @@ class TeslaCANPreAP(TeslaCANRaven):
       "COUNTER_PEDAL": idx,
     }
     
-    msg = self.packers[CANBUS.autopilot_party].make_can_msg("GAS_COMMAND", CANBUS.autopilot_party, values)
+    msg = self.pedal_packer.make_can_msg("GAS_COMMAND", CANBUS.autopilot_party, values)
     return msg

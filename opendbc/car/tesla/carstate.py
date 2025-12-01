@@ -281,7 +281,6 @@ class CarState(CarStateBase):
         if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
           # These are in comma_pedal.dbc
           pedal_messages = [
-            ("ESP_B", 0),
             ("GAS_SENSOR", 0)
           ]
           # These are in tesla_can.dbc - Pre-AP doesn't have DAS messages
