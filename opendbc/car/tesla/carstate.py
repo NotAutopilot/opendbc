@@ -287,7 +287,7 @@ class CarState(CarStateBase):
           ap_messages = [
             ("ESP_B", 0),
           ]
-          ap_bus = CANBUS.autopilot_party # Bus 2
+          ap_bus = CANBUS.party # Bus 0 - Pedal is on Bus 0
       else:
         ap_bus = CANBUS.autopilot_party
         ap_messages = [
