@@ -57,8 +57,9 @@ class CarController(CarControllerBase):
       self.apply_angle_last = apply_steer_angle_limits_vm(actuators.steeringAngleDeg, self.apply_angle_last, CS.out.vEgoRaw, CS.out.steeringAngleDeg,
                                                           lat_active, CarControllerParams, self.VM)
       if self.CP.carFingerprint in LEGACY_CARS:
-        cntr = (self.frame // 2) % 16
-        can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
+        if self.CP.carFingerprint != CAR.TESLA_MODEL_S_PREAP:
+          cntr = (self.frame // 2) % 16
+          can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
       else:
         can_sends.append(self.tesla_can.create_steering_control(self.apply_angle_last, lat_active))
 
