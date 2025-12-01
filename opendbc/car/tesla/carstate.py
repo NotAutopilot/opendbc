@@ -278,7 +278,10 @@ class CarState(CarStateBase):
         ]
         # Comma Pedal on Bus 2 for Pre-AP
         if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-          ap_messages.append(("GAS_SENSOR", 0))
+          ap_messages = [
+            ("ESP_B", 0),
+            ("GAS_SENSOR", 0)
+          ]
           ap_bus = CANBUS.autopilot_party # Bus 2
       else:
         ap_bus = CANBUS.autopilot_party
@@ -289,7 +292,7 @@ class CarState(CarStateBase):
 
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
-        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_messages, ap_bus),
+        Bus.ap_party: CANParser("comma_pedal" if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else DBC[CP.carFingerprint][Bus.party], ap_messages, ap_bus),
         Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, pt_bus),
         Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain),
         Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
