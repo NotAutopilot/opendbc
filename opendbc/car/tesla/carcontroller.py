@@ -148,7 +148,7 @@ class CarController(CarControllerBase):
       "DAS_steeringControlCounter": counter,
       "DAS_steeringControlChecksum": 0,
     }
-    dat = self.packer.make_can_msg("DAS_steeringControl", bus, values)[2]
+    dat = self.packer.make_can_msg("DAS_steeringControl", bus, values)[1]
     checksum = (0x488 & 0xFF) + ((0x488 >> 8) & 0xFF) + sum(dat)
     values["DAS_steeringControlChecksum"] = checksum & 0xFF
     return self.packer.make_can_msg("DAS_steeringControl", bus, values)
