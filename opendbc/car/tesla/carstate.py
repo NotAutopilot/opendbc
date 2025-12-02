@@ -234,7 +234,10 @@ class CarState(CarStateBase):
     # Buttons # ToDo: add Gap adjust button
 
     # Messages needed by carcontroller
-    self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      self.das_control = None
+    else:
+      self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
 
     return ret
 
@@ -302,6 +305,9 @@ class CarState(CarStateBase):
           ("DAS_control", 0),
           ("DAS_steeringControl", 0),
         ]
+
+      if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+        ap_messages = [m for m in ap_messages if m[0] not in ['DAS_control', 'DAS_steeringControl']]
 
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
