@@ -41,6 +41,7 @@ class CarState(CarStateBase):
     self.das_control = None
     self.cruise_buttons = 0
     self.prev_cruise_buttons = 0
+    self.cruiseEnabled = False
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
