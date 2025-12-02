@@ -35,12 +35,16 @@ class TeslaCAN:
     }
     return self.packer.make_can_msg("DAS_control", CANBUS.party, values)
 
-  def create_steering_allowed(self, counter):
+  def create_epas_control(self, counter, mode):
     values = {
-      "APS_eacAllow": 1,
+      "GTW_epasControlCounter": counter,
+      "GTW_epasControlType": mode,
+      "GTW_epasControlChecksum": 0,
     }
 
-    return self.packer.make_can_msg("APS_eacMonitor", CANBUS.party, values)
+    dat = self.packer.make_can_msg("GTW_epasControl", CANBUS.party, values)[1]
+    values["GTW_epasControlChecksum"] = tesla_checksum(257, self.packer.dbc.name_to_msg["GTW_epasControl"].sigs["GTW_epasControlChecksum"], dat)
+    return self.packer.make_can_msg("GTW_epasControl", CANBUS.party, values)
 
 
 def tesla_checksum(address: int, sig, d: bytearray) -> int:
