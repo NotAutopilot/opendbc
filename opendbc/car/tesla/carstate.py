@@ -269,20 +269,21 @@ class CarState(CarStateBase):
         
         if state == 2: # Pull -> Enable / Set
           be.type = ButtonType.setCruise
-          ret.cruiseState.enabled = True
+          self.cruiseEnabled = True
         elif state in (16, 4): # Up -> Res/Accel
           be.type = ButtonType.accelCruise
         elif state in (32, 8): # Down -> Decel
           be.type = ButtonType.decelCruise
         elif state == 1: # Push -> Cancel
           be.type = ButtonType.cancel
-          ret.cruiseState.enabled = False
+          self.cruiseEnabled = False
         else:
           be.type = ButtonType.unknown
         
         buttonEvents.append(be)
       
       ret.buttonEvents = buttonEvents
+      ret.cruiseState.enabled = self.cruiseEnabled and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
 
     # Messages needed by carcontroller
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
