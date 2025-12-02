@@ -62,7 +62,9 @@ class CarController(CarControllerBase):
           # Pre-AP Steering Logic - Ported from Tinkla
           # Send at 50Hz (frame % 2 == 0)
           # Tinkla uses static counter 1 and Checksum 0
-          can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CANBUS.party, 1))
+          # Modern Openpilot requires rolling counter and valid checksum for Panda safety
+          cntr = (self.frame // 2) % 16
+          can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CANBUS.party, cntr))
         else:
           cntr = (self.frame // 2) % 16
           can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
@@ -146,4 +148,7 @@ class CarController(CarControllerBase):
       "DAS_steeringControlCounter": counter,
       "DAS_steeringControlChecksum": 0,
     }
+    dat = self.packer.make_can_msg("DAS_steeringControl", bus, values)[2]
+    checksum = (0x488 & 0xFF) + ((0x488 >> 8) & 0xFF) + sum(dat)
+    values["DAS_steeringControlChecksum"] = checksum & 0xFF
     return self.packer.make_can_msg("DAS_steeringControl", bus, values)
