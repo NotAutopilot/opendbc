@@ -213,6 +213,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     brake_pressed = (((msg->data[0] & 0x0CU) >> 2) != 1U);
   }
 
+  // Pre-AP Brake Check
+  if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x20aU)) {
+    brake_pressed = (((msg->data[0] & 0x0CU) >> 2) != 1U);
+  }
+
   // Cruise
   if (((tesla_external_panda) && (msg->bus == 0U) && (msg->addr == 0x256U)) ||
      ((!tesla_external_panda) && (msg->bus == chassis_bus) && (msg->addr == 0x368U))) {
@@ -228,6 +233,12 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
         pcm_cruise_check(cruise_engaged);
       }
    }
+
+  // Pre-AP Cruise (using GTW_carState)
+  if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x318U)) {
+    // GTW_carState signals if doors are open or car is off
+    // We might need this later for door checks
+  }
 
   // Pre-AP Stalk Logic
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x45U)) {
