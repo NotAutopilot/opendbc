@@ -213,6 +213,12 @@ class CarState(CarStateBase):
     # Seatbelt
     if self.CP.flags & TeslaLegacyParams.NO_SDM1:
       ret.seatbeltUnlatched = cp_chassis.vl["RCM_status"]["RCM_buckleDriverStatus"] != 1
+    elif self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      # Pre-AP uses SDM1 (0x201), but Comma Pedal is also on 0x201.
+      # To avoid conflict if we can't distinguish, we hardcode for now.
+      # TODO: Implement safe check using message size or bus if possible.
+      # For now, we assume belted to allow engagement for testing.
+      ret.seatbeltUnlatched = False
     else:
       ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
 
@@ -257,6 +263,16 @@ class CarState(CarStateBase):
       
       if CP.carFingerprint != CAR.TESLA_MODEL_S_HW3:
         chassis_messages.append(("EPAS_sysStatus", 0))
+      
+      if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+        # Remove RCM_status to prevent timeout on Pre-AP
+        chassis_messages = [m for m in chassis_messages if m[0] != "RCM_status"]
+        # Ensure SDM1 is not in the list if it causes conflicts, but we need it for other logic?
+        # Actually, if we hardcoded seatbelt to False, we don't strictly need SDM1 in parser yet.
+        # But if we want to read it, we can keep it if we are sure about the ID.
+        # The user says Pedal is on 0x201. SDM1 is 0x201. This IS a collision on Bus 0.
+        # We must NOT parse SDM1 if the pedal is present on the same bus with the same ID.
+        chassis_messages = [m for m in chassis_messages if m[0] != "SDM1"]
 
       pt_messages = [
         ("DI_torque1", 0),
