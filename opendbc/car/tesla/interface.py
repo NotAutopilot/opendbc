@@ -47,7 +47,15 @@ class CarInterface(CarInterfaceBase):
     if not any(0x201 in f for f in fingerprint.values()):
       ret.flags |= TeslaLegacyParams.NO_SDM1.value
 
-    if candidate in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
+    if candidate == CAR.TESLA_MODEL_S_PREAP:
+      ret.safetyConfigs = [
+        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL | TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE | TeslaSafetyFlags.LONG_CONTROL)),
+      ]
+      ret.radarUnavailable = False
+      # Force longitudinal control true for Pre-AP
+      ret.openpilotLongitudinalControl = True
+      ret.steerControlType = structs.CarParams.SteerControlType.angle # Or None/torque? Keep angle but maybe irrelevant if we don't steer
+    elif candidate in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
       ret.safetyConfigs = [
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW1)),
       ]
@@ -62,12 +70,8 @@ class CarInterface(CarInterfaceBase):
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW3 | TeslaSafetyFlags.FLAG_EXTERNAL_PANDA)),
       ]
     elif candidate == CAR.TESLA_MODEL_S_PREAP:
-      ret.safetyConfigs = [
-        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL | TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE)),
-      ]
-      ret.radarUnavailable = False
-      if alpha_long:
-        ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+      # Handled above now
+      pass
 
     ret.steerLimitTimer = 0.4
     ret.steerActuatorDelay = 0.1

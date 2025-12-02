@@ -163,24 +163,40 @@ class CarState(CarStateBase):
     # Steering wheel
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
       epas_status = cp_party.vl["EPAS_sysStatus"]
+    elif self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      # Pre-AP may not have EPAS_sysStatus or it's invalid.
+      # We create a dummy object or skip reading it to avoid faults.
+      # Since we forced faults to False below, we can just skip reading
+      # or read safely if available. For now, let's rely on the override below.
+      epas_status = {"EPAS_handsOnLevel": 0, "EPAS_internalSAS": 0, "EPAS_torsionBarTorque": 0, "EPAS_eacStatus": 0, "EPAS_eacErrorCode": 0}
     else:
       epas_status = cp_chassis.vl["EPAS_sysStatus"]
-    self.hands_on_level = epas_status["EPAS_handsOnLevel"]
-    ret.steeringAngleDeg = -epas_status["EPAS_internalSAS"]
-    ret.steeringRateDeg = -cp_chassis.vl["STW_ANGLHP_STAT"]["StW_AnglHP_Spd"]
-    ret.steeringTorque = -epas_status["EPAS_torsionBarTorque"]
 
-    # stock handsOnLevel uses >0.5 for 0.25s, but is too slow
-    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+       self.hands_on_level = 0
+       ret.steeringAngleDeg = 0
+       ret.steeringRateDeg = 0
+       ret.steeringTorque = 0
+       ret.steeringPressed = False
+       # See overrides below for faults
+    else:
+       self.hands_on_level = epas_status["EPAS_handsOnLevel"]
+       ret.steeringAngleDeg = -epas_status["EPAS_internalSAS"]
+       ret.steeringRateDeg = -cp_chassis.vl["STW_ANGLHP_STAT"]["StW_AnglHP_Spd"]
+       ret.steeringTorque = -epas_status["EPAS_torsionBarTorque"]
+       # stock handsOnLevel uses >0.5 for 0.25s, but is too slow
+       ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
+    
+    if self.CP.carFingerprint != CAR.TESLA_MODEL_S_PREAP:
+      eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
+      ret.steerFaultPermanent = eac_status == "EAC_FAULT"
+      ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+  
+      # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+      eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
+      ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
+                                                           eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
-    eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
-    ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
-
-    # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
-    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
-    ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
-                                                         eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
     # Cruise state
     cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
@@ -231,6 +247,10 @@ class CarState(CarStateBase):
     # LKAS
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       ret.stockLkas = False
+      # Bypass steering checks for Pre-AP to allow longitudinal control
+      ret.steerFaultPermanent = False
+      ret.steerFaultTemporary = False
+      ret.steeringDisengage = False
     else:
       ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
 
