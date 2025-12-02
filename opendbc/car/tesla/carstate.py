@@ -286,23 +286,13 @@ class CarState(CarStateBase):
         # RES_ACCEL (Up) = 16 (1st), 4 (2nd)
         # DECEL_SET (Down) = 32 (1st), 8 (2nd)
         
-        if state == 2: # Pull -> Enable
-          be.type = ButtonType.accelCruise
+        if state == 2: # Pull -> Enable / Set
+          be.type = ButtonType.setCruise
           ret.cruiseState.enabled = True
-        elif state in (16, 4): # Up -> Set Speed (Accel)
-          if self.cruise_enabled_prev:
-            be.type = ButtonType.accelCruise
-          else:
-             # If not enabled, Tinkla might use Up to Resume/Enable? 
-             # "RES_ACCEL" name implies Resume.
-             # But user said "Up/Down: Should ONLY adjust speed... NOT change the enabled state"
-             # So I stick to unknown/ignore if not enabled, or just set type but don't enable.
-             be.type = ButtonType.unknown
-        elif state in (32, 8): # Down -> Set Speed (Decel)
-          if self.cruise_enabled_prev:
-            be.type = ButtonType.decelCruise
-          else:
-            be.type = ButtonType.unknown
+        elif state in (16, 4): # Up -> Res/Accel
+          be.type = ButtonType.accelCruise
+        elif state in (32, 8): # Down -> Decel
+          be.type = ButtonType.decelCruise
         elif state == 1: # Push -> Cancel
           be.type = ButtonType.cancel
           ret.cruiseState.enabled = False
