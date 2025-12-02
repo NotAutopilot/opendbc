@@ -59,10 +59,10 @@ class CarController(CarControllerBase):
                                                           lat_active, CarControllerParams, self.VM)
       if self.CP.carFingerprint in LEGACY_CARS:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-          # Pre-AP Steering Logic
-          # Send at 50Hz (frame % 2 == 0) which matches Tinkla logic
-          cntr = (self.frame // 2) % 16
-          can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
+          # Pre-AP Steering Logic - Ported from Tinkla
+          # Send at 50Hz (frame % 2 == 0)
+          # Tinkla uses static counter 1 and Checksum 0
+          can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CAN_EPAS[self.CP.carFingerprint], 1))
         else:
           cntr = (self.frame // 2) % 16
           can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
@@ -74,6 +74,16 @@ class CarController(CarControllerBase):
       # Tinkla sends this.
       cntr = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(cntr))
+
+  def create_tinkla_steering_control(self, angle, enabled, ldw, bus, counter):
+    values = {
+      "DAS_steeringAngleRequest": -angle,
+      "DAS_steeringHapticRequest": ldw,
+      "DAS_steeringControlType": 1 if enabled else 0, #0-NONE, 1-ANGLE, 2-LKA, 3-Emergency LKA
+      "DAS_steeringControlCounter": counter,
+      "DAS_steeringControlChecksum": 0,
+    }
+    return self.packer.make_can_msg("DAS_steeringControl", bus, values)
 
     # Longitudinal control
     if self.CP.openpilotLongitudinalControl:

@@ -207,12 +207,21 @@ class CarState(CarStateBase):
     cruise_enabled = cruise_state in ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
 
     # Match panda safety cruise engaged logic
-    ret.cruiseState.enabled = cruise_enabled
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      ret.cruiseState.available = True # Always available on Pre-AP
+      # Enabled logic handled by button events below
+    else:
+      ret.cruiseState.enabled = cruise_enabled
+      ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+
     if speed_units == "KPH":
       ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
     elif speed_units == "MPH":
       ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
-    ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+    
+    if self.CP.carFingerprint != CAR.TESLA_MODEL_S_PREAP:
+      ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+    
     ret.cruiseState.standstill = False  # This needs to be false, since we can resume from stop without sending anything special
     ret.standstill = cruise_state == "STANDSTILL"
     ret.accFaulted = cruise_state == "FAULT"
@@ -271,12 +280,22 @@ class CarState(CarStateBase):
         
         state = self.cruise_buttons if be.pressed else self.prev_cruise_buttons
         
-        if state in (16, 4, 2): # Up or Pull (Main) -> Accel/Resume
+        if state == 32: # Pull -> Enable
           be.type = ButtonType.accelCruise
-        elif state in (32, 8): # Down -> Decel/Set
-          be.type = ButtonType.decelCruise
-        elif state == 1: # Push -> Cancel
+          ret.cruiseState.enabled = True
+        elif state == 16: # Up -> Set Speed (Accel) only
+          if self.cruise_enabled_prev:
+            be.type = ButtonType.accelCruise
+          else:
+            be.type = ButtonType.unknown
+        elif state == 8: # Down -> Set Speed (Decel) only
+          if self.cruise_enabled_prev:
+            be.type = ButtonType.decelCruise
+          else:
+            be.type = ButtonType.unknown
+        elif state == 4: # Push -> Cancel
           be.type = ButtonType.cancel
+          ret.cruiseState.enabled = False
         else:
           be.type = ButtonType.unknown
         
@@ -290,6 +309,7 @@ class CarState(CarStateBase):
     else:
       self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
 
+    self.cruise_enabled_prev = ret.cruiseState.enabled
     return ret
 
   @staticmethod
