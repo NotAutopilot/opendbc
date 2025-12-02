@@ -66,16 +66,17 @@ class CarController(CarControllerBase):
           cntr = (self.frame // 2) % 16
           can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CANBUS.party, cntr))
           
-          # Pre-AP EPAS Control to unlock the rack
-          # Send at 50Hz alongside steering command
-          can_sends.append(self.tesla_can.create_epas_control(cntr, 1)) # Mode 1 = WITH_ANGLE
         else:
           cntr = (self.frame // 2) % 16
           can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
       else:
         can_sends.append(self.tesla_can.create_steering_control(self.apply_angle_last, lat_active))
 
-    if self.frame % 10 == 0 and self.CP.carFingerprint not in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+        if self.frame % 2 == 0:
+            cntr = (self.frame // 2) % 16
+            can_sends.append(self.tesla_can.create_epas_control(cntr, 1)) # Mode 1 = WITH_ANGLE
+    elif self.frame % 10 == 0 and self.CP.carFingerprint not in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
       # Pre-AP might need this if it has EPAS, let's include it for now if not strictly forbidden
       # Tinkla sends this.
       cntr = (self.frame // 10) % 16
