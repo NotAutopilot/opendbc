@@ -224,8 +224,20 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
                             (cruise_state == 6) ||  // PRE_FAULT
                             (cruise_state == 7);    // PRE_CANCEL
       vehicle_moving = cruise_state != 3; // STANDSTILL
-      pcm_cruise_check(cruise_engaged);
+      if (!tesla_preap) {
+        pcm_cruise_check(cruise_engaged);
+      }
    }
+
+  // Pre-AP Stalk Logic
+  if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x45U)) {
+    int ap_lever_position = msg->data[0] & 0x3FU;
+    if (ap_lever_position == 2) { // Pull forward (Enable)
+      pcm_cruise_check(true);
+    } else if (ap_lever_position == 1) { // Push back (Disable)
+      pcm_cruise_check(false);
+    }
+  }
 
   if (msg->bus == 2U) {
     // DAS_control
