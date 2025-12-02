@@ -75,16 +75,6 @@ class CarController(CarControllerBase):
       cntr = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(cntr))
 
-  def create_tinkla_steering_control(self, angle, enabled, ldw, bus, counter):
-    values = {
-      "DAS_steeringAngleRequest": -angle,
-      "DAS_steeringHapticRequest": ldw,
-      "DAS_steeringControlType": 1 if enabled else 0, #0-NONE, 1-ANGLE, 2-LKA, 3-Emergency LKA
-      "DAS_steeringControlCounter": counter,
-      "DAS_steeringControlChecksum": 0,
-    }
-    return self.packer.make_can_msg("DAS_steeringControl", bus, values)
-
     # Longitudinal control
     if self.CP.openpilotLongitudinalControl:
       if self.frame % 4 == 0:
@@ -147,3 +137,13 @@ class CarController(CarControllerBase):
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def create_tinkla_steering_control(self, angle, enabled, ldw, bus, counter):
+    values = {
+      "DAS_steeringAngleRequest": -angle,
+      "DAS_steeringHapticRequest": ldw,
+      "DAS_steeringControlType": 1 if enabled else 0, #0-NONE, 1-ANGLE, 2-LKA, 3-Emergency LKA
+      "DAS_steeringControlCounter": counter,
+      "DAS_steeringControlChecksum": 0,
+    }
+    return self.packer.make_can_msg("DAS_steeringControl", bus, values)
