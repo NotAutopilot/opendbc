@@ -114,9 +114,9 @@ class CAR(Platforms):
     [CarDocs("Tesla Model S (Pre-AP) 2012-14", "All", car_parts=CarParts.common([CarHarness.tesla_model_s_hw1]))],
     CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
     {
-      Bus.chassis: 'tesla_can',
-      Bus.party: 'tesla_can',
-      Bus.pt: 'tesla_can',
+      Bus.chassis: 'tesla_preap',
+      Bus.party: 'tesla_preap',
+      Bus.pt: 'tesla_preap',
       Bus.radar: 'tesla_radar_bosch_generated',
     },
   )
