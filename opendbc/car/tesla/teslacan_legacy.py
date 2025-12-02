@@ -73,3 +73,15 @@ class TeslaCANPreAP(TeslaCANRaven):
     
     msg = self.pedal_packer.make_can_msg("GAS_COMMAND", CANBUS.party, values)
     return msg
+
+  def create_epas_control(self, counter, mode):
+    values = {
+      "GTW_epasControlCounter": counter,
+      "GTW_epasControlType": mode,
+      "GTW_epasControlChecksum": 0,
+    }
+
+    data = self.packers[CANBUS.party].make_can_msg("GTW_epasControl", CANBUS.party, values)[1]
+    # Checksum is calculated using ID 0x101 (257 decimal)
+    values["GTW_epasControlChecksum"] = self.checksum(0x101, data)
+    return self.packers[CANBUS.party].make_can_msg("GTW_epasControl", CANBUS.party, values)
