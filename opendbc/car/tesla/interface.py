@@ -1,4 +1,4 @@
-from opendbc.car import get_safety_config, structs
+from opendbc.car import get_safety_config, structs, STD_CARGO_KG
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
@@ -54,7 +54,14 @@ class CarInterface(CarInterfaceBase):
       ret.radarUnavailable = False
       # Force longitudinal control true for Pre-AP
       ret.openpilotLongitudinalControl = True
-      ret.steerControlType = structs.CarParams.SteerControlType.angle # Or None/torque? Keep angle but maybe irrelevant if we don't steer
+      ret.steerControlType = structs.CarParams.SteerControlType.angle
+      ret.pcmCruise = False # We control engagement manually
+      
+      # Set physical params explicitly to avoid 0.0 ratio error
+      ret.mass = 2100. + STD_CARGO_KG
+      ret.wheelbase = 2.959
+      ret.centerToFront = ret.wheelbase * 0.5
+      ret.steerRatio = 15.0
     elif candidate in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
       ret.safetyConfigs = [
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW1)),

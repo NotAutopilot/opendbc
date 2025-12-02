@@ -39,6 +39,8 @@ class CarState(CarStateBase):
 
     self.hands_on_level = 0
     self.das_control = None
+    self.cruise_buttons = 0
+    self.prev_cruise_buttons = 0
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -258,6 +260,29 @@ class CarState(CarStateBase):
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
 
     # Buttons # ToDo: add Gap adjust button
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      self.prev_cruise_buttons = self.cruise_buttons
+      self.cruise_buttons = cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"]
+      
+      buttonEvents = []
+      if self.cruise_buttons != self.prev_cruise_buttons:
+        be = structs.CarState.ButtonEvent()
+        be.pressed = self.cruise_buttons != 0
+        
+        state = self.cruise_buttons if be.pressed else self.prev_cruise_buttons
+        
+        if state in (16, 4, 2): # Up or Pull (Main) -> Accel/Resume
+          be.type = ButtonType.accelCruise
+        elif state in (32, 8): # Down -> Decel/Set
+          be.type = ButtonType.decelCruise
+        elif state == 1: # Push -> Cancel
+          be.type = ButtonType.cancel
+        else:
+          be.type = ButtonType.unknown
+        
+        buttonEvents.append(be)
+      
+      ret.buttonEvents = buttonEvents
 
     # Messages needed by carcontroller
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
@@ -293,6 +318,8 @@ class CarState(CarStateBase):
         # The user says Pedal is on 0x201. SDM1 is 0x201. This IS a collision on Bus 0.
         # We must NOT parse SDM1 if the pedal is present on the same bus with the same ID.
         chassis_messages = [m for m in chassis_messages if m[0] != "SDM1"]
+        # Add STW_ACTN_RQ for buttons
+        chassis_messages.append(("STW_ACTN_RQ", 0))
 
       pt_messages = [
         ("DI_torque1", 0),
