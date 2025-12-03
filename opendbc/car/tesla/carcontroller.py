@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus
@@ -21,6 +22,18 @@ try:
 except ImportError:
   TINKLA_AVAILABLE = False
   tinkla_conf = None
+
+# Import CruiseButtons for cruise spam fallback
+try:
+  from opendbc.car.tesla.values import CruiseButtons
+  CRUISE_BUTTONS_AVAILABLE = True
+except ImportError:
+  CRUISE_BUTTONS_AVAILABLE = False
+
+# Cruise spam constants (from Tinkla ACC_module.py)
+MIN_CRUISE_SPEED_MS = 17.1 * 0.44704  # 17.1 MPH in m/s (~7.6 m/s)
+CRUISE_BUTTON_COOLDOWN_MS = 400  # Don't spam faster than this (Tinkla uses 400ms)
+HUMAN_ACTION_COOLDOWN_MS = 3000  # Don't override human input for 3 seconds
 
 
 def get_safety_CP():
@@ -47,6 +60,14 @@ class CarController(CarControllerBase):
     self.pedal_steady = 0.0       # Hysteresis state (smoothed pedal value)
     self.pedal_for_zero_torque = 0.0  # Learned zero-torque pedal position
     self.prev_v_ego = 0.0         # Previous vehicle speed
+    
+    # ============================================
+    # Cruise Spam State (Tinkla ACC_module port)
+    # For Pre-AP cars without pedal that have stock cruise
+    # ============================================
+    self.last_cruise_button_time_ms = 0  # Timestamp of last button press
+    self.human_cruise_action_time_ms = 0  # Timestamp of last human stalk input
+    self.prev_cruise_buttons = 0  # Previous stalk state for edge detection
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
@@ -108,28 +129,48 @@ class CarController(CarControllerBase):
       if self.frame % 4 == 0:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
            # ==============================================
-           # Comma Pedal Control (Tinkla PCC_module port)
+           # Pre-AP Longitudinal Control (Tinkla port)
            # ==============================================
-           # Pre-AP has no stock ACC - pedal is required for longitudinal
+           # Priority order:
+           # 1. Comma Pedal (if available and configured)
+           # 2. Cruise Button Spam (fallback for cars with stock cruise)
            #
            # Dual-Mode Engagement:
            # - Single pull = Lateral only (enableJustCC) -> Send idle pedal
-           # - Double pull = Full control (enableLongControl) -> Active pedal control
+           # - Double pull = Full control (enableLongControl) -> Active control
            
            long_active = CC.longActive and getattr(CS, 'enableLongControl', True)
            idx = (self.frame // 4) % 16
+           use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
            
-           if long_active and TINKLA_AVAILABLE and tinkla_conf.use_pedal:
+           if long_active and use_pedal:
+             # ============================================
+             # Mode 1: Comma Pedal Control
+             # ============================================
              pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
              can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx))
+             
+           elif long_active and not use_pedal:
+             # ============================================
+             # Mode 2: Cruise Button Spam (Tinkla ACC_module)
+             # ============================================
+             # This is a fallback for Pre-AP cars that have stock cruise
+             # but no Comma Pedal installed. Works above 17 MPH.
+             cruise_msg = self._calc_cruise_button(CS, actuators)
+             if cruise_msg is not None:
+               can_sends.append(cruise_msg)
+               
            else:
-             # Steering only mode OR pedal not configured
-             # Send idle/zero to keep pedal alive but not accelerating
-             if TINKLA_AVAILABLE and tinkla_conf.pedal_calibrated:
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
-             else:
-               idle_pedal = 0.0
-             can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx))
+             # ============================================
+             # Mode 3: Steering Only (Single Pull)
+             # ============================================
+             # Send idle pedal to keep it alive but not accelerating
+             if use_pedal:
+               if tinkla_conf.pedal_calibrated:
+                 idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+               else:
+                 idle_pedal = 0.0
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx))
              # Reset state when not active
              self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
@@ -292,3 +333,112 @@ class CarController(CarControllerBase):
       self.pedal_steady = pedal + PEDAL_HYST_GAP
     
     return self.pedal_steady
+
+  # ============================================
+  # Cruise Button Spam (Ported from Tinkla ACC_module.py)
+  # Fallback for Pre-AP cars without Comma Pedal
+  # ============================================
+  
+  def _current_time_ms(self) -> int:
+    """Get current time in milliseconds."""
+    return int(round(time.time() * 1000))
+  
+  def _calc_cruise_button(self, CS, actuators) -> tuple:
+    """
+    Calculate which cruise button to press to match target speed.
+    
+    Ported from Tinkla ACC_module.py _calc_button() method.
+    
+    This is a fallback for Pre-AP cars that:
+    - Have stock cruise control (some 2012-2014 do)
+    - Don't have a Comma Pedal installed
+    
+    Limitations:
+    - Only works above MIN_CRUISE_SPEED_MS (~17 MPH)
+    - Cannot control below that speed
+    - Less precise than pedal control
+    
+    Args:
+      CS: CarState
+      actuators: Actuators with target speed/accel
+      
+    Returns:
+      CAN message to send, or None if no button press needed
+    """
+    if not CRUISE_BUTTONS_AVAILABLE:
+      return None
+    
+    current_time_ms = self._current_time_ms()
+    v_ego = CS.out.vEgo
+    
+    # Track human stalk actions (don't override for 3 seconds)
+    cruise_buttons = getattr(CS, 'cruise_buttons', 0)
+    if cruise_buttons != self.prev_cruise_buttons and cruise_buttons != 0:
+      self.human_cruise_action_time_ms = current_time_ms
+    self.prev_cruise_buttons = cruise_buttons
+    
+    # Don't spam if human recently used stalk
+    if current_time_ms - self.human_cruise_action_time_ms < HUMAN_ACTION_COOLDOWN_MS:
+      return None
+    
+    # Don't spam faster than cooldown allows
+    if current_time_ms - self.last_cruise_button_time_ms < CRUISE_BUTTON_COOLDOWN_MS:
+      return None
+    
+    # Can't control below minimum cruise speed
+    if v_ego < MIN_CRUISE_SPEED_MS:
+      return None
+    
+    # Get current cruise set speed (in m/s)
+    v_cruise = getattr(CS.out, 'cruiseState', None)
+    if v_cruise is None or not hasattr(v_cruise, 'speed'):
+      return None
+    v_cruise_ms = v_cruise.speed
+    
+    # Calculate target speed from acceleration request
+    # Simple integration: v_target = v_ego + accel * lookahead_time
+    lookahead_time = 2.0  # seconds
+    v_target = v_ego + actuators.accel * lookahead_time
+    v_target = max(v_target, MIN_CRUISE_SPEED_MS)  # Don't go below min
+    
+    # Speed offset in m/s
+    speed_offset = v_target - v_cruise_ms
+    
+    # Determine button based on Tinkla thresholds
+    # From ACC_module.py: uses half_press_kph and full_press_kph
+    # Metric: 1 kph half, 5 kph full
+    # Imperial: 1.6 kph half, 8 kph full
+    half_press_ms = 1.0 / 3.6  # ~0.28 m/s (1 kph)
+    full_press_ms = 5.0 / 3.6  # ~1.39 m/s (5 kph)
+    
+    button_to_press = None
+    
+    # Need to slow down significantly
+    if speed_offset < -2 * full_press_ms:
+      button_to_press = CruiseButtons.CANCEL
+    elif speed_offset < -0.6 * full_press_ms:
+      button_to_press = CruiseButtons.DECEL_2ND  # 5 kph down
+    elif speed_offset < -0.9 * half_press_ms:
+      button_to_press = CruiseButtons.DECEL_SET  # 1 kph down
+    # Need to speed up
+    elif speed_offset >= full_press_ms:
+      button_to_press = CruiseButtons.RES_ACCEL_2ND  # 5 kph up
+    elif speed_offset >= half_press_ms:
+      button_to_press = CruiseButtons.RES_ACCEL  # 1 kph up
+    
+    if button_to_press is None:
+      return None
+    
+    # Generate the stalk message
+    self.last_cruise_button_time_ms = current_time_ms
+    
+    # Create STW_ACTN_RQ message with the button press
+    # This requires a counter from the original message
+    msg_stw = getattr(CS, 'msg_stw_actn_req', None)
+    if msg_stw is None:
+      # Fallback: construct basic message
+      cntr = (self.frame // 4) % 16
+      return self.tesla_can.create_action_request(button_to_press, CANBUS.party, cntr)
+    
+    cntr = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
+    return self.tesla_can.create_action_request(button_to_press, CANBUS.party, cntr, msg_stw)

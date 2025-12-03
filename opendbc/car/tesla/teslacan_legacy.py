@@ -91,3 +91,75 @@ class TeslaCANPreAP(TeslaCANRaven):
     # Checksum is calculated using ID 0x214 (532 decimal)
     values["EPB_epasControlChecksum"] = self.checksum(0x214, data)
     return self.packers[CANBUS.party].make_can_msg("EPB_epasControl", CANBUS.party, values)
+
+  def create_action_request(self, button_to_press, bus, counter, msg_stw=None):
+    """
+    Create STW_ACTN_RQ message to simulate cruise stalk button press.
+    
+    Ported from Tinkla teslacan.py create_action_request().
+    Used for cruise button spam fallback when no pedal is installed.
+    
+    Args:
+      button_to_press: CruiseButtons value (RES_ACCEL, DECEL_SET, etc.)
+      bus: CAN bus number
+      counter: Message counter (0-15)
+      msg_stw: Original STW_ACTN_RQ message dict (optional, for preserving other signals)
+      
+    Returns:
+      CAN message tuple
+    """
+    # STW_ACTN_RQ (0x45 / 69)
+    # From DBC: VAL_ 69 SpdCtrlLvr_Stat 32 "DN_1ST" 16 "UP_1ST" 8 "DN_2ND" 4 "UP_2ND" 2 "RWD" 1 "FWD" 0 "IDLE"
+    
+    if msg_stw is not None:
+      # Preserve original message values, just change the button
+      values = {
+        "MC_STW_ACTN_RQ": counter,
+        "CRC_STW_ACTN_RQ": 0,  # Will be recalculated
+        "SpdCtrlLvr_Stat": button_to_press,
+        "VSL_Enbl_Stat": msg_stw.get("VSL_Enbl_Stat", 0),
+        "DTR_Dist_Rq": msg_stw.get("DTR_Dist_Rq", 0),
+        "TurnIndLvr_Stat": msg_stw.get("TurnIndLvr_Stat", 0),
+        "HiBmLvr_Stat": msg_stw.get("HiBmLvr_Stat", 0),
+        "WprWashSw_Psd": msg_stw.get("WprWashSw_Psd", 0),
+        "WprWash_R_Sw_Posn_V2": msg_stw.get("WprWash_R_Sw_Posn_V2", 0),
+        "StW_Lvr_Stat": msg_stw.get("StW_Lvr_Stat", 0),
+        "StW_Cond_Flt": msg_stw.get("StW_Cond_Flt", 0),
+        "StW_Cond_Psd": msg_stw.get("StW_Cond_Psd", 0),
+        "HrnSw_Psd": msg_stw.get("HrnSw_Psd", 0),
+        "StW_Sw00_Psd": msg_stw.get("StW_Sw00_Psd", 0),
+        "StW_Sw01_Psd": msg_stw.get("StW_Sw01_Psd", 0),
+        "StW_Sw02_Psd": msg_stw.get("StW_Sw02_Psd", 0),
+        "StW_Sw03_Psd": msg_stw.get("StW_Sw03_Psd", 0),
+        "StW_Sw04_Psd": msg_stw.get("StW_Sw04_Psd", 0),
+        "StW_Sw05_Psd": msg_stw.get("StW_Sw05_Psd", 0),
+        "StW_Sw06_Psd": msg_stw.get("StW_Sw06_Psd", 0),
+      }
+    else:
+      # Minimal message with just the button press
+      values = {
+        "MC_STW_ACTN_RQ": counter,
+        "CRC_STW_ACTN_RQ": 0,
+        "SpdCtrlLvr_Stat": button_to_press,
+        "VSL_Enbl_Stat": 0,
+        "DTR_Dist_Rq": 0,
+        "TurnIndLvr_Stat": 0,
+        "HiBmLvr_Stat": 0,
+        "WprWashSw_Psd": 0,
+        "WprWash_R_Sw_Posn_V2": 0,
+        "StW_Lvr_Stat": 0,
+        "StW_Cond_Flt": 0,
+        "StW_Cond_Psd": 0,
+        "HrnSw_Psd": 0,
+        "StW_Sw00_Psd": 0,
+        "StW_Sw01_Psd": 0,
+        "StW_Sw02_Psd": 0,
+        "StW_Sw03_Psd": 0,
+        "StW_Sw04_Psd": 0,
+        "StW_Sw05_Psd": 0,
+        "StW_Sw06_Psd": 0,
+      }
+    
+    data = self.packers[CANBUS.party].make_can_msg("STW_ACTN_RQ", bus, values)[1]
+    values["CRC_STW_ACTN_RQ"] = self.checksum(0x45, data)
+    return self.packers[CANBUS.party].make_can_msg("STW_ACTN_RQ", bus, values)
