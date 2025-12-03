@@ -37,7 +37,8 @@ static int radar_epas_type = 0;
 static int radar_position = 0; 
 
 // Pre-AP Safety State
-static int tesla_gear = 0;
+static int tesla_gear = 4;  // Initialize to Drive (4) to avoid false disables on startup
+static int tesla_gear_prev = 4;  // Track previous gear for edge detection
 static bool tesla_doors_open = false;
 
 static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
@@ -238,12 +239,15 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       }
    }
 
-  // Pre-AP Gear Check
+  // Pre-AP Gear Check - Only disable on falling edge (was in D, now not in D)
+  // This prevents race conditions where controls_allowed is constantly being reset
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x118U)) {
     tesla_gear = (msg->data[1] >> 4) & 0x07;
-    if (tesla_gear != 4) { // Not Drive
+    // Only disable controls when shifting OUT of Drive, not continuously
+    if ((tesla_gear_prev == 4) && (tesla_gear != 4)) {
       controls_allowed = 0;
     }
+    tesla_gear_prev = tesla_gear;
   }
 
   // Pre-AP Door Check (using GTW_carState)
@@ -429,6 +433,13 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_stock_lkas_prev = false;
   chassis_bus = 0U;
   di_torque1_msg = 0x106U;
+  
+  // Pre-AP state initialization
+  tesla_gear = 4;  // Assume Drive initially
+  tesla_gear_prev = 4;
+  tesla_doors_open = false;
+  pedal_can = -1;
+  pedal_pressed = 0;
 
   // Set DAS control message address
   das_control_msg = tesla_external_panda ? 0x2bfU : 0x2b9U;
@@ -497,6 +508,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage (50Hz)
     {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state (10Hz)
     {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState (10Hz)
+    {.msg = {{0x45, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // STW_ACTN_RQ - Stalk (10Hz)
   };
 
   // Determine configuration based on hardware type
