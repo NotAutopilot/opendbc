@@ -7,7 +7,20 @@ from opendbc.car.tesla.teslacan import TeslaCAN
 from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven, TeslaCANPreAP
 from opendbc.car.tesla.values import CarControllerParams, CANBUS, LEGACY_CARS, CAR
 from opendbc.car.vehicle_model import VehicleModel
-from numpy import interp
+from numpy import interp, clip
+
+# Import Tinkla config and pedal constants
+try:
+  from opendbc.car.tesla.tinkla_conf import (
+    tinkla_conf,
+    PEDAL_DI_MIN, PEDAL_DI_ZERO,
+    PEDAL_BP, PEDAL_V_DEFAULT,
+    ACCEL_MAX, PEDAL_HYST_GAP,
+  )
+  TINKLA_AVAILABLE = True
+except ImportError:
+  TINKLA_AVAILABLE = False
+  tinkla_conf = None
 
 
 def get_safety_CP():
@@ -26,6 +39,14 @@ class CarController(CarControllerBase):
 
     # Vehicle model used for lateral limiting
     self.VM = VehicleModel(get_safety_CP())
+    
+    # ============================================
+    # Pedal Control State (Tinkla PCC_module port)
+    # ============================================
+    self.prev_pedal_di = 0.0      # Previous pedal value in DI units (for rate limiting)
+    self.pedal_steady = 0.0       # Hysteresis state (smoothed pedal value)
+    self.pedal_for_zero_torque = 0.0  # Learned zero-torque pedal position
+    self.prev_v_ego = 0.0         # Previous vehicle speed
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
@@ -87,54 +108,31 @@ class CarController(CarControllerBase):
       if self.frame % 4 == 0:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
            # ==============================================
-           # Dual-Mode Engagement for Pre-AP (Tinkla-style)
+           # Comma Pedal Control (Tinkla PCC_module port)
            # ==============================================
-           # Single pull = Lateral only (enableJustCC) -> No pedal commands
-           # Double pull = Full control (enableLongControl) -> Pedal commands active
+           # Pre-AP has no stock ACC - pedal is required for longitudinal
            #
-           # Check if longitudinal is enabled via double-pull
-           long_active = CC.longActive and getattr(CS, 'enableLongControl', True)
+           # Dual-Mode Engagement:
+           # - Single pull = Lateral only (enableJustCC) -> Send idle pedal
+           # - Double pull = Full control (enableLongControl) -> Active pedal control
            
-           if long_active:
-             # Pedal Logic for Pre-AP
-             # Map accel (m/s^2) to Pedal (0-100 approx)
-             # Using conservative mapping from PCC_module.py / tunes.py
-             # PEDAL_BP = [  0.,  5., 12., 20., 30., 40.]  # m/s
-             # PEDAL_V (Generic) = [99., 99., 99., 99., 99., 99.] # This seems to be max pedal?
-             
-             # From PCC_module.py:
-             # tesla_pedal = int(round(interp(a_pid, ACCEL_LOOKUP_BP, ACCEL_LOOKUP_V)))
-             # ACCEL_LOOKUP_BP = [REGEN_DECEL, 0, ACCEL_MAX (2.5)]
-             # ACCEL_LOOKUP_V = [MIN_PEDAL_REGEN_VALUE (-5), ZERO_ACCEL (0), MAX_PEDAL_VALUE]
-             
-             # Simplified Map for initial port (Chilled):
-             # -1.5 m/s^2 -> -5 (Regen)
-             # 0 m/s^2 -> 0
-             # 2.0 m/s^2 -> 50 (Half Pedal - conservative start)
-             
-             accel = float(actuators.accel)
-             # Don't let it go below regenerative braking limit
-             accel = max(accel, -1.5)
-             
-             pedal_val = int(interp(accel, [-1.5, 0., 2.0], [-5., 0., 50.]))
-             
-             # Scale to 0-255 or whatever the pedal expects?
-             # GAS_COMMAND is 16 bits, 0.125 factor. 
-             # If Tinkla sends 0-100, we need to check.
-             # Tinkla DBC: SG_ GAS_COMMAND : 7|16@0+ (0.125677,-75.909)
-             # Our DBC: SG_ GAS_COMMAND : 7|16@0+ (0.125677,-75.909)
-             # It seems Tinkla logic outputs a "Tesla Pedal" value which is then transformed.
-             # transform_di_to_pedal(val) -> return PEDAL_ZERO + (val - PEDAL_DI_ZERO) / PEDAL_FACTOR
-             # This is complex. For now, let's assume the pedal expects a raw value that maps to 0-100%.
-             # Re-reading teslacan_legacy: values["GAS_COMMAND"] = pedal.
-             # If we send 50, that's likely 50%.
-             
-             idx = (self.frame // 4) % 16
-             can_sends.append(self.tesla_can.create_pedal_command(pedal_val, idx))
+           long_active = CC.longActive and getattr(CS, 'enableLongControl', True)
+           idx = (self.frame // 4) % 16
+           
+           if long_active and TINKLA_AVAILABLE and tinkla_conf.use_pedal:
+             pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+             can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx))
            else:
-             # Steering only mode (single pull) - send zero pedal to keep pedal alive but not accelerating
-             idx = (self.frame // 4) % 16
-             can_sends.append(self.tesla_can.create_pedal_command(0, idx))
+             # Steering only mode OR pedal not configured
+             # Send idle/zero to keep pedal alive but not accelerating
+             if TINKLA_AVAILABLE and tinkla_conf.pedal_calibrated:
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+             else:
+               idle_pedal = 0.0
+             can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx))
+             # Reset state when not active
+             self.pedal_steady = 0.0
+             self.prev_pedal_di = 0.0
         else:
            state = 13 if CC.cruiseControl.cancel else 4  # 4=ACC_ON, 13=ACC_CANCEL_GENERIC_SILENT
            accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
@@ -145,9 +143,13 @@ class CarController(CarControllerBase):
       # Increment counter so cancel is prioritized even without openpilot longitudinal
       if CC.cruiseControl.cancel:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-           # Pre-AP cancellation via pedal? Send 0.
+           # Pre-AP cancellation - send idle pedal
            idx = (self.frame // 4) % 16
-           can_sends.append(self.tesla_can.create_pedal_command(0, idx))
+           if TINKLA_AVAILABLE and tinkla_conf.pedal_calibrated:
+             idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+           else:
+             idle_pedal = 0.0
+           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx))
         else:
            cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
            can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
@@ -171,3 +173,122 @@ class CarController(CarControllerBase):
     checksum = (0x488 & 0xFF) + ((0x488 >> 8) & 0xFF) + sum(dat)
     values["DAS_steeringControlChecksum"] = checksum & 0xFF
     return self.packer.make_can_msg("DAS_steeringControl", bus, values)
+
+  # ============================================
+  # Pedal Control Logic (Ported from Tinkla PCC_module.py)
+  # ============================================
+  
+  def _calc_pedal_command(self, accel_request: float, v_ego: float) -> float:
+    """
+    Calculate pedal command from acceleration request.
+    
+    Ported from Tinkla PCC_module.py update_pdl() method.
+    
+    Args:
+      accel_request: Desired acceleration in m/s^2 (from actuators.accel)
+      v_ego: Current vehicle speed in m/s
+      
+    Returns:
+      Pedal command value (transformed from DI units to pedal voltage)
+    """
+    if not TINKLA_AVAILABLE or not tinkla_conf:
+      # Fallback: simple linear mapping if config unavailable
+      return float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 50.]), -5, 50))
+    
+    # ============================================
+    # Step 1: Calculate speed-dependent limits
+    # ============================================
+    
+    # Max pedal value based on speed and profile
+    # From tunes.py: MAX_PEDAL_VALUE = interp(CS.out.vEgo, PEDAL_BP, MAX_PEDAL_V)
+    pedal_profile = tinkla_conf.get_pedal_profile_values()
+    max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
+    
+    # Regen deceleration is speed-dependent (less regen at low speed)
+    # From PCC_module.py: REGEN_DECEL = interp(CS.out.vEgo, [10., 20.], [-0.8, -1.45])
+    regen_decel = float(interp(v_ego, [10., 20.], [-0.8, -1.45]))
+    
+    # Zero accel pedal position (learned or default)
+    # At low speed, use 0; otherwise use learned position
+    if v_ego < 5.0 * 0.44704:  # 5 MPH in m/s
+      zero_accel = 0.0
+    else:
+      zero_accel = self.pedal_for_zero_torque
+    
+    # ============================================
+    # Step 2: Map acceleration to DI pedal range
+    # ============================================
+    
+    # From PCC_module.py:
+    # ACCEL_LOOKUP_BP = [REGEN_DECEL, 0, ACCEL_MAX]
+    # ACCEL_LOOKUP_V = [MIN_PEDAL_REGEN_VALUE, ZERO_ACCEL, MAX_PEDAL_VALUE]
+    accel_bp = [regen_decel, 0.0, ACCEL_MAX]
+    accel_v = [PEDAL_DI_MIN, zero_accel, max_pedal_value]
+    
+    pedal_di = float(interp(accel_request, accel_bp, accel_v))
+    
+    # ============================================
+    # Step 3: Apply rate limiting
+    # ============================================
+    # From PCC_module.py:
+    # PEDAL_MAX_DOWN = MAX_PEDAL_VALUE * _DT / 0.4
+    # PEDAL_MAX_UP = (MAX_PEDAL_VALUE - self.prev_tesla_pedal) * _DT
+    
+    dt = 0.04  # 25Hz (frame % 4)
+    pedal_max_down = max_pedal_value * dt / 0.4  # Smooth deceleration
+    pedal_max_up = (max_pedal_value - self.prev_pedal_di) * dt  # Smooth acceleration
+    
+    pedal_di = float(clip(pedal_di, self.prev_pedal_di - pedal_max_down, self.prev_pedal_di + pedal_max_up))
+    pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
+    
+    # ============================================
+    # Step 4: Apply hysteresis
+    # ============================================
+    # From PCC_module.py pedal_hysteresis():
+    # Prevents oscillation by smoothing small changes
+    
+    pedal_di = self._pedal_hysteresis(pedal_di, True)
+    
+    # ============================================
+    # Step 5: Transform to pedal voltage
+    # ============================================
+    
+    if tinkla_conf.pedal_calibrated:
+      pedal_cmd = tinkla_conf.di_to_pedal(pedal_di)
+    else:
+      # Uncalibrated: send DI value directly (will likely not work well)
+      pedal_cmd = pedal_di
+    
+    # Save state for next iteration
+    self.prev_pedal_di = pedal_di
+    self.prev_v_ego = v_ego
+    
+    return pedal_cmd
+  
+  def _pedal_hysteresis(self, pedal: float, enabled: bool) -> float:
+    """
+    Apply hysteresis to prevent pedal oscillation.
+    
+    From Tinkla PCC_module.py pedal_hysteresis():
+    For small accel oscillations within PEDAL_HYST_GAP, don't change the command.
+    
+    Args:
+      pedal: Current pedal request in DI units
+      enabled: Whether pedal control is enabled
+      
+    Returns:
+      Smoothed pedal value
+    """
+    if not enabled:
+      self.pedal_steady = 0.0
+      return 0.0
+    
+    if not TINKLA_AVAILABLE:
+      return pedal
+    
+    if pedal > self.pedal_steady + PEDAL_HYST_GAP:
+      self.pedal_steady = pedal - PEDAL_HYST_GAP
+    elif pedal < self.pedal_steady - PEDAL_HYST_GAP:
+      self.pedal_steady = pedal + PEDAL_HYST_GAP
+    
+    return self.pedal_steady
