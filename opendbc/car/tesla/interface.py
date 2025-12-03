@@ -2,7 +2,7 @@ from opendbc.car import get_safety_config, structs, STD_CARGO_KG
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
-from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS
+from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons
 from opendbc.car.tesla.radar_interface import RadarInterface
 
 # Import config helper - may fail on non-comma devices during testing

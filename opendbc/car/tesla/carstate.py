@@ -1,11 +1,16 @@
 import copy
+import time
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS
+from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons, STALK_DOUBLE_PULL_MS
 
 ButtonType = structs.CarState.ButtonEvent.Type
+
+
+def _current_time_millis():
+  return int(round(time.time() * 1000))
 
 
 class CarState(CarStateBase):
@@ -42,6 +47,17 @@ class CarState(CarStateBase):
     self.cruise_buttons = 0
     self.prev_cruise_buttons = 0
     self.cruiseEnabled = False
+    
+    # Double-pull state machine (Tinkla-style engagement)
+    self.stalk_pull_time_ms = 0
+    self.prev_stalk_pull_time_ms = -1000  # Start negative to avoid false double-pull on first press
+    self.pending_enable = False  # True while waiting to see if double-pull happens
+    
+    # Engagement mode tracking
+    # - enableLongControl: True = full control (steering + longitudinal), False = steering only
+    # - enableJustCC: True = steering only mode (no longitudinal)
+    self.enableLongControl = False
+    self.enableJustCC = False
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -253,38 +269,108 @@ class CarState(CarStateBase):
     # Buttons # ToDo: add Gap adjust button
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       self.prev_cruise_buttons = self.cruise_buttons
-      self.cruise_buttons = cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"]
+      self.cruise_buttons = int(cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"])
+      curr_time_ms = _current_time_millis()
       
       buttonEvents = []
+      
+      # ==============================================
+      # Double-Pull State Machine (Tinkla-style)
+      # ==============================================
+      # Single pull = Lateral only (steering)
+      # Double pull within 750ms = Full control (steering + longitudinal)
+      #
+      # Logic flow:
+      # 1. On MAIN press: record time, wait to see if double-pull
+      # 2. If second MAIN within 750ms: enable full control
+      # 3. If 750ms passes without second pull: enable steering only
+      # 4. CANCEL always disables everything
+      # ==============================================
+      
       if self.cruise_buttons != self.prev_cruise_buttons:
         be = structs.CarState.ButtonEvent()
-        be.pressed = self.cruise_buttons != 0
+        be.pressed = self.cruise_buttons != CruiseButtons.IDLE
         
         state = self.cruise_buttons if be.pressed else self.prev_cruise_buttons
         
-        # Tinkla Button Values:
-        # MAIN (Pull) = 2
-        # CANCEL (Push) = 1
-        # RES_ACCEL (Up) = 16 (1st), 4 (2nd)
-        # DECEL_SET (Down) = 32 (1st), 8 (2nd)
-        
-        if state == 2: # Pull -> Enable / Set
+        if state == CruiseButtons.MAIN:
+          # Pull toward driver - engagement button
           be.type = ButtonType.setCruise
-          self.cruiseEnabled = True
-        elif state in (16, 4): # Up -> Res/Accel
-          be.type = ButtonType.accelCruise
-        elif state in (32, 8): # Down -> Decel
-          be.type = ButtonType.decelCruise
-        elif state == 1: # Push -> Cancel
+          
+          # Check for double-pull
+          double_pull = (curr_time_ms - self.stalk_pull_time_ms) < STALK_DOUBLE_PULL_MS
+          
+          # Update timing
+          self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
+          self.stalk_pull_time_ms = curr_time_ms
+          
+          if double_pull:
+            # Double pull detected! Enable full control (steering + longitudinal)
+            self.cruiseEnabled = True
+            self.enableLongControl = True
+            self.enableJustCC = False
+            self.pending_enable = False
+          else:
+            # First pull - mark as pending, wait for possible second pull
+            self.pending_enable = True
+            
+        elif state == CruiseButtons.CANCEL:
+          # Push away - cancel everything
           be.type = ButtonType.cancel
           self.cruiseEnabled = False
+          self.enableLongControl = False
+          self.enableJustCC = False
+          self.pending_enable = False
+          # Reset timing to prevent false double-pulls after cancel
+          self.stalk_pull_time_ms = 0
+          self.prev_stalk_pull_time_ms = -1000
+          
+        elif CruiseButtons.is_accel(state):
+          # Up - accelerate
+          be.type = ButtonType.accelCruise
+          
+        elif CruiseButtons.is_decel(state):
+          # Down - decelerate
+          be.type = ButtonType.decelCruise
+          
         else:
           be.type = ButtonType.unknown
         
         buttonEvents.append(be)
       
+      # Check for single-pull timeout (750ms passed without second pull)
+      if self.pending_enable:
+        time_since_pull = curr_time_ms - self.stalk_pull_time_ms
+        if time_since_pull > STALK_DOUBLE_PULL_MS:
+          # Single pull confirmed - enable steering only (no longitudinal)
+          self.cruiseEnabled = True
+          self.enableLongControl = False
+          self.enableJustCC = True
+          self.pending_enable = False
+      
+      # Also check: if currently in full control mode and single pull happens,
+      # fall back to steering only (Tinkla behavior)
+      if (self.enableLongControl and 
+          self.cruiseEnabled and
+          (curr_time_ms - self.stalk_pull_time_ms) > STALK_DOUBLE_PULL_MS and
+          (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) > STALK_DOUBLE_PULL_MS and
+          self.stalk_pull_time_ms > 0):
+        # A single pull happened while in full control - fall back to steering only
+        # This only triggers if we had a pull that wasn't a double-pull
+        pass  # Keep current state, the above logic handles new pulls
+      
       ret.buttonEvents = buttonEvents
-      ret.cruiseState.enabled = self.cruiseEnabled and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      
+      # Cruise enabled requires: engaged, door closed, in Drive, seatbelt
+      can_engage = (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      ret.cruiseState.enabled = self.cruiseEnabled and can_engage
+      
+      # If we can't engage, reset our state
+      if not can_engage and self.cruiseEnabled:
+        self.cruiseEnabled = False
+        self.enableLongControl = False
+        self.enableJustCC = False
+        self.pending_enable = False
 
     # Messages needed by carcontroller
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:

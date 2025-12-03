@@ -212,6 +212,33 @@ class TeslaSafetyFlags(IntFlag):
 class TeslaFlags(IntFlag):
   LONG_CONTROL = 1
 
+
+class CruiseButtons:
+  """
+  Cruise stalk button values from STW_ACTN_RQ.SpdCtrlLvr_Stat
+  From DBC: VAL_ 69 SpdCtrlLvr_Stat 32 "DN_1ST" 16 "UP_1ST" 8 "DN_2ND" 4 "UP_2ND" 2 "RWD" 1 "FWD" 0 "IDLE"
+  """
+  IDLE = 0            # No input
+  CANCEL = 1          # FWD - Push away from driver
+  MAIN = 2            # RWD - Pull toward driver (engagement)
+  RES_ACCEL = 16      # UP_1ST - First detent up
+  RES_ACCEL_2ND = 4   # UP_2ND - Second detent up (faster)
+  DECEL_SET = 32      # DN_1ST - First detent down
+  DECEL_2ND = 8       # DN_2ND - Second detent down (faster)
+
+  @classmethod
+  def is_accel(cls, btn):
+    return btn in (cls.RES_ACCEL, cls.RES_ACCEL_2ND)
+
+  @classmethod
+  def is_decel(cls, btn):
+    return btn in (cls.DECEL_SET, cls.DECEL_2ND)
+
+
+# Pull the cruise stalk twice in this many ms for a 'double pull'
+STALK_DOUBLE_PULL_MS = 750
+
+
 DBC = CAR.create_dbc_map()
 
 STEER_THRESHOLD = 1
