@@ -5,6 +5,12 @@ from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS
 from opendbc.car.tesla.radar_interface import RadarInterface
 
+# Import config helper - may fail on non-comma devices during testing
+try:
+  from opendbc.car.tesla.tinkla_conf import tinkla_conf
+except ImportError:
+  tinkla_conf = None
+
 
 class CarInterface(CarInterfaceBase):
   CarState = CarState
@@ -48,10 +54,22 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= TeslaLegacyParams.NO_SDM1.value
 
     if candidate == CAR.TESLA_MODEL_S_PREAP:
+      flags = TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.LONG_CONTROL
+      
+      # Read configuration (with safe fallbacks if config unavailable)
+      use_pedal = tinkla_conf.use_pedal if tinkla_conf else False
+      radar_enabled = tinkla_conf.radar_enabled if tinkla_conf else False
+      radar_behind_nosecone = tinkla_conf.radar_behind_nosecone if tinkla_conf else False
+      
+      if use_pedal:
+        flags |= TeslaSafetyFlags.FLAG_ENABLE_PEDAL
+      if radar_behind_nosecone:
+        flags |= TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE
+
       ret.safetyConfigs = [
-        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP | TeslaSafetyFlags.FLAG_ENABLE_PEDAL | TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE | TeslaSafetyFlags.LONG_CONTROL)),
+        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(flags)),
       ]
-      ret.radarUnavailable = False
+      ret.radarUnavailable = not radar_enabled
       # Force longitudinal control true for Pre-AP
       ret.openpilotLongitudinalControl = True
       ret.steerControlType = structs.CarParams.SteerControlType.angle
@@ -76,9 +94,6 @@ class CarInterface(CarInterfaceBase):
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW3)),
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW3 | TeslaSafetyFlags.FLAG_EXTERNAL_PANDA)),
       ]
-    elif candidate == CAR.TESLA_MODEL_S_PREAP:
-      # Handled above now
-      pass
 
     ret.steerLimitTimer = 0.4
     ret.steerActuatorDelay = 0.1
