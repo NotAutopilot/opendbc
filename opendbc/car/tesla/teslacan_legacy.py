@@ -75,13 +75,19 @@ class TeslaCANPreAP(TeslaCANRaven):
     return msg
 
   def create_epas_control(self, counter, mode):
+    # EPB_epasControl (0x214 / 532) - Ported from Tinkla safety_tesla.h do_EPB_epasControl()
+    # This message tells EPAS to allow EAC (Electronic Angle Control)
+    # Tinkla sends: MLB = 0x01 + (counter << 8) + ((0x17 + counter) << 16)
+    # Byte 0: 0x01 (EPB_epasEACAllow value)
+    # Byte 1: counter (0-15)
+    # Byte 2: checksum (0x17 + counter = base checksum + counter)
     values = {
-      "GTW_epasControlCounter": counter,
-      "GTW_epasControlType": mode,
-      "GTW_epasControlChecksum": 0,
+      "EPB_epasEACAllow": mode,  # 1 = allow angle control
+      "EPB_epasControlCounter": counter,
+      "EPB_epasControlChecksum": 0,
     }
 
-    data = self.packers[CANBUS.party].make_can_msg("GTW_epasControl", CANBUS.party, values)[1]
-    # Checksum is calculated using ID 0x101 (257 decimal)
-    values["GTW_epasControlChecksum"] = self.checksum(0x101, data)
-    return self.packers[CANBUS.party].make_can_msg("GTW_epasControl", CANBUS.party, values)
+    data = self.packers[CANBUS.party].make_can_msg("EPB_epasControl", CANBUS.party, values)[1]
+    # Checksum is calculated using ID 0x214 (532 decimal)
+    values["EPB_epasControlChecksum"] = self.checksum(0x214, data)
+    return self.packers[CANBUS.party].make_can_msg("EPB_epasControl", CANBUS.party, values)

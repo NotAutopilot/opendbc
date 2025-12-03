@@ -464,6 +464,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
     {0x2B9, 0, 8, .check_relay = true, .disable_static_blocking = true},  // DAS_control
     {0x551, 0, 6, .check_relay = true, .disable_static_blocking = true},  // Pedal
+    {0x214, 0, 3, .check_relay = true, .disable_static_blocking = true},  // EPB_epasControl (EPAS handshake)
     // Add radar messages if needed for emulation
   };
 
