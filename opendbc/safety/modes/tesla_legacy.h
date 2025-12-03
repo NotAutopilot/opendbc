@@ -36,6 +36,10 @@ static int pedal_pressed = 0;
 static int radar_epas_type = 0; 
 static int radar_position = 0; 
 
+// Pre-AP Safety State
+static int tesla_gear = 0;
+static bool tesla_doors_open = false;
+
 static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
   int addr = GET_ADDR(to_push);
   int len = GET_LEN(to_push);
@@ -234,17 +238,37 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       }
    }
 
-  // Pre-AP Cruise (using GTW_carState)
+  // Pre-AP Gear Check
+  if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x118U)) {
+    tesla_gear = (msg->data[1] >> 4) & 0x07;
+    if (tesla_gear != 4) { // Not Drive
+      controls_allowed = 0;
+    }
+  }
+
+  // Pre-AP Door Check (using GTW_carState)
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x318U)) {
-    // GTW_carState signals if doors are open or car is off
-    // We might need this later for door checks
+    int door_FL = (msg->data[1] >> 4) & 0x03;
+    int door_FR = (msg->data[1] >> 6) & 0x03;
+    int door_RL = (msg->data[2] >> 6) & 0x03;
+    int door_RR = (msg->data[3] >> 5) & 0x03;
+    int door_front_trunk = (msg->data[6] >> 2) & 0x03;
+    int door_trunk = (msg->data[5] >> 6) & 0x03;
+    tesla_doors_open = (door_FL == 1) || (door_FR == 1) || (door_RL == 1) || (door_RR == 1) || (door_front_trunk == 1) || (door_trunk == 1);
+    
+    if (tesla_doors_open) {
+      controls_allowed = 0;
+    }
   }
 
   // Pre-AP Stalk Logic
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x45U)) {
     int ap_lever_position = msg->data[0] & 0x3FU;
     if (ap_lever_position == 2) { // Pull forward (Enable)
-      pcm_cruise_check(true);
+      // Only enable if in Drive and Doors closed
+      if ((tesla_gear == 4) && !tesla_doors_open) {
+        pcm_cruise_check(true);
+      }
     } else if (ap_lever_position == 1) { // Push back (Disable)
       pcm_cruise_check(false);
     }
