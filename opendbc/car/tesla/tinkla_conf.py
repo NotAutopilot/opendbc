@@ -101,7 +101,10 @@ class TinklaConf:
   
   def _put_bool(self, key: str, value: bool) -> None:
     """Write a boolean parameter."""
-    self._params.put_bool(key, value)
+    try:
+      self._params.put_bool(key, value)
+    except Exception:
+      pass  # Key not in whitelist, ignore
   
   @property
   def use_pedal(self) -> bool:
@@ -297,7 +300,10 @@ class TinklaConf:
   
   def _put_int(self, key: str, value: int) -> None:
     """Write an integer parameter."""
-    self._params.put(key, str(value))
+    try:
+      self._params.put(key, str(value))
+    except Exception:
+      pass  # Key not in whitelist, ignore
   
   def _get_float(self, key: str, default: float) -> float:
     """Read a float parameter with default fallback."""
@@ -314,7 +320,29 @@ class TinklaConf:
   
   def _put_float(self, key: str, value: float) -> None:
     """Write a float parameter."""
-    self._params.put(key, str(value))
+    try:
+      self._params.put(key, str(value))
+    except Exception:
+      pass  # Key not in whitelist, ignore
+  
+  def _get_str(self, key: str, default: str) -> str:
+    """Read a string parameter with default fallback."""
+    try:
+      val = self._params.get(key)
+      if val is None:
+        return default
+      if isinstance(val, bytes):
+        val = val.decode('utf-8')
+      return val
+    except Exception:
+      return default
+  
+  def _put_str(self, key: str, value: str) -> None:
+    """Write a string parameter."""
+    try:
+      self._params.put(key, value)
+    except Exception:
+      pass  # Key not in whitelist, ignore
   
   @property
   def pedal_min(self) -> int:
@@ -396,20 +424,13 @@ class TinklaConf:
   @property
   def pedal_profile(self) -> str:
     """Pedal profile name (S60, S85, P85, P85+, Generic)."""
-    val = self._params.get("TeslaPedalProfile")
-    if val is None:
-      return "Generic"
-    try:
-      if isinstance(val, bytes):
-        val = val.decode('utf-8')
-      return val if val in PEDAL_PROFILES else "Generic"
-    except Exception:
-      return "Generic"
+    val = self._get_str("TeslaPedalProfile", "Generic")
+    return val if val in PEDAL_PROFILES else "Generic"
   
   @pedal_profile.setter
   def pedal_profile(self, value: str) -> None:
     if value in PEDAL_PROFILES:
-      self._params.put("TeslaPedalProfile", value)
+      self._put_str("TeslaPedalProfile", value)
   
   # ============================================
   # Utility Methods
