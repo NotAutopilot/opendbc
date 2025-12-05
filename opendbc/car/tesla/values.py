@@ -236,8 +236,8 @@ class CruiseButtons:
 
 
 # Pull the cruise stalk twice in this many ms for a 'double pull'
-# Increased to 2000ms (2 seconds) for easier detection
-STALK_DOUBLE_PULL_MS = 2000
+# Matches Tinkla's PCC_module.py exactly
+STALK_DOUBLE_PULL_MS = 750
 
 
 DBC = CAR.create_dbc_map()
