@@ -204,8 +204,15 @@ class CarController(CarControllerBase):
              # ============================================
              # Check pedal availability from carstate
              pedal_ready = getattr(CS, 'pedal_available', False)
+             pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
              
-             if pedal_ready or tinkla_conf.pedal_calibrated:
+             # Debug: Log pedal state every 50 frames (~0.5 sec)
+             if self.frame % 50 == 0:
+               print(f"[PEDAL] long_active=True use_pedal=True")
+               print(f"[PEDAL]   pedal_ready={pedal_ready} pedal_calibrated={pedal_calibrated}")
+               print(f"[PEDAL]   accel_request={actuators.accel:.2f} m/s^2")
+             
+             if pedal_ready or pedal_calibrated:
                # Calculate pedal command from acceleration request
                pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
                
@@ -215,10 +222,16 @@ class CarController(CarControllerBase):
                  # Human is pressing pedal - don't fight them
                  pedal_cmd = pedal_value  # Pass through human input
                
+               # Debug: Log actual pedal command every 50 frames
+               if self.frame % 50 == 0:
+                 print(f"[PEDAL]   pedal_cmd={pedal_cmd:.2f} (ACTIVE, enable=1)")
+               
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx, enable=1))
              else:
                # Pedal not ready - send idle command to keep it alive
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf.pedal_calibrated else 0.0
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if pedal_calibrated else 0.0
+               if self.frame % 50 == 0:
+                 print(f"[PEDAL]   pedal_cmd={idle_pedal:.2f} (IDLE, enable=0, NOT READY)")
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
              
            elif long_active and not use_pedal:

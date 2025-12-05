@@ -34,6 +34,25 @@ def _current_time_millis():
 class CarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
+    
+    # ============================================
+    # FINGERPRINT DEBUG - Print at startup!
+    # ============================================
+    print(f"")
+    print(f"=" * 60)
+    print(f"[TESLA CARSTATE] INITIALIZATION")
+    print(f"=" * 60)
+    print(f"  Fingerprint: {CP.carFingerprint}")
+    print(f"  Is PREAP: {CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP}")
+    print(f"  Is LEGACY: {CP.carFingerprint in LEGACY_CARS}")
+    print(f"  openpilotLongitudinalControl: {CP.openpilotLongitudinalControl}")
+    print(f"  TINKLA_CONF_AVAILABLE: {TINKLA_CONF_AVAILABLE}")
+    if TINKLA_CONF_AVAILABLE and tinkla_conf:
+      print(f"  tinkla_conf.use_pedal: {tinkla_conf.use_pedal}")
+      print(f"  tinkla_conf.pedal_calibrated: {tinkla_conf.pedal_calibrated}")
+    print(f"=" * 60)
+    print(f"")
+    
     self.can_define = CANDefine(DBC[CP.carFingerprint][Bus.party])
 
     if self.CP.carFingerprint in LEGACY_CARS:
@@ -119,6 +138,14 @@ class CarState(CarStateBase):
     
     # Turn signal state (needed for HSO logic)
     self.turn_signal_stalk_state = 0
+    
+    # ============================================
+    # Alert Event (Tinkla-style)
+    # Set this to an event name string when state changes
+    # interface.py will read and add to events
+    # ============================================
+    self.longCtrlEvent = None  # "pccEnabled", "pccDisabled", etc.
+    self.pccEvent = None       # Secondary event slot
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -428,11 +455,17 @@ class CarState(CarStateBase):
           
           if double_pull:
             # Double pull detected! Enable full control (steering + longitudinal)
-            print(f"[STALK] *** DOUBLE PULL TRIGGERED! *** Enabling FULL CONTROL!")
+            print(f"")
+            print(f"=" * 60)
+            print(f"[STALK] *** DOUBLE PULL TRIGGERED! ***")
+            print(f"[STALK] *** PEDAL CRUISE CONTROL ENABLED ***")
+            print(f"=" * 60)
+            print(f"")
             self.cruiseEnabled = True
             self.enableLongControl = True
             self.enableJustCC = False
             self.pending_enable = False
+            self.longCtrlEvent = "pccEnabled"  # Alert trigger
           else:
             # First pull - mark as pending, wait for possible second pull
             print(f"[STALK] First pull - waiting for possible second pull...")
@@ -459,7 +492,13 @@ class CarState(CarStateBase):
         elif state == CruiseButtons.CANCEL:
           # Push away - cancel everything
           be.type = ButtonType.cancel
+          was_long_active = self.enableLongControl
+          print(f"")
+          print(f"=" * 60)
           print(f"[STALK] *** CANCEL *** Disabling all control")
+          print(f"[STALK]   Was enableLongControl: {was_long_active}")
+          print(f"=" * 60)
+          print(f"")
           self.cruiseEnabled = False
           self.enableLongControl = False
           self.enableJustCC = False
@@ -467,6 +506,8 @@ class CarState(CarStateBase):
           # Reset timing to prevent false double-pulls after cancel
           self.stalk_pull_time_ms = 0
           self.prev_stalk_pull_time_ms = -1000
+          if was_long_active:
+            self.longCtrlEvent = "pccDisabled"  # Alert trigger
           
         elif CruiseButtons.is_accel(state):
           # Up - accelerate
