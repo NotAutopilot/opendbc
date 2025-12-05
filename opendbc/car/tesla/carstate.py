@@ -34,25 +34,6 @@ def _current_time_millis():
 class CarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
-    
-    # ============================================
-    # FINGERPRINT DEBUG - Print at startup!
-    # ============================================
-    print(f"")
-    print(f"=" * 60)
-    print(f"[TESLA CARSTATE] INITIALIZATION")
-    print(f"=" * 60)
-    print(f"  Fingerprint: {CP.carFingerprint}")
-    print(f"  Is PREAP: {CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP}")
-    print(f"  Is LEGACY: {CP.carFingerprint in LEGACY_CARS}")
-    print(f"  openpilotLongitudinalControl: {CP.openpilotLongitudinalControl}")
-    print(f"  TINKLA_CONF_AVAILABLE: {TINKLA_CONF_AVAILABLE}")
-    if TINKLA_CONF_AVAILABLE and tinkla_conf:
-      print(f"  tinkla_conf.use_pedal: {tinkla_conf.use_pedal}")
-      print(f"  tinkla_conf.pedal_calibrated: {tinkla_conf.pedal_calibrated}")
-    print(f"=" * 60)
-    print(f"")
-    
     self.can_define = CANDefine(DBC[CP.carFingerprint][Bus.party])
 
     if self.CP.carFingerprint in LEGACY_CARS:
@@ -426,23 +407,11 @@ class CarState(CarStateBase):
       # This ONLY fires when button BECOMES MAIN, not on release!
       # ==============================================
       
-      # DEBUG: Log every state change
-      if self.cruise_buttons != self.prev_cruise_buttons:
-        print(f"[STALK] Button Change: {self.prev_cruise_buttons} -> {self.cruise_buttons} at {curr_time_ms}ms")
-      
       # MAIN button: Rising edge detection (Tinkla pattern)
-      # This is SEPARATE from the general button event handling below
       if (self.cruise_buttons == CruiseButtons.MAIN 
           and self.prev_cruise_buttons != CruiseButtons.MAIN):
-        # Pull toward driver - engagement button (RISING EDGE ONLY!)
-        print(f"[STALK] *** PULL DETECTED! *** time={curr_time_ms}ms")
-        print(f"[STALK]   enableDoublePull={self.enableDoublePull}")
-        print(f"[STALK]   prev_pull_time={self.stalk_pull_time_ms}ms")
-        print(f"[STALK]   time_since_last={(curr_time_ms - self.stalk_pull_time_ms)}ms")
-        print(f"[STALK]   window={self.double_pull_window_ms}ms")
         
         if self.enableDoublePull:
-          # Tinkla's exact formula:
           # Update timing FIRST, then check (order matches Tinkla)
           self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
           self.stalk_pull_time_ms = curr_time_ms
@@ -451,28 +420,18 @@ class CarState(CarStateBase):
             < self.double_pull_window_ms
           )
           
-          print(f"[STALK]   double_pull={double_pull} (delta={self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms}ms)")
-          
           if double_pull:
             # Double pull detected! Enable full control (steering + longitudinal)
-            print(f"")
-            print(f"=" * 60)
-            print(f"[STALK] *** DOUBLE PULL TRIGGERED! ***")
-            print(f"[STALK] *** PEDAL CRUISE CONTROL ENABLED ***")
-            print(f"=" * 60)
-            print(f"")
             self.cruiseEnabled = True
             self.enableLongControl = True
             self.enableJustCC = False
             self.pending_enable = False
-            self.longCtrlEvent = "pccEnabled"  # Alert trigger
+            self.longCtrlEvent = "pccEnabled"
           else:
             # First pull - mark as pending, wait for possible second pull
-            print(f"[STALK] First pull - waiting for possible second pull...")
             self.pending_enable = True
         else:
           # Double-pull disabled: single pull = full control (stock behavior)
-          print(f"[STALK] Double-pull DISABLED - engaging FULL CONTROL on single pull")
           self.cruiseEnabled = True
           self.enableLongControl = True
           self.enableJustCC = False
@@ -493,12 +452,6 @@ class CarState(CarStateBase):
           # Push away - cancel everything
           be.type = ButtonType.cancel
           was_long_active = self.enableLongControl
-          print(f"")
-          print(f"=" * 60)
-          print(f"[STALK] *** CANCEL *** Disabling all control")
-          print(f"[STALK]   Was enableLongControl: {was_long_active}")
-          print(f"=" * 60)
-          print(f"")
           self.cruiseEnabled = False
           self.enableLongControl = False
           self.enableJustCC = False
@@ -507,7 +460,7 @@ class CarState(CarStateBase):
           self.stalk_pull_time_ms = 0
           self.prev_stalk_pull_time_ms = -1000
           if was_long_active:
-            self.longCtrlEvent = "pccDisabled"  # Alert trigger
+            self.longCtrlEvent = "pccDisabled"
           
         elif CruiseButtons.is_accel(state):
           # Up - accelerate
@@ -527,7 +480,6 @@ class CarState(CarStateBase):
         time_since_pull = curr_time_ms - self.stalk_pull_time_ms
         if time_since_pull > self.double_pull_window_ms:
           # Single pull confirmed - enable steering only (no longitudinal)
-          print(f"[STALK] Single pull TIMEOUT ({time_since_pull}ms > {self.double_pull_window_ms}ms) -> STEERING ONLY")
           self.cruiseEnabled = True
           self.enableLongControl = False
           self.enableJustCC = True

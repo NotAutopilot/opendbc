@@ -70,13 +70,8 @@ class CarController(CarControllerBase):
     self.human_cruise_action_time_ms = 0  # Timestamp of last human stalk input
     self.prev_cruise_buttons = 0  # Previous stalk state for edge detection
     
-    # ============================================
-    # State Tracking for Alerts and Debug
-    # ============================================
-    self.prev_long_active = False       # Previous long control state
-    self.prev_lat_active = False        # Previous lateral control state
-    self.prev_enable_long_control = False  # Previous enableLongControl from CS
-    self.alert_frames = 0               # Counter for showing alerts
+    # State tracking
+    self.prev_enable_long_control = False
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
@@ -170,29 +165,14 @@ class CarController(CarControllerBase):
            # - Single pull = Lateral only (enableJustCC) -> Send idle pedal
            # - Double pull = Full control (enableLongControl) -> Active control
            
-           # Get engagement state from CarState
-           # NOTE: We use CS.enableLongControl (our double-pull flag) AND cruise being enabled
+           # Get engagement state from CarState (Tinkla-style)
            cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
            cs_enable_long = getattr(CS, 'enableLongControl', False)
            
-           # Long control is active when:
-           # 1. Cruise is enabled (via stalk pull)
-           # 2. Double-pull was detected (enableLongControl = True)
-           # 3. CC.longActive is True (from controlsd) OR we're forcing it based on our state
+           # Long control is active when cruise is enabled AND double-pull was detected
            long_active = cs_cruise_enabled and cs_enable_long
            
-           # Debug: Log state changes
-           if self.frame % 100 == 0 or cs_enable_long != self.prev_enable_long_control:
-             print(f"[PCC] frame={self.frame} cruiseEnabled={cs_cruise_enabled} enableLong={cs_enable_long} CC.longActive={CC.longActive} -> long_active={long_active}")
-           
-           # Detect state transitions for alerts
-           if cs_enable_long and not self.prev_enable_long_control:
-             print("[PCC] *** PEDAL CRUISE ENGAGED (Double Pull) ***")
-             self.alert_frames = 100  # Show alert for ~1 second
-           elif not cs_enable_long and self.prev_enable_long_control:
-             print("[PCC] *** PEDAL CRUISE DISENGAGED ***")
-             self.alert_frames = 100
-           
+           # Track state transitions
            self.prev_enable_long_control = cs_enable_long
            
            idx = (self.frame // 4) % 16
@@ -202,15 +182,8 @@ class CarController(CarControllerBase):
              # ============================================
              # Mode 1: Comma Pedal Control
              # ============================================
-             # Check pedal availability from carstate
              pedal_ready = getattr(CS, 'pedal_available', False)
              pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
-             
-             # Debug: Log pedal state every 50 frames (~0.5 sec)
-             if self.frame % 50 == 0:
-               print(f"[PEDAL] long_active=True use_pedal=True")
-               print(f"[PEDAL]   pedal_ready={pedal_ready} pedal_calibrated={pedal_calibrated}")
-               print(f"[PEDAL]   accel_request={actuators.accel:.2f} m/s^2")
              
              if pedal_ready or pedal_calibrated:
                # Calculate pedal command from acceleration request
@@ -219,19 +192,12 @@ class CarController(CarControllerBase):
                # Check for gas override (human pressing pedal)
                pedal_value = getattr(CS, 'pedal_interceptor_value', 0.0)
                if pedal_value > (PEDAL_DI_PRESSED + 5.0):
-                 # Human is pressing pedal - don't fight them
                  pedal_cmd = pedal_value  # Pass through human input
-               
-               # Debug: Log actual pedal command every 50 frames
-               if self.frame % 50 == 0:
-                 print(f"[PEDAL]   pedal_cmd={pedal_cmd:.2f} (ACTIVE, enable=1)")
                
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx, enable=1))
              else:
-               # Pedal not ready - send idle command to keep it alive
+               # Pedal not ready - send idle command
                idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if pedal_calibrated else 0.0
-               if self.frame % 50 == 0:
-                 print(f"[PEDAL]   pedal_cmd={idle_pedal:.2f} (IDLE, enable=0, NOT READY)")
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
              
            elif long_active and not use_pedal:
