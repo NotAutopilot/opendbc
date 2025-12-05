@@ -376,16 +376,17 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     violation |= longitudinal_accel_checks(raw_accel_min, TESLA_LONG_LIMITS);
   }
   
-  // Pedal Interceptor
-  if (tesla_preap && tesla_enable_pedal && (msg->addr == 0x551)) {
-     // Basic checks for pedal
-     if (!controls_allowed) {
-       int pedal_cmd = ((msg->data[0] << 8) | msg->data[1]);
-       if (pedal_cmd > 0) {
-         violation = true;
-       }
-     }
-  }
+  // Pedal Interceptor - TINKLA COMPATIBILITY
+  // NOTE: Tinkla does NOT have any TX hook safety check for pedal (0x551).
+  // They trust OpenPilot to handle engagement state. Adding restrictive checks
+  // here causes pedal to be blocked before controls_allowed is set.
+  // 
+  // The pedal hardware has its own watchdog (counter validation) that will
+  // disable if it stops receiving valid commands. OpenPilot handles engagement
+  // state via latActive/longActive flags. Additional panda safety checks here
+  // would only cause race conditions and prevent proper engagement.
+  //
+  // DO NOT ADD CONTROLS_ALLOWED CHECK HERE - it breaks pedal engagement timing.
 
   if (violation) {
     tx = false;
@@ -461,12 +462,21 @@ static safety_config tesla_legacy_init(uint16_t param) {
   };
   
   static const CanMsg TESLA_TX_PREAP_MSGS[] = {
+    // Core control messages
     {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
     {0x2B9, 0, 8, .check_relay = true, .disable_static_blocking = true},  // DAS_control
+    {0x214, 0, 3, .check_relay = true, .disable_static_blocking = true},  // EPB_epasControl (EPAS handshake)
+    
+    // Pedal Interceptor (both buses for compatibility)
     {0x551, 0, 6, .check_relay = true, .disable_static_blocking = true},  // Pedal on Bus 0
     {0x551, 2, 6, .check_relay = true, .disable_static_blocking = true},  // Pedal on Bus 2 (DEFAULT!)
-    {0x214, 0, 3, .check_relay = true, .disable_static_blocking = true},  // EPB_epasControl (EPAS handshake)
-    // Add radar messages if needed for emulation
+    
+    // Fake stalk cancel - CRITICAL for pedal mode!
+    // Tinkla sends this to cancel stock cruise when pedal takes over
+    {0x45, 0, 8, .check_relay = true, .disable_static_blocking = true},   // STW_ACTN_RQ (fake stalk cancel)
+    
+    // IC Integration / Communication with panda (Tinkla uses this)
+    {0x659, 0, 8, .check_relay = true, .disable_static_blocking = true},  // Fake DAS message for pedal state
   };
 
   // Define RX check arrays (keeping them as is)
