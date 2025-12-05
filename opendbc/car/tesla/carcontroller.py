@@ -104,37 +104,12 @@ class CarController(CarControllerBase):
     # When enabling in a tight curve, we wait until user reduces steering force to start steering.
     # Canceling is done on rising edge and is handled generically with CC.cruiseControl.cancel
     lat_active = CC.latActive and CS.hands_on_level < 3
-    
-    # ============================================
-    # HSO (Human Steering Override) - Pre-AP
-    # When driver takes wheel, pause steering WITHOUT disengaging
-    # ============================================
-    human_control = getattr(CS, 'human_control', False)
-    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and human_control:
-      # HSO active: zero torque but don't disengage
-      lat_active = False
 
     if self.frame % 2 == 0:
       # Angular rate limit based on speed
       self.apply_angle_last = apply_steer_angle_limits_vm(actuators.steeringAngleDeg, self.apply_angle_last, CS.out.vEgoRaw, CS.out.steeringAngleDeg,
                                                           lat_active, CarControllerParams, self.VM)
       if self.CP.carFingerprint in LEGACY_CARS:
-        if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-          # Pre-AP Steering Logic - Ported from Tinkla
-          # Send at 50Hz (frame % 2 == 0)
-          # Tinkla uses static counter 1 and Checksum 0
-          # Modern Openpilot requires rolling counter and valid checksum for Panda safety
-          cntr = (self.frame // 2) % 16
-          
-          # HSO: When human_control is True, send current angle with steering disabled
-          # This allows driver to steer freely without disengaging
-          if human_control:
-            # Pass through current steering angle, disabled
-            can_sends.append(self.create_tinkla_steering_control(CS.out.steeringAngleDeg, False, 0, CANBUS.party, cntr))
-          else:
-            can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CANBUS.party, cntr))
-          
-        else:
           cntr = (self.frame // 2) % 16
           can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
       else:
@@ -253,19 +228,6 @@ class CarController(CarControllerBase):
 
     self.frame += 1
     return new_actuators, can_sends
-
-  def create_tinkla_steering_control(self, angle, enabled, ldw, bus, counter):
-    values = {
-      "DAS_steeringAngleRequest": -angle,
-      "DAS_steeringHapticRequest": ldw,
-      "DAS_steeringControlType": 1 if enabled else 0, #0-NONE, 1-ANGLE, 2-LKA, 3-Emergency LKA
-      "DAS_steeringControlCounter": counter,
-      "DAS_steeringControlChecksum": 0,
-    }
-    dat = self.packer.make_can_msg("DAS_steeringControl", bus, values)[1]
-    checksum = (0x488 & 0xFF) + ((0x488 >> 8) & 0xFF) + sum(dat)
-    values["DAS_steeringControlChecksum"] = checksum & 0xFF
-    return self.packer.make_can_msg("DAS_steeringControl", bus, values)
 
   # ============================================
   # Pedal Control Logic (Ported from Tinkla PCC_module.py)
