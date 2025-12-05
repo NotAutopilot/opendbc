@@ -14,7 +14,7 @@ from numpy import interp, clip
 try:
   from opendbc.car.tesla.tinkla_conf import (
     tinkla_conf,
-    PEDAL_DI_MIN, PEDAL_DI_ZERO,
+    PEDAL_DI_MIN, PEDAL_DI_ZERO, PEDAL_DI_PRESSED,
     PEDAL_BP, PEDAL_V_DEFAULT,
     ACCEL_MAX, PEDAL_HYST_GAP,
   )
@@ -22,6 +22,7 @@ try:
 except ImportError:
   TINKLA_AVAILABLE = False
   tinkla_conf = None
+  PEDAL_DI_PRESSED = 2  # Fallback default
 
 # Import CruiseButtons for cruise spam fallback
 try:
