@@ -168,24 +168,23 @@ class CarController(CarControllerBase):
                
                # Check for gas override (human pressing pedal)
                # NOTE: pedal_interceptor_value is in VOLTAGE units from carstate.py
-               # We need to convert to DI units for comparison, OR compare in voltage units
-               # Tinkla compares in DI units after converting the sensor reading
+               # Human override should only trigger if human is SIGNIFICANTLY pressing pedal
+               # 
+               # The calibration-based conversion is unreliable if calibration is wrong/default.
+               # Instead, use a simple voltage threshold that works regardless of calibration:
+               # - Idle pedal voltage: ~25-35 (varies by pedal)
+               # - Pressed pedal voltage: ~50+ (clear human input)
+               # 
+               # We use voltage > 50 as a conservative threshold for human override.
+               # This means human must press pedal significantly to take over.
                pedal_value_voltage = getattr(CS, 'pedal_interceptor_value', 0.0)
                
-               # Convert voltage to DI using tinkla_conf if available, else use default
-               # DI = (voltage - pedal_zero) * pedal_factor
-               if tinkla_conf and tinkla_conf.pedal_calibrated:
-                 pedal_value_di = tinkla_conf.pedal_to_di(pedal_value_voltage)
-               else:
-                 # Without calibration, use approximate conversion
-                 # At idle (no press), voltage is around 25-35, DI should be ~0
-                 # When pressed, voltage increases, DI increases proportionally
-                 # Rough estimate: DI ≈ voltage - 25 (adjust based on your pedal)
-                 pedal_value_di = pedal_value_voltage - 25.0
+               # Simple voltage threshold for human override (no calibration dependency)
+               # Only pass through if human is clearly pressing the pedal
+               HUMAN_OVERRIDE_VOLTAGE_THRESHOLD = 50.0  # Voltage where human is clearly pressing
                
-               if pedal_value_di > (PEDAL_DI_PRESSED + 5.0):
-                 # Human is pressing pedal - pass through their input
-                 # But we still need to send the voltage value to create_pedal_command
+               if pedal_value_voltage > HUMAN_OVERRIDE_VOLTAGE_THRESHOLD:
+                 # Human is pressing pedal hard - pass through their input
                  pedal_cmd = pedal_value_voltage
                
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
