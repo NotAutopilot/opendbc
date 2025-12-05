@@ -1,9 +1,47 @@
 """
 Tesla Pre-AP Configuration Helper
 Ported from Tinkla's CFG_module.py pattern
+
+Storage Backend: JSON file at /data/tinkla_params.json
+This avoids OpenPilot's Params whitelist restrictions.
 """
 
-from openpilot.common.params import Params
+import json
+import os
+import tempfile
+
+
+# ============================================
+# Storage Configuration
+# ============================================
+CONFIG_FILE = "/data/tinkla_params.json"
+
+# Default values for all parameters
+DEFAULT_CONFIG = {
+  # Control Modes
+  'hso_enabled': True,
+  'hso_numb_period': 1.5,
+  'double_pull_window_ms': 750,
+  # Longitudinal
+  'use_pedal': False,
+  'pedal_calibrated': False,
+  'acc_spam_enabled': True,
+  'acc_spam_cooldown_ms': 400,
+  # Pedal Hardware
+  'pedal_can_zero': False,
+  'pedal_profile': 'Generic',
+  # Pedal Calibration
+  'pedal_min': 0,
+  'pedal_max': 1023,
+  'pedal_calib_min': -3.0,
+  'pedal_calib_max': 99.6,
+  'pedal_calib_zero': 0.0,
+  'pedal_calib_factor': 1.0,
+  # Radar
+  'radar_enabled': False,
+  'radar_behind_nosecone': False,
+  'radar_offset': 0.0,
+}
 
 
 # ============================================
@@ -82,111 +120,129 @@ def transform_pedal_to_di(val: float, pedal_zero: float, pedal_factor: float) ->
 class TinklaConf:
   """
   Configuration helper for Tesla Pre-AP vehicles.
-  Provides read/write access to persistent parameters.
+  
+  Uses a JSON file backend for persistent storage, avoiding
+  OpenPilot's Params whitelist restrictions.
+  
+  Storage: /data/tinkla_params.json
   """
   
   def __init__(self):
-    self._params = Params()
+    self._cache = {}
+    self._load()
+  
+  # ============================================
+  # Storage Backend (JSON File)
+  # ============================================
+  
+  def _load(self) -> None:
+    """Load configuration from JSON file, or use defaults."""
+    try:
+      if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+          loaded = json.load(f)
+        # Merge with defaults (in case new keys were added)
+        self._cache = {**DEFAULT_CONFIG, **loaded}
+      else:
+        # File doesn't exist - use defaults
+        self._cache = DEFAULT_CONFIG.copy()
+        self._save()  # Create the file with defaults
+    except Exception:
+      # JSON parse error or read error - use defaults
+      self._cache = DEFAULT_CONFIG.copy()
+  
+  def _save(self) -> None:
+    """
+    Atomically save configuration to JSON file.
+    
+    Uses write-to-temp + rename pattern to prevent corruption
+    if power cuts during write.
+    """
+    try:
+      # Ensure /data directory exists
+      os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+      
+      # Write to temporary file first
+      fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(CONFIG_FILE),
+        prefix='.tinkla_params_',
+        suffix='.tmp'
+      )
+      try:
+        with os.fdopen(fd, 'w') as f:
+          json.dump(self._cache, f, indent=2)
+        # Atomic rename
+        os.replace(tmp_path, CONFIG_FILE)
+      except Exception:
+        # Clean up temp file on error
+        try:
+          os.unlink(tmp_path)
+        except Exception:
+          pass
+        raise
+    except Exception:
+      pass  # Silently fail - don't crash the car
+  
+  def _get(self, key: str, default):
+    """Get a value from cache with fallback to default."""
+    return self._cache.get(key, default)
+  
+  def _put(self, key: str, value) -> None:
+    """Set a value in cache and persist to disk."""
+    self._cache[key] = value
+    self._save()
   
   # ============================================
   # Boolean Parameters
   # ============================================
   
-  def _get_bool(self, key: str, default: bool = False) -> bool:
-    """Read a boolean parameter with default fallback."""
-    try:
-      return self._params.get_bool(key)
-    except Exception:
-      return default
-  
-  def _put_bool(self, key: str, value: bool) -> None:
-    """Write a boolean parameter."""
-    try:
-      self._params.put_bool(key, value)
-    except Exception:
-      pass  # Key not in whitelist, ignore
-  
   @property
   def use_pedal(self) -> bool:
-    """
-    True if Comma Pedal hardware is present and enabled.
-    
-    Checks both original Tinkla param name (TinklaEnablePedal) and 
-    new param name (TeslaUsePedal) for compatibility.
-    """
-    # Check original Tinkla param first
-    if self._get_bool("TinklaEnablePedal", False):
-      return True
-    # Fallback to new param name
-    return self._get_bool("TeslaUsePedal", False)
+    """True if Comma Pedal hardware is present and enabled."""
+    return self._get('use_pedal', False)
   
   @use_pedal.setter
   def use_pedal(self, value: bool) -> None:
-    # Set both for compatibility
-    self._put_bool("TinklaEnablePedal", value)
-    self._put_bool("TeslaUsePedal", value)
+    self._put('use_pedal', bool(value))
   
   @property
   def radar_enabled(self) -> bool:
     """True if using stock Bosch radar."""
-    return self._get_bool("TeslaRadarEnabled", False)
+    return self._get('radar_enabled', False)
   
   @radar_enabled.setter
   def radar_enabled(self, value: bool) -> None:
-    self._put_bool("TeslaRadarEnabled", value)
+    self._put('radar_enabled', bool(value))
   
   @property
   def radar_behind_nosecone(self) -> bool:
     """True if radar is behind the nosecone (signal attenuation adjustment)."""
-    return self._get_bool("TeslaRadarBehindNosecone", False)
+    return self._get('radar_behind_nosecone', False)
   
   @radar_behind_nosecone.setter
   def radar_behind_nosecone(self, value: bool) -> None:
-    self._put_bool("TeslaRadarBehindNosecone", value)
+    self._put('radar_behind_nosecone', bool(value))
   
   @property
   def pedal_calibrated(self) -> bool:
-    """
-    True if pedal has been calibrated.
-    
-    Checks both original Tinkla param name (TeslaPedalCalibDone) and 
-    new param name (TeslaPedalCalibrated) for compatibility.
-    """
-    # Check original Tinkla param first
-    if self._get_bool("TeslaPedalCalibDone", False):
-      return True
-    # Fallback to new param name
-    return self._get_bool("TeslaPedalCalibrated", False)
+    """True if pedal has been calibrated."""
+    return self._get('pedal_calibrated', False)
   
   @pedal_calibrated.setter
   def pedal_calibrated(self, value: bool) -> None:
-    # Set both for compatibility
-    self._put_bool("TeslaPedalCalibDone", value)
-    self._put_bool("TeslaPedalCalibrated", value)
+    self._put('pedal_calibrated', bool(value))
   
   @property
   def pedal_can_zero(self) -> bool:
-    """
-    True if pedal is on CAN bus 0 instead of bus 2.
-    
-    Checks both original Tinkla param name (TinklaPedalCanZero) and 
-    new param name (TeslaPedalCanZero) for compatibility.
-    """
-    # Check original Tinkla param first
-    if self._get_bool("TinklaPedalCanZero", False):
-      return True
-    # Fallback to new param name
-    return self._get_bool("TeslaPedalCanZero", False)
+    """True if pedal is on CAN bus 0 instead of bus 2."""
+    return self._get('pedal_can_zero', False)
   
   @pedal_can_zero.setter
   def pedal_can_zero(self, value: bool) -> None:
-    # Set both for compatibility
-    self._put_bool("TinklaPedalCanZero", value)
-    self._put_bool("TeslaPedalCanZero", value)
+    self._put('pedal_can_zero', bool(value))
   
   # ============================================
   # HSO (Human Steering Override) Parameters
-  # Ported from Tinkla's HSO_module.py
   # ============================================
   
   @property
@@ -197,11 +253,11 @@ class TinklaConf:
     When enabled, driver can take over steering wheel without
     disengaging OpenPilot. After release + delay, steering resumes.
     """
-    return self._get_bool("TeslaHSO", True)  # Default ON for safety
+    return self._get('hso_enabled', True)
   
   @hso_enabled.setter
   def hso_enabled(self, value: bool) -> None:
-    self._put_bool("TeslaHSO", value)
+    self._put('hso_enabled', bool(value))
   
   @property
   def hso_numb_period(self) -> float:
@@ -212,11 +268,12 @@ class TinklaConf:
     resuming lateral control. Prevents jerky re-engagement.
     Default: 1.5 seconds
     """
-    return self._get_float("TeslaHSODelay", 1.5)
+    return float(self._get('hso_numb_period', 1.5))
   
   @hso_numb_period.setter
   def hso_numb_period(self, value: float) -> None:
-    self._put_float("TeslaHSODelay", max(0.5, min(5.0, value)))  # Clamp 0.5-5.0s
+    # Clamp to 0.5 - 5.0 seconds
+    self._put('hso_numb_period', max(0.5, min(5.0, float(value))))
   
   # ============================================
   # Double-Pull Engagement Parameters
@@ -230,8 +287,6 @@ class TinklaConf:
     This is a safety feature and cannot be disabled:
     - Single pull: Engage lateral control (steering) only
     - Double pull (within 750ms): Engage lateral + longitudinal
-    
-    This prevents accidental full engagement when driver only wants steering assist.
     """
     return True  # Always ON - not configurable for safety
   
@@ -241,11 +296,12 @@ class TinklaConf:
     Time window in milliseconds to detect double-pull.
     Default: 750ms
     """
-    return self._get_int("TeslaDoublePullWindow", 750)
+    return int(self._get('double_pull_window_ms', 750))
   
   @double_pull_window_ms.setter
   def double_pull_window_ms(self, value: int) -> None:
-    self._put_int("TeslaDoublePullWindow", max(300, min(1500, value)))  # Clamp 300-1500ms
+    # Clamp to 300 - 1500 ms
+    self._put('double_pull_window_ms', max(300, min(1500, int(value))))
   
   # ============================================
   # ACC Emulation (Cruise Stalk Spamming)
@@ -257,16 +313,13 @@ class TinklaConf:
     True if ACC stalk spamming is enabled for longitudinal control.
     
     This is the fallback mode when Comma Pedal is not available.
-    It sends simulated cruise stalk button presses to control
-    the stock cruise control system.
-    
     Only used when use_pedal is False.
     """
-    return self._get_bool("TeslaACCSpam", True)  # Default ON as fallback
+    return self._get('acc_spam_enabled', True)
   
   @acc_spam_enabled.setter
   def acc_spam_enabled(self, value: bool) -> None:
-    self._put_bool("TeslaACCSpam", value)
+    self._put('acc_spam_enabled', bool(value))
   
   @property
   def acc_spam_cooldown_ms(self) -> int:
@@ -275,123 +328,61 @@ class TinklaConf:
     Prevents flooding the CAN bus.
     Default: 400ms
     """
-    return self._get_int("TeslaACCCooldown", 400)
+    return int(self._get('acc_spam_cooldown_ms', 400))
   
   @acc_spam_cooldown_ms.setter
   def acc_spam_cooldown_ms(self, value: int) -> None:
-    self._put_int("TeslaACCCooldown", max(200, min(1000, value)))  # Clamp 200-1000ms
+    # Clamp to 200 - 1000 ms
+    self._put('acc_spam_cooldown_ms', max(200, min(1000, int(value))))
   
   # ============================================
-  # Integer/Float Parameters
+  # Pedal Calibration Parameters
   # ============================================
-  
-  def _get_int(self, key: str, default: int) -> int:
-    """Read an integer parameter with default fallback."""
-    try:
-      val = self._params.get(key)
-      if val is None:
-        return default
-      # Handle bytes from Params
-      if isinstance(val, bytes):
-        val = val.decode('utf-8')
-      return int(val)
-    except Exception:
-      return default
-  
-  def _put_int(self, key: str, value: int) -> None:
-    """Write an integer parameter."""
-    try:
-      self._params.put(key, str(value))
-    except Exception:
-      pass  # Key not in whitelist, ignore
-  
-  def _get_float(self, key: str, default: float) -> float:
-    """Read a float parameter with default fallback."""
-    try:
-      val = self._params.get(key)
-      if val is None:
-        return default
-      # Handle bytes from Params
-      if isinstance(val, bytes):
-        val = val.decode('utf-8')
-      return float(val)
-    except Exception:
-      return default
-  
-  def _put_float(self, key: str, value: float) -> None:
-    """Write a float parameter."""
-    try:
-      self._params.put(key, str(value))
-    except Exception:
-      pass  # Key not in whitelist, ignore
-  
-  def _get_str(self, key: str, default: str) -> str:
-    """Read a string parameter with default fallback."""
-    try:
-      val = self._params.get(key)
-      if val is None:
-        return default
-      if isinstance(val, bytes):
-        val = val.decode('utf-8')
-      return val
-    except Exception:
-      return default
-  
-  def _put_str(self, key: str, value: str) -> None:
-    """Write a string parameter."""
-    try:
-      self._params.put(key, value)
-    except Exception:
-      pass  # Key not in whitelist, ignore
   
   @property
   def pedal_min(self) -> int:
     """Calibrated minimum pedal sensor value (released)."""
-    return self._get_int("TeslaPedalMin", 0)
+    return int(self._get('pedal_min', 0))
   
   @pedal_min.setter
   def pedal_min(self, value: int) -> None:
-    self._put_int("TeslaPedalMin", value)
+    self._put('pedal_min', int(value))
   
   @property
   def pedal_max(self) -> int:
     """Calibrated maximum pedal sensor value (floored)."""
-    return self._get_int("TeslaPedalMax", 1023)
+    return int(self._get('pedal_max', 1023))
   
   @pedal_max.setter
   def pedal_max(self, value: int) -> None:
-    self._put_int("TeslaPedalMax", value)
+    self._put('pedal_max', int(value))
   
   @property
   def radar_offset(self) -> float:
     """Physical offset of the radar in meters."""
-    return self._get_float("TeslaRadarOffset", 0.0)
+    return float(self._get('radar_offset', 0.0))
   
   @radar_offset.setter
   def radar_offset(self, value: float) -> None:
-    self._put_float("TeslaRadarOffset", value)
-  
-  # ============================================
-  # Pedal Calibration Parameters (from calibrate_pedal.py)
-  # ============================================
+    self._put('radar_offset', float(value))
   
   @property
   def pedal_calib_min(self) -> float:
     """Calibrated minimum pedal value (from calibration tool)."""
-    return self._get_float("TeslaPedalCalibMin", -3.0)
+    return float(self._get('pedal_calib_min', -3.0))
   
   @pedal_calib_min.setter
   def pedal_calib_min(self, value: float) -> None:
-    self._put_float("TeslaPedalCalibMin", value)
+    self._put('pedal_calib_min', float(value))
   
   @property
   def pedal_calib_max(self) -> float:
     """Calibrated maximum pedal value (from calibration tool)."""
-    return self._get_float("TeslaPedalCalibMax", 99.6)
+    return float(self._get('pedal_calib_max', 99.6))
   
   @pedal_calib_max.setter
   def pedal_calib_max(self, value: float) -> None:
-    self._put_float("TeslaPedalCalibMax", value)
+    self._put('pedal_calib_max', float(value))
   
   @property
   def pedal_zero(self) -> float:
@@ -399,7 +390,7 @@ class TinklaConf:
     Calibrated pedal zero point (coast position).
     From Tinkla: PEDAL_ZERO = TeslaPedalCalibZero - 1 / PEDAL_FACTOR
     """
-    calib_zero = self._get_float("TeslaPedalCalibZero", 0.0)
+    calib_zero = float(self._get('pedal_calib_zero', 0.0))
     factor = self.pedal_factor
     if factor == 0:
       factor = 1.0
@@ -407,7 +398,7 @@ class TinklaConf:
   
   @pedal_zero.setter
   def pedal_zero(self, value: float) -> None:
-    self._put_float("TeslaPedalCalibZero", value)
+    self._put('pedal_calib_zero', float(value))
   
   @property
   def pedal_factor(self) -> float:
@@ -415,22 +406,22 @@ class TinklaConf:
     Calibration factor: 100.0 / (pedal_max - pedal_pressed)
     Used to scale DI units to actual pedal voltage.
     """
-    return self._get_float("TeslaPedalCalibFactor", 1.0)
+    return float(self._get('pedal_calib_factor', 1.0))
   
   @pedal_factor.setter
   def pedal_factor(self, value: float) -> None:
-    self._put_float("TeslaPedalCalibFactor", value)
+    self._put('pedal_calib_factor', float(value))
   
   @property
   def pedal_profile(self) -> str:
     """Pedal profile name (S60, S85, P85, P85+, Generic)."""
-    val = self._get_str("TeslaPedalProfile", "Generic")
-    return val if val in PEDAL_PROFILES else "Generic"
+    val = self._get('pedal_profile', 'Generic')
+    return val if val in PEDAL_PROFILES else 'Generic'
   
   @pedal_profile.setter
   def pedal_profile(self, value: str) -> None:
     if value in PEDAL_PROFILES:
-      self._put_str("TeslaPedalProfile", value)
+      self._put('pedal_profile', value)
   
   # ============================================
   # Utility Methods
@@ -456,6 +447,7 @@ class TinklaConf:
   def print_config(self) -> None:
     """Print current configuration to console."""
     print("=== Tesla Pre-AP Configuration ===")
+    print(f"    Storage: {CONFIG_FILE}")
     print("")
     print("  [CONTROL MODES]")
     print(f"    Double-Pull Mode:     ON (always enabled)")
@@ -515,28 +507,12 @@ class TinklaConf:
   
   def reset_to_defaults(self) -> None:
     """Reset all parameters to safe defaults."""
-    # Control Modes (double_pull is always ON, not configurable)
-    self.hso_enabled = True
-    self.hso_numb_period = 1.5
-    self.double_pull_window_ms = 750
-    # Longitudinal - defaults to safe (no auto-acceleration)
-    self.use_pedal = False
-    self.pedal_calibrated = False
-    self.acc_spam_enabled = True
-    self.acc_spam_cooldown_ms = 400
-    # Pedal Calibration - reset to uncalibrated
-    self.pedal_min = 0
-    self.pedal_max = 1023
-    self.pedal_calib_min = -3.0
-    self.pedal_calib_max = 99.6
-    self.pedal_zero = 0.0
-    self.pedal_factor = 1.0
-    self.pedal_profile = "Generic"
-    self.pedal_can_zero = False  # Default to bus 2
-    # Radar
-    self.radar_enabled = False
-    self.radar_behind_nosecone = False
-    self.radar_offset = 0.0
+    self._cache = DEFAULT_CONFIG.copy()
+    self._save()
+  
+  def reload(self) -> None:
+    """Reload configuration from disk (useful for external edits)."""
+    self._load()
 
 
 # Singleton instance for easy import
