@@ -12,6 +12,10 @@ PEDAL_M2 = 0.101593626
 PEDAL_D = -22.85856576
 PEDAL_TIMEOUT_MS = 500
 
+# HSO (Human Steering Override) constants (from Tinkla)
+HSO_HANDS_ON_LIMIT = 2.0    # hands_on_level threshold to trigger HSO
+HSO_NUMB_PERIOD_S = 1.5     # Seconds to delay steering reengagement after HSO
+
 ButtonType = structs.CarState.ButtonEvent.Type
 
 
@@ -79,6 +83,23 @@ class CarState(CarStateBase):
     
     # Torque level tracking (for pedal zero learning)
     self.torqueLevel = 0.0
+    
+    # ============================================
+    # HSO (Human Steering Override) State
+    # Ported from Tinkla's HSO_module.py
+    # ============================================
+    # When driver takes control of steering wheel above threshold,
+    # we pause lateral control (zero torque) WITHOUT disengaging.
+    # After release + delay, steering automatically resumes.
+    self.human_control = False              # True when HSO is active
+    self.frame_human_steered = 0            # Frame when HSO was triggered
+    self.hso_steering_pressed = False       # True if hands_on_level >= threshold
+    self.enableHSO = True                   # HSO feature enabled (always on for Pre-AP)
+    self.hso_numb_period = HSO_NUMB_PERIOD_S  # Resume delay in seconds
+    self.hands_on_limit = HSO_HANDS_ON_LIMIT  # hands_on_level threshold
+    
+    # Turn signal state (needed for HSO logic)
+    self.turn_signal_stalk_state = 0
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -287,6 +308,43 @@ class CarState(CarStateBase):
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
 
+    # ============================================
+    # HSO (Human Steering Override) Logic - Pre-AP
+    # Ported from Tinkla's HSO_module.py
+    # ============================================
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      # Read turn signal stalk position
+      try:
+        stalk_stat = cp_chassis.vl["STW_ACTN_RQ"].get("TurnIndLvr_Stat", 0)
+        self.turn_signal_stalk_state = 0 if stalk_stat == 3 else int(stalk_stat)
+      except Exception:
+        self.turn_signal_stalk_state = 0
+      
+      # Check if driver is overriding steering
+      self.hso_steering_pressed = self.hands_on_level >= self.hands_on_limit
+      
+      # HSO state machine (from Tinkla HSO_module.py)
+      # This runs at 100Hz, so hso_numb_period * 100 = frames to wait
+      frame = int(_current_time_millis() / 10)  # Approximate frame count
+      
+      if self.enableHSO and self.cruiseEnabled:
+        if self.hso_steering_pressed:
+          # Driver taking control - record frame
+          self.frame_human_steered = frame
+        elif (frame - self.frame_human_steered < (self.hso_numb_period * 100)) and (self.turn_signal_stalk_state > 0):
+          # Turn signal stalk is held - extend HSO period
+          self.frame_human_steered = frame
+        elif (frame - self.frame_human_steered < (self.hso_numb_period * 100)):
+          # Within numb period - check if steering angle differs significantly from requested
+          # If so, driver is still steering, extend the period
+          # (Simplified: we just stay in HSO mode during numb period)
+          pass
+        
+        # Set human_control if within numb period
+        self.human_control = (frame - self.frame_human_steered) < (self.hso_numb_period * 100)
+      else:
+        self.human_control = False
+    
     # Buttons # ToDo: add Gap adjust button
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       self.prev_cruise_buttons = self.cruise_buttons

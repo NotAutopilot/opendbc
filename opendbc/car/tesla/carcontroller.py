@@ -100,6 +100,15 @@ class CarController(CarControllerBase):
     # When enabling in a tight curve, we wait until user reduces steering force to start steering.
     # Canceling is done on rising edge and is handled generically with CC.cruiseControl.cancel
     lat_active = CC.latActive and CS.hands_on_level < 3
+    
+    # ============================================
+    # HSO (Human Steering Override) - Pre-AP
+    # When driver takes wheel, pause steering WITHOUT disengaging
+    # ============================================
+    human_control = getattr(CS, 'human_control', False)
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and human_control:
+      # HSO active: zero torque but don't disengage
+      lat_active = False
 
     if self.frame % 2 == 0:
       # Angular rate limit based on speed
@@ -112,7 +121,14 @@ class CarController(CarControllerBase):
           # Tinkla uses static counter 1 and Checksum 0
           # Modern Openpilot requires rolling counter and valid checksum for Panda safety
           cntr = (self.frame // 2) % 16
-          can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CANBUS.party, cntr))
+          
+          # HSO: When human_control is True, send current angle with steering disabled
+          # This allows driver to steer freely without disengaging
+          if human_control:
+            # Pass through current steering angle, disabled
+            can_sends.append(self.create_tinkla_steering_control(CS.out.steeringAngleDeg, False, 0, CANBUS.party, cntr))
+          else:
+            can_sends.append(self.create_tinkla_steering_control(self.apply_angle_last, lat_active, 0, CANBUS.party, cntr))
           
         else:
           cntr = (self.frame // 2) % 16
