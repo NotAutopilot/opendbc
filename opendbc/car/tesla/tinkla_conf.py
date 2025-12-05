@@ -105,11 +105,22 @@ class TinklaConf:
   
   @property
   def use_pedal(self) -> bool:
-    """True if Comma Pedal hardware is present and enabled."""
+    """
+    True if Comma Pedal hardware is present and enabled.
+    
+    Checks both original Tinkla param name (TinklaEnablePedal) and 
+    new param name (TeslaUsePedal) for compatibility.
+    """
+    # Check original Tinkla param first
+    if self._get_bool("TinklaEnablePedal", False):
+      return True
+    # Fallback to new param name
     return self._get_bool("TeslaUsePedal", False)
   
   @use_pedal.setter
   def use_pedal(self, value: bool) -> None:
+    # Set both for compatibility
+    self._put_bool("TinklaEnablePedal", value)
     self._put_bool("TeslaUsePedal", value)
   
   @property
@@ -132,20 +143,42 @@ class TinklaConf:
   
   @property
   def pedal_calibrated(self) -> bool:
-    """True if pedal has been calibrated."""
+    """
+    True if pedal has been calibrated.
+    
+    Checks both original Tinkla param name (TeslaPedalCalibDone) and 
+    new param name (TeslaPedalCalibrated) for compatibility.
+    """
+    # Check original Tinkla param first
+    if self._get_bool("TeslaPedalCalibDone", False):
+      return True
+    # Fallback to new param name
     return self._get_bool("TeslaPedalCalibrated", False)
   
   @pedal_calibrated.setter
   def pedal_calibrated(self, value: bool) -> None:
+    # Set both for compatibility
+    self._put_bool("TeslaPedalCalibDone", value)
     self._put_bool("TeslaPedalCalibrated", value)
   
   @property
   def pedal_can_zero(self) -> bool:
-    """True if pedal is on CAN bus 0 instead of bus 2."""
+    """
+    True if pedal is on CAN bus 0 instead of bus 2.
+    
+    Checks both original Tinkla param name (TinklaPedalCanZero) and 
+    new param name (TeslaPedalCanZero) for compatibility.
+    """
+    # Check original Tinkla param first
+    if self._get_bool("TinklaPedalCanZero", False):
+      return True
+    # Fallback to new param name
     return self._get_bool("TeslaPedalCanZero", False)
   
   @pedal_can_zero.setter
   def pedal_can_zero(self, value: bool) -> None:
+    # Set both for compatibility
+    self._put_bool("TinklaPedalCanZero", value)
     self._put_bool("TeslaPedalCanZero", value)
   
   # ============================================

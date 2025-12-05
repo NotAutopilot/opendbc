@@ -80,6 +80,12 @@ class CarController(CarControllerBase):
         self.packers[CANBUS.autopilot_party] = CANPacker(dbc_names[Bus.party])
         self.pedal_packer = CANPacker("comma_pedal")
         self.tesla_can = TeslaCANPreAP(self.packers, self.pedal_packer)
+        
+        # Configure pedal CAN bus from tinkla_conf
+        if TINKLA_AVAILABLE and tinkla_conf:
+          self.tesla_can.pedal_can_bus = tinkla_conf.pedal_can_bus
+        else:
+          self.tesla_can.pedal_can_bus = 2  # Default to bus 2
       else:
         self.tesla_can = TeslaCANRaven(self.packers)
         
@@ -147,8 +153,24 @@ class CarController(CarControllerBase):
              # ============================================
              # Mode 1: Comma Pedal Control
              # ============================================
-             pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
-             can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx))
+             # Check pedal availability from carstate
+             pedal_ready = getattr(CS, 'pedal_available', False)
+             
+             if pedal_ready or tinkla_conf.pedal_calibrated:
+               # Calculate pedal command from acceleration request
+               pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+               
+               # Check for gas override (human pressing pedal)
+               pedal_value = getattr(CS, 'pedal_interceptor_value', 0.0)
+               if pedal_value > (PEDAL_DI_PRESSED + 5.0):
+                 # Human is pressing pedal - don't fight them
+                 pedal_cmd = pedal_value  # Pass through human input
+               
+               can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx, enable=1))
+             else:
+               # Pedal not ready - send idle command to keep it alive
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf.pedal_calibrated else 0.0
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
              
            elif long_active and not use_pedal:
              # ============================================
@@ -170,7 +192,7 @@ class CarController(CarControllerBase):
                  idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
                else:
                  idle_pedal = 0.0
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx))
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
              # Reset state when not active
              self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
@@ -184,13 +206,13 @@ class CarController(CarControllerBase):
       # Increment counter so cancel is prioritized even without openpilot longitudinal
       if CC.cruiseControl.cancel:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-           # Pre-AP cancellation - send idle pedal
+           # Pre-AP cancellation - send idle pedal with enable=0
            idx = (self.frame // 4) % 16
            if TINKLA_AVAILABLE and tinkla_conf.pedal_calibrated:
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
            else:
              idle_pedal = 0.0
-           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx))
+           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
         else:
            cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
            can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))

@@ -1,6 +1,21 @@
+import struct
+from ctypes import create_string_buffer
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import V_CRUISE_MAX
 from opendbc.car.tesla.values import CANBUS, CarControllerParams
+
+# ============================================
+# Comma Pedal Constants (from Tinkla teslacan.py)
+# ============================================
+# These are the scaling/offset values for the Comma Pedal protocol
+# Used to convert pedal voltage to raw CAN values
+PEDAL_M1 = 0.050796813    # Primary scaling factor
+PEDAL_M2 = 0.101593626    # Secondary scaling factor (2x M1 for redundancy)
+PEDAL_D = -22.85856576    # Offset
+
+# CAN Message IDs
+GAS_COMMAND_ID = 0x551    # 1361 - Command to Comma Pedal
+GAS_SENSOR_ID = 0x552     # 1362 - Feedback from Comma Pedal
 
 
 class TeslaCANRaven:
@@ -61,18 +76,67 @@ class TeslaCANPreAP(TeslaCANRaven):
   def __init__(self, packers, pedal_packer):
     super().__init__(packers)
     self.pedal_packer = pedal_packer
+    # Pedal CAN bus: 2 by default, can be 0 if configured
+    # This will be set by carcontroller based on tinkla_conf
+    self.pedal_can_bus = 2
 
-  def create_pedal_command(self, pedal, idx):
-    # GAS_COMMAND 0x200 (512)
-    # Use CANBUS.party (0) for Pre-AP pedal command
-    values = {
-      "ENABLE": 1,
-      "GAS_COMMAND": pedal,
-      "COUNTER_PEDAL": idx,
-    }
+  def create_pedal_command(self, accel_command: float, idx: int, enable: int = 1, pedal_can_bus: int = None):
+    """
+    Create GAS_COMMAND (0x551) message to Comma Pedal.
     
-    msg = self.pedal_packer.make_can_msg("GAS_COMMAND", CANBUS.party, values)
-    return msg
+    This is a direct port of Tinkla's teslacan.py create_pedal_command_msg().
+    Uses raw struct packing to ensure byte-for-byte compatibility.
+    
+    Args:
+      accel_command: Pedal voltage value (from calibration transform)
+      idx: Rolling counter 0-15
+      enable: 1 to enable pedal, 0 to disable
+      pedal_can_bus: CAN bus for pedal (0 or 2), defaults to self.pedal_can_bus
+      
+    Returns:
+      CAN message tuple (msg_id, bustime, data, bus)
+    """
+    msg_id = GAS_COMMAND_ID  # 0x551
+    msg_len = 6
+    
+    if pedal_can_bus is None:
+      pedal_can_bus = self.pedal_can_bus
+    
+    # Apply Tinkla's encoding formula
+    # Formula: raw_value = (voltage - D) / M
+    if enable == 1:
+      int_accel_command = int((accel_command - PEDAL_D) / PEDAL_M1)
+      int_accel_command2 = int((accel_command - PEDAL_D) / PEDAL_M2)
+    else:
+      int_accel_command = 0
+      int_accel_command2 = 0
+    
+    # Clip to valid range (16-bit unsigned)
+    int_accel_command = max(0, min(65534, int_accel_command))
+    int_accel_command2 = max(0, min(65534, int_accel_command2))
+    
+    # Pack message bytes (Tinkla format)
+    # Bytes 0-1: Primary command (big-endian)
+    # Bytes 2-3: Secondary command (big-endian, for redundancy)
+    # Byte 4: Enable flag (bit 7) + counter (bits 0-3)
+    # Byte 5: Checksum
+    msg = create_string_buffer(msg_len)
+    struct.pack_into(
+      "BBBBB",
+      msg,
+      0,
+      (int_accel_command >> 8) & 0xFF,
+      int_accel_command & 0xFF,
+      (int_accel_command2 >> 8) & 0xFF,
+      int_accel_command2 & 0xFF,
+      ((enable << 7) + (idx & 0x0F)) & 0xFF,
+    )
+    
+    # Calculate and append checksum
+    struct.pack_into("B", msg, msg_len - 1, self.checksum(msg_id, msg.raw))
+    
+    # Return in standard format: [msg_id, bustime, data, bus]
+    return [msg_id, 0, msg.raw, pedal_can_bus]
 
   def create_epas_control(self, counter, mode):
     # EPB_epasControl (0x214 / 532) - Ported from Tinkla safety_tesla.h do_EPB_epasControl()

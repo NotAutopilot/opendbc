@@ -6,6 +6,12 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons, STALK_DOUBLE_PULL_MS
 
+# Comma Pedal constants (from Tinkla)
+PEDAL_M1 = 0.050796813
+PEDAL_M2 = 0.101593626
+PEDAL_D = -22.85856576
+PEDAL_TIMEOUT_MS = 500
+
 ButtonType = structs.CarState.ButtonEvent.Type
 
 
@@ -58,6 +64,21 @@ class CarState(CarStateBase):
     # - enableJustCC: True = steering only mode (no longitudinal)
     self.enableLongControl = False
     self.enableJustCC = False
+    
+    # ============================================
+    # Comma Pedal State (Tinkla PCC_module port)
+    # ============================================
+    self.pedal_interceptor_value = 0.0   # Pedal position in voltage units
+    self.pedal_interceptor_value2 = 0.0  # Redundant pedal value
+    self.pedal_interceptor_state = 0     # 0 = OK, 1 = error
+    self.pedal_idx = 0                   # Received counter
+    self.prev_pedal_idx = 0              # Previous counter for edge detection
+    self.last_pedal_seen_ms = 0          # Last time we got a pedal message
+    self.pedal_available = False         # True if pedal is responding
+    self.pedal_timeout = True            # True if pedal hasn't been seen recently
+    
+    # Torque level tracking (for pedal zero learning)
+    self.torqueLevel = 0.0
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -371,6 +392,50 @@ class CarState(CarStateBase):
         self.enableLongControl = False
         self.enableJustCC = False
         self.pending_enable = False
+
+    # ============================================
+    # Comma Pedal Parsing (Pre-AP only)
+    # ============================================
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      curr_time_ms = _current_time_millis()
+      
+      # Parse pedal feedback from GAS_SENSOR (comma_pedal.dbc)
+      # cp_ap_party is configured to use comma_pedal DBC for Pre-AP
+      try:
+        gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
+        if gas_sensor:
+          # Store previous idx for edge detection
+          self.prev_pedal_idx = self.pedal_idx
+          
+          # Read pedal sensor values
+          # From comma_pedal.dbc: INTERCEPTOR_GAS, INTERCEPTOR_GAS2, STATE, IDX
+          interceptor_gas_raw = gas_sensor.get("INTERCEPTOR_GAS", 0)
+          interceptor_gas2_raw = gas_sensor.get("INTERCEPTOR_GAS2", 0)
+          self.pedal_interceptor_state = int(gas_sensor.get("STATE", 0))
+          self.pedal_idx = int(gas_sensor.get("IDX", 0))
+          
+          # Convert raw values to voltage using Tinkla formula
+          # From Tinkla: value = raw * M1 + D (or raw * M2 + D for redundant)
+          self.pedal_interceptor_value = interceptor_gas_raw * PEDAL_M1 + PEDAL_D
+          self.pedal_interceptor_value2 = interceptor_gas2_raw * PEDAL_M2 + PEDAL_D
+          
+          # Track pedal responsiveness
+          if self.pedal_idx != self.prev_pedal_idx:
+            self.last_pedal_seen_ms = curr_time_ms
+          
+          # Check pedal timeout (500ms without message)
+          self.pedal_timeout = (curr_time_ms - self.last_pedal_seen_ms) > PEDAL_TIMEOUT_MS
+          self.pedal_available = (not self.pedal_timeout) and (self.pedal_interceptor_state == 0)
+      except Exception:
+        # Pedal not present or parsing failed
+        self.pedal_available = False
+        self.pedal_timeout = True
+      
+      # Read torque level for pedal zero learning (from DI_torque1)
+      try:
+        self.torqueLevel = cp_pt.vl["DI_torque1"].get("DI_torque1Motor", 0)
+      except Exception:
+        self.torqueLevel = 0.0
 
     # Messages needed by carcontroller
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
