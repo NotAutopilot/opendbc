@@ -182,6 +182,103 @@ class TinklaConf:
     self._put_bool("TeslaPedalCanZero", value)
   
   # ============================================
+  # HSO (Human Steering Override) Parameters
+  # Ported from Tinkla's HSO_module.py
+  # ============================================
+  
+  @property
+  def hso_enabled(self) -> bool:
+    """
+    True if Human Steering Override is enabled.
+    
+    When enabled, driver can take over steering wheel without
+    disengaging OpenPilot. After release + delay, steering resumes.
+    """
+    return self._get_bool("TeslaHSO", True)  # Default ON for safety
+  
+  @hso_enabled.setter
+  def hso_enabled(self, value: bool) -> None:
+    self._put_bool("TeslaHSO", value)
+  
+  @property
+  def hso_numb_period(self) -> float:
+    """
+    HSO resume delay in seconds.
+    
+    After driver releases steering wheel, wait this long before
+    resuming lateral control. Prevents jerky re-engagement.
+    Default: 1.5 seconds
+    """
+    return self._get_float("TeslaHSODelay", 1.5)
+  
+  @hso_numb_period.setter
+  def hso_numb_period(self, value: float) -> None:
+    self._put_float("TeslaHSODelay", max(0.5, min(5.0, value)))  # Clamp 0.5-5.0s
+  
+  # ============================================
+  # Double-Pull Engagement Parameters
+  # ============================================
+  
+  @property
+  def double_pull_enabled(self) -> bool:
+    """
+    Double-pull engagement mode is ALWAYS enabled for Pre-AP Tesla.
+    
+    This is a safety feature and cannot be disabled:
+    - Single pull: Engage lateral control (steering) only
+    - Double pull (within 750ms): Engage lateral + longitudinal
+    
+    This prevents accidental full engagement when driver only wants steering assist.
+    """
+    return True  # Always ON - not configurable for safety
+  
+  @property
+  def double_pull_window_ms(self) -> int:
+    """
+    Time window in milliseconds to detect double-pull.
+    Default: 750ms
+    """
+    return self._get_int("TeslaDoublePullWindow", 750)
+  
+  @double_pull_window_ms.setter
+  def double_pull_window_ms(self, value: int) -> None:
+    self._put_int("TeslaDoublePullWindow", max(300, min(1500, value)))  # Clamp 300-1500ms
+  
+  # ============================================
+  # ACC Emulation (Cruise Stalk Spamming)
+  # ============================================
+  
+  @property
+  def acc_spam_enabled(self) -> bool:
+    """
+    True if ACC stalk spamming is enabled for longitudinal control.
+    
+    This is the fallback mode when Comma Pedal is not available.
+    It sends simulated cruise stalk button presses to control
+    the stock cruise control system.
+    
+    Only used when use_pedal is False.
+    """
+    return self._get_bool("TeslaACCSpam", True)  # Default ON as fallback
+  
+  @acc_spam_enabled.setter
+  def acc_spam_enabled(self, value: bool) -> None:
+    self._put_bool("TeslaACCSpam", value)
+  
+  @property
+  def acc_spam_cooldown_ms(self) -> int:
+    """
+    Minimum time between ACC stalk messages in milliseconds.
+    Prevents flooding the CAN bus.
+    Default: 400ms
+    """
+    return self._get_int("TeslaACCCooldown", 400)
+  
+  @acc_spam_cooldown_ms.setter
+  def acc_spam_cooldown_ms(self, value: int) -> None:
+    self._put_int("TeslaACCCooldown", max(200, min(1000, value)))  # Clamp 200-1000ms
+  
+  # ============================================
   # Integer/Float Parameters
   # ============================================
   
@@ -338,20 +435,87 @@ class TinklaConf:
   def print_config(self) -> None:
     """Print current configuration to console."""
     print("=== Tesla Pre-AP Configuration ===")
-    print(f"  Pedal Enabled:        {self.use_pedal}")
-    print(f"  Pedal Calibrated:     {self.pedal_calibrated}")
-    print(f"  Pedal Min (raw):      {self.pedal_min}")
-    print(f"  Pedal Max (raw):      {self.pedal_max}")
-    print(f"  Pedal Calib Min:      {self.pedal_calib_min}")
-    print(f"  Pedal Calib Max:      {self.pedal_calib_max}")
-    print(f"  Pedal Zero:           {self.pedal_zero}")
-    print(f"  Pedal Factor:         {self.pedal_factor}")
-    print(f"  Pedal Profile:        {self.pedal_profile}")
-    print(f"  Pedal CAN Bus:        {self.pedal_can_bus}")
-    print(f"  Radar Enabled:        {self.radar_enabled}")
-    print(f"  Radar Behind Nosecone:{self.radar_behind_nosecone}")
-    print(f"  Radar Offset:         {self.radar_offset}")
+    print("")
+    print("  [CONTROL MODES]")
+    print(f"    Double-Pull Mode:     ON (always enabled)")
+    print(f"    HSO Enabled:          {'ON' if self.hso_enabled else 'OFF'}")
+    print(f"    HSO Resume Delay:     {self.hso_numb_period}s")
+    print("")
+    print("  [LONGITUDINAL]")
+    print(f"    Pedal Enabled:        {'ON' if self.use_pedal else 'OFF'}")
+    print(f"    Pedal Calibrated:     {'YES' if self.pedal_calibrated else 'NO'}")
+    print(f"    ACC Spam Enabled:     {'ON' if self.acc_spam_enabled else 'OFF'}")
+    print(f"    ACC Spam Cooldown:    {self.acc_spam_cooldown_ms}ms")
+    print("")
+    print("  [PEDAL CALIBRATION]")
+    print(f"    Pedal Min (raw):      {self.pedal_min}")
+    print(f"    Pedal Max (raw):      {self.pedal_max}")
+    print(f"    Pedal Calib Min:      {self.pedal_calib_min:.2f}")
+    print(f"    Pedal Calib Max:      {self.pedal_calib_max:.2f}")
+    print(f"    Pedal Zero:           {self.pedal_zero:.3f}")
+    print(f"    Pedal Factor:         {self.pedal_factor:.3f}")
+    print(f"    Pedal Profile:        {self.pedal_profile}")
+    print(f"    Pedal CAN Bus:        {self.pedal_can_bus}")
+    print("")
+    print("  [RADAR]")
+    print(f"    Radar Enabled:        {'ON' if self.radar_enabled else 'OFF'}")
+    print(f"    Behind Nosecone:      {'YES' if self.radar_behind_nosecone else 'NO'}")
+    print(f"    Radar Offset:         {self.radar_offset}m")
+    print("")
     print("==================================")
+  
+  def get_all_params(self) -> dict:
+    """Get all parameters as a dictionary (for CLI tool)."""
+    return {
+      # Control Modes (double_pull is always ON, not configurable)
+      'double_pull_window_ms': self.double_pull_window_ms,
+      'hso_enabled': self.hso_enabled,
+      'hso_numb_period': self.hso_numb_period,
+      # Longitudinal
+      'use_pedal': self.use_pedal,
+      'pedal_calibrated': self.pedal_calibrated,
+      'acc_spam_enabled': self.acc_spam_enabled,
+      'acc_spam_cooldown_ms': self.acc_spam_cooldown_ms,
+      # Pedal Calibration
+      'pedal_min': self.pedal_min,
+      'pedal_max': self.pedal_max,
+      'pedal_calib_min': self.pedal_calib_min,
+      'pedal_calib_max': self.pedal_calib_max,
+      'pedal_zero': self.pedal_zero,
+      'pedal_factor': self.pedal_factor,
+      'pedal_profile': self.pedal_profile,
+      'pedal_can_bus': self.pedal_can_bus,
+      'pedal_can_zero': self.pedal_can_zero,
+      # Radar
+      'radar_enabled': self.radar_enabled,
+      'radar_behind_nosecone': self.radar_behind_nosecone,
+      'radar_offset': self.radar_offset,
+    }
+  
+  def reset_to_defaults(self) -> None:
+    """Reset all parameters to safe defaults."""
+    # Control Modes (double_pull is always ON, not configurable)
+    self.hso_enabled = True
+    self.hso_numb_period = 1.5
+    self.double_pull_window_ms = 750
+    # Longitudinal - defaults to safe (no auto-acceleration)
+    self.use_pedal = False
+    self.pedal_calibrated = False
+    self.acc_spam_enabled = True
+    self.acc_spam_cooldown_ms = 400
+    # Pedal Calibration - reset to uncalibrated
+    self.pedal_min = 0
+    self.pedal_max = 1023
+    self.pedal_calib_min = -3.0
+    self.pedal_calib_max = 99.6
+    self.pedal_zero = 0.0
+    self.pedal_factor = 1.0
+    self.pedal_profile = "Generic"
+    self.pedal_can_zero = False  # Default to bus 2
+    # Radar
+    self.radar_enabled = False
+    self.radar_behind_nosecone = False
+    self.radar_offset = 0.0
 
 
 # Singleton instance for easy import

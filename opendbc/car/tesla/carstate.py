@@ -6,13 +6,21 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons, STALK_DOUBLE_PULL_MS
 
+# Import Tinkla configuration (dynamic params)
+try:
+  from opendbc.car.tesla.tinkla_conf import tinkla_conf
+  TINKLA_CONF_AVAILABLE = True
+except ImportError:
+  TINKLA_CONF_AVAILABLE = False
+  tinkla_conf = None
+
 # Comma Pedal constants (from Tinkla)
 PEDAL_M1 = 0.050796813
 PEDAL_M2 = 0.101593626
 PEDAL_D = -22.85856576
 PEDAL_TIMEOUT_MS = 500
 
-# HSO (Human Steering Override) constants (from Tinkla)
+# HSO (Human Steering Override) default constants (fallback if tinkla_conf unavailable)
 HSO_HANDS_ON_LIMIT = 2.0    # hands_on_level threshold to trigger HSO
 HSO_NUMB_PERIOD_S = 1.5     # Seconds to delay steering reengagement after HSO
 
@@ -94,9 +102,20 @@ class CarState(CarStateBase):
     self.human_control = False              # True when HSO is active
     self.frame_human_steered = 0            # Frame when HSO was triggered
     self.hso_steering_pressed = False       # True if hands_on_level >= threshold
-    self.enableHSO = True                   # HSO feature enabled (always on for Pre-AP)
-    self.hso_numb_period = HSO_NUMB_PERIOD_S  # Resume delay in seconds
-    self.hands_on_limit = HSO_HANDS_ON_LIMIT  # hands_on_level threshold
+    
+    # Read HSO settings from persistent config (or use defaults)
+    if TINKLA_CONF_AVAILABLE and tinkla_conf is not None:
+      self.enableHSO = tinkla_conf.hso_enabled
+      self.hso_numb_period = tinkla_conf.hso_numb_period
+      self.enableDoublePull = tinkla_conf.double_pull_enabled
+      self.double_pull_window_ms = tinkla_conf.double_pull_window_ms
+    else:
+      self.enableHSO = True                   # Default ON for safety
+      self.hso_numb_period = HSO_NUMB_PERIOD_S  # Default 1.5s
+      self.enableDoublePull = True            # Default ON for Pre-AP
+      self.double_pull_window_ms = STALK_DOUBLE_PULL_MS  # Default 750ms
+    
+    self.hands_on_limit = HSO_HANDS_ON_LIMIT  # hands_on_level threshold (always 2.0)
     
     # Turn signal state (needed for HSO logic)
     self.turn_signal_stalk_state = 0
@@ -356,13 +375,16 @@ class CarState(CarStateBase):
       # ==============================================
       # Double-Pull State Machine (Tinkla-style)
       # ==============================================
-      # Single pull = Lateral only (steering)
-      # Double pull within 750ms = Full control (steering + longitudinal)
+      # When enableDoublePull is True:
+      #   Single pull = Lateral only (steering)
+      #   Double pull within window = Full control (steering + longitudinal)
+      # When enableDoublePull is False:
+      #   Single pull = Full control (like stock OpenPilot)
       #
       # Logic flow:
       # 1. On MAIN press: record time, wait to see if double-pull
-      # 2. If second MAIN within 750ms: enable full control
-      # 3. If 750ms passes without second pull: enable steering only
+      # 2. If second MAIN within window: enable full control
+      # 3. If window passes without second pull: enable steering only
       # 4. CANCEL always disables everything
       # ==============================================
       
@@ -376,22 +398,29 @@ class CarState(CarStateBase):
           # Pull toward driver - engagement button
           be.type = ButtonType.setCruise
           
-          # Check for double-pull
-          double_pull = (curr_time_ms - self.stalk_pull_time_ms) < STALK_DOUBLE_PULL_MS
-          
-          # Update timing
-          self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
-          self.stalk_pull_time_ms = curr_time_ms
-          
-          if double_pull:
-            # Double pull detected! Enable full control (steering + longitudinal)
+          if self.enableDoublePull:
+            # Double-pull mode: check for second pull within window
+            double_pull = (curr_time_ms - self.stalk_pull_time_ms) < self.double_pull_window_ms
+            
+            # Update timing
+            self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
+            self.stalk_pull_time_ms = curr_time_ms
+            
+            if double_pull:
+              # Double pull detected! Enable full control (steering + longitudinal)
+              self.cruiseEnabled = True
+              self.enableLongControl = True
+              self.enableJustCC = False
+              self.pending_enable = False
+            else:
+              # First pull - mark as pending, wait for possible second pull
+              self.pending_enable = True
+          else:
+            # Double-pull disabled: single pull = full control (stock behavior)
             self.cruiseEnabled = True
             self.enableLongControl = True
             self.enableJustCC = False
             self.pending_enable = False
-          else:
-            # First pull - mark as pending, wait for possible second pull
-            self.pending_enable = True
             
         elif state == CruiseButtons.CANCEL:
           # Push away - cancel everything
@@ -417,10 +446,10 @@ class CarState(CarStateBase):
         
         buttonEvents.append(be)
       
-      # Check for single-pull timeout (750ms passed without second pull)
+      # Check for single-pull timeout (window passed without second pull)
       if self.pending_enable:
         time_since_pull = curr_time_ms - self.stalk_pull_time_ms
-        if time_since_pull > STALK_DOUBLE_PULL_MS:
+        if time_since_pull > self.double_pull_window_ms:
           # Single pull confirmed - enable steering only (no longitudinal)
           self.cruiseEnabled = True
           self.enableLongControl = False
@@ -429,10 +458,12 @@ class CarState(CarStateBase):
       
       # Also check: if currently in full control mode and single pull happens,
       # fall back to steering only (Tinkla behavior)
-      if (self.enableLongControl and 
+      # Note: This is handled by the above logic - this block is for documentation
+      if (self.enableDoublePull and 
+          self.enableLongControl and 
           self.cruiseEnabled and
-          (curr_time_ms - self.stalk_pull_time_ms) > STALK_DOUBLE_PULL_MS and
-          (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) > STALK_DOUBLE_PULL_MS and
+          (curr_time_ms - self.stalk_pull_time_ms) > self.double_pull_window_ms and
+          (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) > self.double_pull_window_ms and
           self.stalk_pull_time_ms > 0):
         # A single pull happened while in full control - fall back to steering only
         # This only triggers if we had a pull that wasn't a double-pull
