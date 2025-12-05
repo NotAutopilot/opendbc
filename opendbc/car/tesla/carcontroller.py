@@ -161,39 +161,28 @@ class CarController(CarControllerBase):
              # ============================================
              pedal_ready = getattr(CS, 'pedal_available', False)
              pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
-             
+
              if pedal_ready or pedal_calibrated:
                # Calculate pedal command from acceleration request
                pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
-               
+
                # Check for gas override (human pressing pedal)
                # NOTE: pedal_interceptor_value is in VOLTAGE units from carstate.py
-               # Human override should only trigger if human is SIGNIFICANTLY pressing pedal
-               # 
-               # The calibration-based conversion is unreliable if calibration is wrong/default.
-               # Instead, use a simple voltage threshold that works regardless of calibration:
-               # - Idle pedal voltage: ~25-35 (varies by pedal)
-               # - Pressed pedal voltage: ~50+ (clear human input)
-               # 
-               # We use voltage > 50 as a conservative threshold for human override.
-               # This means human must press pedal significantly to take over.
+               # Human override threshold: voltage > 50 means human is pressing
                pedal_value_voltage = getattr(CS, 'pedal_interceptor_value', 0.0)
-               
-               # Simple voltage threshold for human override (no calibration dependency)
-               # Only pass through if human is clearly pressing the pedal
-               HUMAN_OVERRIDE_VOLTAGE_THRESHOLD = 50.0  # Voltage where human is clearly pressing
-               
+               HUMAN_OVERRIDE_VOLTAGE_THRESHOLD = 50.0
+
                if pedal_value_voltage > HUMAN_OVERRIDE_VOLTAGE_THRESHOLD:
                  # Human is pressing pedal hard - pass through their input
                  pedal_cmd = pedal_value_voltage
-               
+
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
-            else:
-              # Pedal not ready - send idle command
-              # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
-              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
-              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-             
+             else:
+               # Pedal not ready - send idle command
+               # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+
            elif long_active and not use_pedal:
              # ============================================
              # Mode 2: Cruise Button Spam (Tinkla ACC_module)
@@ -203,7 +192,7 @@ class CarController(CarControllerBase):
              cruise_msg = self._calc_cruise_button(CS, actuators)
              if cruise_msg is not None:
                can_sends.append(cruise_msg)
-               
+
            else:
              # ============================================
              # Mode 3: Steering Only (Single Pull)
