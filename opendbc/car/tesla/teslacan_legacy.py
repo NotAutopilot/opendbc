@@ -135,8 +135,10 @@ class TeslaCANPreAP(TeslaCANRaven):
     # Calculate and append checksum
     struct.pack_into("B", msg, msg_len - 1, self.checksum(msg_id, msg.raw))
     
-    # Return in standard format: [msg_id, bustime, data, bus]
-    return [msg_id, 0, msg.raw, pedal_can_bus]
+    # Return in same format as make_can_msg: (address, data_bytes, bus)
+    # CRITICAL: Must be a 3-tuple, NOT a 4-element list!
+    # can_list_to_can_capnp expects: msg[0]=addr, msg[1]=data, msg[2]=bus
+    return (msg_id, bytes(msg.raw), pedal_can_bus)
 
   def create_epas_control(self, counter, mode):
     # EPB_epasControl (0x214 / 532) - Ported from Tinkla safety_tesla.h do_EPB_epasControl()
