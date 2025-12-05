@@ -188,10 +188,11 @@ class CarController(CarControllerBase):
                  pedal_cmd = pedal_value_voltage
                
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
-             else:
-               # Pedal not ready - send idle command
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if pedal_calibrated else 0.0
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+            else:
+              # Pedal not ready - send idle command
+              # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
+              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              
            elif long_active and not use_pedal:
              # ============================================
@@ -209,10 +210,8 @@ class CarController(CarControllerBase):
              # ============================================
              # Send idle pedal to keep it alive but not accelerating
              if use_pedal:
-               if tinkla_conf.pedal_calibrated:
-                 idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
-               else:
-                 idle_pedal = 0.0
+               # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              # Reset state when not active
              self.pedal_steady = 0.0
@@ -229,10 +228,14 @@ class CarController(CarControllerBase):
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
            # Pre-AP cancellation - send idle pedal with enable=0
            # NOTE: idx is managed internally by create_pedal_command
-           if TINKLA_AVAILABLE and tinkla_conf.pedal_calibrated:
+           # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
+           if TINKLA_AVAILABLE and tinkla_conf:
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
            else:
-             idle_pedal = 0.0
+             # Fallback if tinkla_conf is unavailable: use approximate conversion
+             # Default: pedal_zero = -1, pedal_factor = 1.0
+             # di_to_pedal(0) = -1 + (0 - 0) / 1.0 = -1
+             idle_pedal = -1.0
            can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
         else:
            cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
@@ -263,8 +266,15 @@ class CarController(CarControllerBase):
       Pedal command value (transformed from DI units to pedal voltage)
     """
     if not TINKLA_AVAILABLE or not tinkla_conf:
-      # Fallback: simple linear mapping if config unavailable
-      return float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 50.]), -5, 50))
+      # Fallback: simple linear mapping if tinkla_conf unavailable
+      # Map accel request to DI units, then convert to pedal voltage using default calibration
+      # DI range: -5 (regen) to ~50 (moderate accel)
+      # Default calibration: pedal_zero = -1, pedal_factor = 1.0
+      # Conversion: pedal_cmd = pedal_zero + (di_value - 0) / pedal_factor = di_value - 1
+      pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 50.]), -5, 50))
+      # Apply default DI→pedal conversion (val - 1)
+      pedal_cmd = pedal_di - 1.0
+      return pedal_cmd
     
     # ============================================
     # Step 1: Calculate speed-dependent limits
@@ -321,14 +331,25 @@ class CarController(CarControllerBase):
     pedal_di = self._pedal_hysteresis(pedal_di, True)
     
     # ============================================
-    # Step 5: Transform to pedal voltage
+    # Step 5: Transform DI units to pedal voltage
     # ============================================
+    # CRITICAL: Raw DI values are too small for the pedal hardware.
+    # The pedal expects voltage/count values scaled via the calibration transform.
+    # 
+    # The old Tinkla code (PCC_module.py line 366-367) ALWAYS applies the 
+    # transform when enabled, regardless of calibration status:
+    #   if enable_pedal == 1:
+    #       pedal2send = transform_di_to_pedal(pedal2send)
+    #
+    # The default calibration values (factor=1.0, zero=-1) provide a reasonable
+    # baseline that works even without explicit calibration. The pedal_calibrated
+    # flag only controls whether to show warnings/allow engagement in the old code,
+    # NOT whether to skip the conversion.
+    #
+    # Formula: pedal_cmd = pedal_zero + (di_value - DI_ZERO) / pedal_factor
+    # With defaults: pedal_cmd = -1 + (di_value - 0) / 1.0 = di_value - 1
     
-    if tinkla_conf.pedal_calibrated:
-      pedal_cmd = tinkla_conf.di_to_pedal(pedal_di)
-    else:
-      # Uncalibrated: send DI value directly (will likely not work well)
-      pedal_cmd = pedal_di
+    pedal_cmd = tinkla_conf.di_to_pedal(pedal_di)
     
     # Save state for next iteration
     self.prev_pedal_di = pedal_di
