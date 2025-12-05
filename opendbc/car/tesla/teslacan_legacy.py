@@ -79,22 +79,73 @@ class TeslaCANPreAP(TeslaCANRaven):
     # Pedal CAN bus: 2 by default, can be 0 if configured
     # This will be set by carcontroller based on tinkla_conf
     self.pedal_can_bus = 2
+    # CRITICAL: Dedicated pedal counter that increments with each message sent
+    # This is required by the pedal firmware's watchdog - it expects consecutive counters
+    # If counter doesn't increment, the firmware rejects the message (FAULT_BAD_CHECKSUM or timeout)
+    self.pedal_idx = 0
 
-  def create_pedal_command(self, accel_command: float, idx: int, enable: int = 1, pedal_can_bus: int = None):
+  @staticmethod
+  def pedal_checksum(msg_id: int, dat: bytes) -> int:
+    """
+    Calculate checksum for Comma Pedal GAS_COMMAND message.
+    
+    This is the EXACT algorithm from Tinkla's panda/board/pedal/main.c:
+    
+      uint8_t pedal_checksum(uint8_t *dat, int len, int addr) {
+        int i;
+        uint8_t s = 0;
+        s += ((addr)&0xFF) + ((addr>>8)&0xFF);
+        for (i = 0; i < len; i++) {
+          s = (s + dat[i]) & 0xFF;
+        }
+        return s;
+      }
+    
+    The firmware calls: pedal_checksum(dat, 5, 0x551)
+    Which sums: addr_low + addr_high + dat[0] + dat[1] + dat[2] + dat[3] + dat[4]
+    
+    In Python, we pass the full 6-byte buffer where byte[5] is 0 at calculation time.
+    sum(dat) = sum(dat[0:5]) + 0 = sum(dat[0:5]), which is what firmware expects.
+    
+    Args:
+      msg_id: CAN message ID (0x551 for pedal command)
+      dat: Message bytes (6 bytes, with byte 5 being 0 before checksum is written)
+      
+    Returns:
+      8-bit checksum value
+    """
+    # Split address into low and high bytes
+    ret = (msg_id & 0xFF) + ((msg_id >> 8) & 0xFF)
+    # Sum all data bytes (byte 5 will be 0 at this point)
+    ret += sum(dat)
+    return ret & 0xFF
+
+  def create_pedal_command(self, accel_command: float, enable: int = 1, pedal_can_bus: int = None):
     """
     Create GAS_COMMAND (0x551) message to Comma Pedal.
     
-    This is a direct port of Tinkla's teslacan.py create_pedal_command_msg().
-    Uses raw struct packing to ensure byte-for-byte compatibility.
+    BYTE-FOR-BYTE COMPATIBLE with Tinkla's teslacan.py create_pedal_command_msg().
+    Uses raw struct packing to ensure exact binary compatibility.
+    
+    CRITICAL: This function manages its own rolling counter (self.pedal_idx) that
+    increments with each call. The pedal firmware REQUIRES consecutive counter values
+    or it will reject the message with FAULT_BAD_CHECKSUM or go into timeout.
+    
+    Message Format (6 bytes):
+      Byte 0: GAS_COMMAND high byte (MSB)
+      Byte 1: GAS_COMMAND low byte (LSB)  
+      Byte 2: GAS_COMMAND2 high byte (MSB) - redundant value for safety
+      Byte 3: GAS_COMMAND2 low byte (LSB)
+      Byte 4: [Enable:1][Reserved:3][Counter:4] = (enable << 7) | (idx & 0x0F)
+      Byte 5: Checksum
     
     Args:
-      accel_command: Pedal voltage value (from calibration transform)
-      idx: Rolling counter 0-15
-      enable: 1 to enable pedal, 0 to disable
+      accel_command: Pedal voltage value (from calibration transform via tinkla_conf.di_to_pedal())
+      enable: 1 to enable pedal actuation, 0 to disable (idle/coast)
       pedal_can_bus: CAN bus for pedal (0 or 2), defaults to self.pedal_can_bus
       
     Returns:
-      CAN message tuple (msg_id, bustime, data, bus)
+      CAN message tuple: (msg_id, data_bytes, bus)
     """
     msg_id = GAS_COMMAND_ID  # 0x551
     msg_len = 6
@@ -102,43 +153,67 @@ class TeslaCANPreAP(TeslaCANRaven):
     if pedal_can_bus is None:
       pedal_can_bus = self.pedal_can_bus
     
-    # Apply Tinkla's encoding formula
-    # Formula: raw_value = (voltage - D) / M
+    # Get current counter value and increment for next call
+    # This is how Tinkla does it in PCC_module.py
+    idx = self.pedal_idx
+    self.pedal_idx = (self.pedal_idx + 1) % 16
+    
+    # Apply Tinkla's encoding formula from teslacan.py:
+    #   m1 = 0.050796813  (primary scaling)
+    #   m2 = 0.101593626  (secondary scaling = 2 * m1 for redundancy check)
+    #   d = -22.85856576  (offset)
+    #   int_accelCommand = int((accelCommand - d) / m1)
+    #   int_accelCommand2 = int((accelCommand - d) / m2)
     if enable == 1:
       int_accel_command = int((accel_command - PEDAL_D) / PEDAL_M1)
       int_accel_command2 = int((accel_command - PEDAL_D) / PEDAL_M2)
     else:
+      # When disabled, send zero values (Tinkla behavior)
       int_accel_command = 0
       int_accel_command2 = 0
     
-    # Clip to valid range (16-bit unsigned)
+    # Clip to valid 16-bit unsigned range (same as Tinkla's clip(val, 0, 65534))
     int_accel_command = max(0, min(65534, int_accel_command))
     int_accel_command2 = max(0, min(65534, int_accel_command2))
     
-    # Pack message bytes (Tinkla format)
-    # Bytes 0-1: Primary command (big-endian)
-    # Bytes 2-3: Secondary command (big-endian, for redundancy)
-    # Byte 4: Enable flag (bit 7) + counter (bits 0-3)
-    # Byte 5: Checksum
+    # Pack message bytes using EXACT Tinkla format
+    # From teslacan.py create_pedal_command_msg():
+    #   struct.pack_into(
+    #     "BBBBB", msg, 0,
+    #     int((int_accelCommand >> 8) & 0xFF),  # Byte 0: cmd1 high
+    #     int_accelCommand & 0xFF,               # Byte 1: cmd1 low
+    #     int((int_accelCommand2 >> 8) & 0xFF), # Byte 2: cmd2 high
+    #     int_accelCommand2 & 0xFF,              # Byte 3: cmd2 low
+    #     ((enable << 7) + idx) & 0xFF,          # Byte 4: enable|counter
+    #   )
     msg = create_string_buffer(msg_len)
     struct.pack_into(
       "BBBBB",
       msg,
       0,
-      (int_accel_command >> 8) & 0xFF,
-      int_accel_command & 0xFF,
-      (int_accel_command2 >> 8) & 0xFF,
-      int_accel_command2 & 0xFF,
-      ((enable << 7) + (idx & 0x0F)) & 0xFF,
+      int((int_accel_command >> 8) & 0xFF),
+      int(int_accel_command & 0xFF),
+      int((int_accel_command2 >> 8) & 0xFF),
+      int(int_accel_command2 & 0xFF),
+      int(((enable << 7) + idx) & 0xFF),
     )
     
-    # Calculate and append checksum
-    struct.pack_into("B", msg, msg_len - 1, self.checksum(msg_id, msg.raw))
+    # Calculate and append checksum (Tinkla: self.checksum(msg_id, msg.raw))
+    # At this point msg.raw[5] is 0x00, so sum includes bytes 0-4 only
+    checksum = self.pedal_checksum(msg_id, msg.raw)
+    struct.pack_into("B", msg, msg_len - 1, checksum)
     
-    # Return in same format as make_can_msg: (address, data_bytes, bus)
-    # CRITICAL: Must be a 3-tuple, NOT a 4-element list!
-    # can_list_to_can_capnp expects: msg[0]=addr, msg[1]=data, msg[2]=bus
+    # Return format: (address, data_bytes, bus)
+    # This matches openpilot's make_can_msg() and can_list_to_can_capnp() expectations
     return (msg_id, bytes(msg.raw), pedal_can_bus)
+
+  def get_pedal_idx(self) -> int:
+    """Return current pedal counter value (for debugging/logging)."""
+    return self.pedal_idx
+
+  def reset_pedal_idx(self):
+    """Reset pedal counter to 0 (use when recovering from fault state)."""
+    self.pedal_idx = 0
 
   def create_epas_control(self, counter, mode):
     # EPB_epasControl (0x214 / 532) - Ported from Tinkla safety_tesla.h do_EPB_epasControl()

@@ -175,7 +175,9 @@ class CarController(CarControllerBase):
            # Track state transitions
            self.prev_enable_long_control = cs_enable_long
            
-           idx = (self.frame // 4) % 16
+           # NOTE: pedal_idx is now managed internally by tesla_can.create_pedal_command()
+           # It uses a dedicated counter that increments with each message sent.
+           # This is CRITICAL for the pedal firmware's watchdog which requires consecutive counters.
            use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
            
            if long_active and use_pedal:
@@ -194,11 +196,11 @@ class CarController(CarControllerBase):
                if pedal_value > (PEDAL_DI_PRESSED + 5.0):
                  pedal_cmd = pedal_value  # Pass through human input
                
-               can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, idx, enable=1))
+               can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
              else:
                # Pedal not ready - send idle command
                idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if pedal_calibrated else 0.0
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              
            elif long_active and not use_pedal:
              # ============================================
@@ -220,7 +222,7 @@ class CarController(CarControllerBase):
                  idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
                else:
                  idle_pedal = 0.0
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              # Reset state when not active
              self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
@@ -235,12 +237,12 @@ class CarController(CarControllerBase):
       if CC.cruiseControl.cancel:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
            # Pre-AP cancellation - send idle pedal with enable=0
-           idx = (self.frame // 4) % 16
+           # NOTE: idx is managed internally by create_pedal_command
            if TINKLA_AVAILABLE and tinkla_conf.pedal_calibrated:
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
            else:
              idle_pedal = 0.0
-           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, idx, enable=0))
+           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
         else:
            cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
            can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
