@@ -113,7 +113,7 @@ class CarState(CarStateBase):
       self.enableHSO = True                   # Default ON for safety
       self.hso_numb_period = HSO_NUMB_PERIOD_S  # Default 1.5s
       self.enableDoublePull = True            # Default ON for Pre-AP
-      self.double_pull_window_ms = STALK_DOUBLE_PULL_MS  # Default 750ms
+      self.double_pull_window_ms = STALK_DOUBLE_PULL_MS  # Default 2000ms (relaxed)
     
     self.hands_on_limit = HSO_HANDS_ON_LIMIT  # hands_on_level threshold (always 2.0)
     
@@ -386,45 +386,74 @@ class CarState(CarStateBase):
       # 2. If second MAIN within window: enable full control
       # 3. If window passes without second pull: enable steering only
       # 4. CANCEL always disables everything
+      #
+      # CRITICAL: Use 2000ms window (relaxed timing for testing)
       # ==============================================
+      
+      # DEBUG: Log every state change
+      if self.cruise_buttons != self.prev_cruise_buttons:
+        print(f"[STALK] Button Change: {self.prev_cruise_buttons} -> {self.cruise_buttons} at {curr_time_ms}ms")
       
       if self.cruise_buttons != self.prev_cruise_buttons:
         be = structs.CarState.ButtonEvent()
         be.pressed = self.cruise_buttons != CruiseButtons.IDLE
         
+        # CRITICAL FIX: Only use the NEW button state for press, previous for release
         state = self.cruise_buttons if be.pressed else self.prev_cruise_buttons
         
-        if state == CruiseButtons.MAIN:
-          # Pull toward driver - engagement button
+        # ==============================================
+        # MAIN = Pull toward driver (engagement)
+        # CRITICAL: Only process on PRESS, not RELEASE!
+        # ==============================================
+        if state == CruiseButtons.MAIN and be.pressed:
+          # Pull toward driver - engagement button (PRESS only!)
           be.type = ButtonType.setCruise
+          
+          print(f"[STALK] *** PULL DETECTED! *** pressed={be.pressed} time={curr_time_ms}ms")
+          print(f"[STALK]   enableDoublePull={self.enableDoublePull}")
+          print(f"[STALK]   last_pull_time={self.stalk_pull_time_ms}ms")
+          print(f"[STALK]   time_since_last={(curr_time_ms - self.stalk_pull_time_ms)}ms")
+          print(f"[STALK]   window={self.double_pull_window_ms}ms")
           
           if self.enableDoublePull:
             # Double-pull mode: check for second pull within window
-            double_pull = (curr_time_ms - self.stalk_pull_time_ms) < self.double_pull_window_ms
+            time_since_last_pull = curr_time_ms - self.stalk_pull_time_ms
+            double_pull = time_since_last_pull < self.double_pull_window_ms and self.stalk_pull_time_ms > 0
             
-            # Update timing
+            print(f"[STALK]   double_pull={double_pull}")
+            
+            # Update timing AFTER checking
             self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
             self.stalk_pull_time_ms = curr_time_ms
             
             if double_pull:
               # Double pull detected! Enable full control (steering + longitudinal)
+              print(f"[STALK] *** DOUBLE PULL TRIGGERED! *** Enabling FULL CONTROL!")
               self.cruiseEnabled = True
               self.enableLongControl = True
               self.enableJustCC = False
               self.pending_enable = False
             else:
               # First pull - mark as pending, wait for possible second pull
+              print(f"[STALK] First pull - waiting for possible second pull...")
               self.pending_enable = True
           else:
             # Double-pull disabled: single pull = full control (stock behavior)
+            print(f"[STALK] Double-pull DISABLED - engaging FULL CONTROL on single pull")
             self.cruiseEnabled = True
             self.enableLongControl = True
             self.enableJustCC = False
             self.pending_enable = False
+        
+        elif state == CruiseButtons.MAIN and not be.pressed:
+          # MAIN button RELEASE - just log it, don't process engagement
+          be.type = ButtonType.setCruise
+          print(f"[STALK] Pull RELEASED (ignored for engagement)")
             
         elif state == CruiseButtons.CANCEL:
           # Push away - cancel everything
           be.type = ButtonType.cancel
+          print(f"[STALK] *** CANCEL *** Disabling all control")
           self.cruiseEnabled = False
           self.enableLongControl = False
           self.enableJustCC = False
@@ -451,23 +480,11 @@ class CarState(CarStateBase):
         time_since_pull = curr_time_ms - self.stalk_pull_time_ms
         if time_since_pull > self.double_pull_window_ms:
           # Single pull confirmed - enable steering only (no longitudinal)
+          print(f"[STALK] Single pull TIMEOUT ({time_since_pull}ms > {self.double_pull_window_ms}ms) -> STEERING ONLY")
           self.cruiseEnabled = True
           self.enableLongControl = False
           self.enableJustCC = True
           self.pending_enable = False
-      
-      # Also check: if currently in full control mode and single pull happens,
-      # fall back to steering only (Tinkla behavior)
-      # Note: This is handled by the above logic - this block is for documentation
-      if (self.enableDoublePull and 
-          self.enableLongControl and 
-          self.cruiseEnabled and
-          (curr_time_ms - self.stalk_pull_time_ms) > self.double_pull_window_ms and
-          (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) > self.double_pull_window_ms and
-          self.stalk_pull_time_ms > 0):
-        # A single pull happened while in full control - fall back to steering only
-        # This only triggers if we had a pull that wasn't a double-pull
-        pass  # Keep current state, the above logic handles new pulls
       
       ret.buttonEvents = buttonEvents
       

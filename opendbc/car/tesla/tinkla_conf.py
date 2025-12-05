@@ -21,7 +21,7 @@ DEFAULT_CONFIG = {
   # Control Modes
   'hso_enabled': True,
   'hso_numb_period': 1.5,
-  'double_pull_window_ms': 750,
+  'double_pull_window_ms': 2000,  # 2 seconds - relaxed window for double-pull detection
   # Longitudinal
   'use_pedal': False,
   'pedal_calibrated': False,
