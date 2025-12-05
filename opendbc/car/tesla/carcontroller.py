@@ -69,6 +69,14 @@ class CarController(CarControllerBase):
     self.last_cruise_button_time_ms = 0  # Timestamp of last button press
     self.human_cruise_action_time_ms = 0  # Timestamp of last human stalk input
     self.prev_cruise_buttons = 0  # Previous stalk state for edge detection
+    
+    # ============================================
+    # State Tracking for Alerts and Debug
+    # ============================================
+    self.prev_long_active = False       # Previous long control state
+    self.prev_lat_active = False        # Previous lateral control state
+    self.prev_enable_long_control = False  # Previous enableLongControl from CS
+    self.alert_frames = 0               # Counter for showing alerts
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
@@ -162,7 +170,31 @@ class CarController(CarControllerBase):
            # - Single pull = Lateral only (enableJustCC) -> Send idle pedal
            # - Double pull = Full control (enableLongControl) -> Active control
            
-           long_active = CC.longActive and getattr(CS, 'enableLongControl', True)
+           # Get engagement state from CarState
+           # NOTE: We use CS.enableLongControl (our double-pull flag) AND cruise being enabled
+           cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
+           cs_enable_long = getattr(CS, 'enableLongControl', False)
+           
+           # Long control is active when:
+           # 1. Cruise is enabled (via stalk pull)
+           # 2. Double-pull was detected (enableLongControl = True)
+           # 3. CC.longActive is True (from controlsd) OR we're forcing it based on our state
+           long_active = cs_cruise_enabled and cs_enable_long
+           
+           # Debug: Log state changes
+           if self.frame % 100 == 0 or cs_enable_long != self.prev_enable_long_control:
+             print(f"[PCC] frame={self.frame} cruiseEnabled={cs_cruise_enabled} enableLong={cs_enable_long} CC.longActive={CC.longActive} -> long_active={long_active}")
+           
+           # Detect state transitions for alerts
+           if cs_enable_long and not self.prev_enable_long_control:
+             print("[PCC] *** PEDAL CRUISE ENGAGED (Double Pull) ***")
+             self.alert_frames = 100  # Show alert for ~1 second
+           elif not cs_enable_long and self.prev_enable_long_control:
+             print("[PCC] *** PEDAL CRUISE DISENGAGED ***")
+             self.alert_frames = 100
+           
+           self.prev_enable_long_control = cs_enable_long
+           
            idx = (self.frame // 4) % 16
            use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
            
