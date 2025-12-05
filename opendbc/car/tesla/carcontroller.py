@@ -303,8 +303,12 @@ class CarController(CarControllerBase):
     # From PCC_module.py:
     # PEDAL_MAX_DOWN = MAX_PEDAL_VALUE * _DT / 0.4
     # PEDAL_MAX_UP = (MAX_PEDAL_VALUE - self.prev_tesla_pedal) * _DT
-    
-    dt = 0.04  # 25Hz (frame % 4)
+    #
+    # Tinkla uses _DT = 0.01 (100Hz internal loop) but we run at 25Hz (frame % 4).
+    # We must use the same _DT as Tinkla for equivalent rate limiting behavior.
+    # The rate limits are per-iteration, so with 4x fewer iterations we need
+    # to scale the limits to match the same per-second rate.
+    dt = 0.04  # 25Hz (frame % 4) - 4x Tinkla's 100Hz
     pedal_max_down = max_pedal_value * dt / 0.4  # Smooth deceleration
     pedal_max_up = (max_pedal_value - self.prev_pedal_di) * dt  # Smooth acceleration
     
@@ -312,12 +316,16 @@ class CarController(CarControllerBase):
     pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
     
     # ============================================
-    # Step 4: Apply hysteresis
+    # Step 4: Apply hysteresis (conditionally, like Tinkla)
     # ============================================
-    # From PCC_module.py pedal_hysteresis():
-    # Prevents oscillation by smoothing small changes
-    
-    pedal_di = self._pedal_hysteresis(pedal_di, True)
+    # From PCC_module.py:
+    # Tinkla ONLY applies hysteresis when very close to set speed:
+    #   if abs(CS.out.vEgo * CV.MS_TO_KPH - self.pedal_speed_kph) < 0.8 and CS.out.vEgo > 5.:
+    #       tesla_pedal = self.pedal_hysteresis(tesla_pedal, enable_pedal)
+    #
+    # Since we don't track pedal_speed_kph here, we skip hysteresis by default.
+    # The rate limiting above provides sufficient smoothing.
+    # TODO: Pass in target speed to enable hysteresis when close to target
     
     # ============================================
     # Step 5: Transform DI units to pedal voltage
