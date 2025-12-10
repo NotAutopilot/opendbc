@@ -4,6 +4,7 @@ from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons
 from opendbc.car.tesla.radar_interface import RadarInterface
+from cereal import car
 
 # Import config helper - may fail on non-comma devices during testing
 try:
@@ -112,4 +113,21 @@ class CarInterface(CarInterfaceBase):
 
     # ret.dashcamOnly = candidate in (CAR.TESLA_MODEL_X) # dashcam only, pending find invalidLkasSetting signal
 
+    return ret
+
+  def update(self, can_packets: list[tuple[int, list]]) -> structs.CarState:
+    ret = super().update(can_packets)
+
+    if self.CS.longCtrlEvent:
+      # Map string event to standard event
+      if self.CS.longCtrlEvent == "pccEnabled":
+        ret.events.append(car.CarEvent.new_message(name=car.CarEvent.EventName.pcmEnable, enable=True))
+      elif self.CS.longCtrlEvent == "pccDisabled":
+        ret.events.append(car.CarEvent.new_message(name=car.CarEvent.EventName.pcmDisable, userDisable=True))
+      elif self.CS.longCtrlEvent == "pedalCalibrationNeeded":
+        ret.events.append(car.CarEvent.new_message(name=car.CarEvent.EventName.calibrationIncomplete, noEntry=True))
+      
+      # Clear the event so it doesn't trigger repeatedly
+      self.CS.longCtrlEvent = None
+    
     return ret

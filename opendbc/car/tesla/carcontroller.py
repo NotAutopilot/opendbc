@@ -44,6 +44,21 @@ def get_safety_CP():
   return CarInterface.get_non_essential_params("TESLA_MODEL_Y")
 
 
+# Constants from Tinkla tunes.py
+PEDAL_DI_MIN = -5
+PEDAL_DI_ZERO = 0
+PEDAL_DI_PRESSED = 2
+PEDAL_CALIB_MIN = -3.
+PEDAL_CALIB_MAX = 99.6
+PEDAL_CALIB_FACTOR = 1.
+PEDAL_CALIB_ZERO = 0.
+# Derived constants
+PEDAL_FACTOR = PEDAL_CALIB_FACTOR
+PEDAL_ZERO = PEDAL_CALIB_ZERO - 1 / PEDAL_FACTOR
+
+def transform_di_to_pedal(val):
+  return PEDAL_ZERO + (val - PEDAL_DI_ZERO) / PEDAL_FACTOR
+
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
     super().__init__(dbc_names, CP)
@@ -180,7 +195,7 @@ class CarController(CarControllerBase):
              else:
                # Pedal not ready - send idle command
                # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+               idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
 
            elif long_active and not use_pedal:
@@ -200,7 +215,7 @@ class CarController(CarControllerBase):
              # Send idle pedal to keep it alive but not accelerating
              if use_pedal:
                # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
+               idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              # Reset state when not active
              self.pedal_steady = 0.0
@@ -221,10 +236,8 @@ class CarController(CarControllerBase):
            if TINKLA_AVAILABLE and tinkla_conf:
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
            else:
-             # Fallback if tinkla_conf is unavailable: use approximate conversion
-             # Default: pedal_zero = -1, pedal_factor = 1.0
-             # di_to_pedal(0) = -1 + (0 - 0) / 1.0 = -1
-             idle_pedal = -1.0
+             # Fallback if tinkla_conf is unavailable
+             idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
            can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
         else:
            cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
@@ -241,6 +254,9 @@ class CarController(CarControllerBase):
   # Pedal Control Logic (Ported from Tinkla PCC_module.py)
   # ============================================
   
+  def _transform_di_to_pedal(self, val):
+      return PEDAL_ZERO + (val - PEDAL_DI_ZERO) / PEDAL_FACTOR
+
   def _calc_pedal_command(self, accel_request: float, v_ego: float) -> float:
     """
     Calculate pedal command from acceleration request.
@@ -257,12 +273,9 @@ class CarController(CarControllerBase):
     if not TINKLA_AVAILABLE or not tinkla_conf:
       # Fallback: simple linear mapping if tinkla_conf unavailable
       # Map accel request to DI units, then convert to pedal voltage using default calibration
-      # DI range: -5 (regen) to ~50 (moderate accel)
-      # Default calibration: pedal_zero = -1, pedal_factor = 1.0
-      # Conversion: pedal_cmd = pedal_zero + (di_value - 0) / pedal_factor = di_value - 1
-      pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 50.]), -5, 50))
-      # Apply default DI→pedal conversion (val - 1)
-      pedal_cmd = pedal_di - 1.0
+      # DI range: -5 (regen) to 100 (max accel) - Matches Tinkla's range
+      pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 100.]), -5, 100))
+      pedal_cmd = self._transform_di_to_pedal(pedal_di)
       return pedal_cmd
     
     # ============================================
