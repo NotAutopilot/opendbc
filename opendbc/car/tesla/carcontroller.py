@@ -140,108 +140,90 @@ class CarController(CarControllerBase):
       cntr = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(cntr))
 
-    # Longitudinal control
-    if self.CP.openpilotLongitudinalControl:
+    # ==============================================
+    # Pre-AP Longitudinal Control (Tinkla port)
+    # CRITICAL: Pedal keepalive logic moved OUTSIDE of openpilotLongitudinalControl check
+    # to ensure pedal always gets messages when present, preventing firmware faults.
+    # ==============================================
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      # Detect if pedal hardware is present (from CarState parsing GAS_SENSOR messages)
+      pedal_detected = getattr(CS, 'pedal_available', False)
+      pedal_timeout = getattr(CS, 'pedal_timeout', True)
+      
+      # Config-based pedal enable (user explicitly enabled pedal control)
+      use_pedal_config = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
+      
+      # SAFETY: If pedal hardware is detected OR config says use pedal, we MUST send keepalive
+      # This prevents the pedal firmware from faulting due to message timeout
+      pedal_hardware_present = pedal_detected or use_pedal_config
+      
+      if self.frame % 4 == 0:  # 25Hz pedal message rate
+        if self.CP.openpilotLongitudinalControl and pedal_hardware_present:
+          # Get engagement state from CarState (Tinkla-style)
+          cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
+          cs_enable_long = getattr(CS, 'enableLongControl', False)
+          
+          # Long control is active when cruise is enabled AND double-pull was detected
+          long_active = cs_cruise_enabled and cs_enable_long
+          
+          # Track state transitions
+          self.prev_enable_long_control = cs_enable_long
+          
+          pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
+          
+          if long_active and (pedal_detected or pedal_calibrated):
+            # ============================================
+            # Active Pedal Control Mode
+            # ============================================
+            # Calculate pedal command from acceleration request
+            pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+
+            # Check for gas override (human pressing pedal)
+            pedal_value_voltage = getattr(CS, 'pedal_interceptor_value', 0.0)
+            HUMAN_OVERRIDE_VOLTAGE_THRESHOLD = 50.0
+
+            if pedal_value_voltage > HUMAN_OVERRIDE_VOLTAGE_THRESHOLD:
+              # Human is pressing pedal hard - pass through their input
+              pedal_cmd = pedal_value_voltage
+
+            can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+          else:
+            # ============================================
+            # Idle/Keepalive Mode (NOT actively controlling)
+            # CRITICAL: Still send messages to prevent pedal firmware fault
+            # ============================================
+            idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
+            can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+            # Reset state when not active
+            self.pedal_steady = 0.0
+            self.prev_pedal_di = 0.0
+            
+        elif pedal_hardware_present and not self.CP.openpilotLongitudinalControl:
+          # ============================================
+          # Pedal detected but long control disabled
+          # STILL send keepalive to prevent firmware fault
+          # ============================================
+          idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
+          can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+          
+        # Cruise button spam fallback (for cars without pedal)
+        elif self.CP.openpilotLongitudinalControl and not pedal_hardware_present:
+          cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
+          cs_enable_long = getattr(CS, 'enableLongControl', False)
+          long_active = cs_cruise_enabled and cs_enable_long
+          
+          if long_active:
+            cruise_msg = self._calc_cruise_button(CS, actuators)
+            if cruise_msg is not None:
+              can_sends.append(cruise_msg)
+              
+    elif self.CP.openpilotLongitudinalControl:
+      # Non-Pre-AP longitudinal control (HW1/HW2/HW3 with DAS_control)
       if self.frame % 4 == 0:
-        if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-           # ==============================================
-           # Pre-AP Longitudinal Control (Tinkla port)
-           # ==============================================
-           # Priority order:
-           # 1. Comma Pedal (if available and configured)
-           # 2. Cruise Button Spam (fallback for cars with stock cruise)
-           #
-           # Dual-Mode Engagement:
-           # - Single pull = Lateral only (enableJustCC) -> Send idle pedal
-           # - Double pull = Full control (enableLongControl) -> Active control
-           
-           # Get engagement state from CarState (Tinkla-style)
-           cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
-           cs_enable_long = getattr(CS, 'enableLongControl', False)
-           
-           # Long control is active when cruise is enabled AND double-pull was detected
-           long_active = cs_cruise_enabled and cs_enable_long
-           
-           # Track state transitions
-           self.prev_enable_long_control = cs_enable_long
-           
-           # NOTE: pedal_idx is now managed internally by tesla_can.create_pedal_command()
-           # It uses a dedicated counter that increments with each message sent.
-           # This is CRITICAL for the pedal firmware's watchdog which requires consecutive counters.
-           use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
-           
-           if long_active and use_pedal:
-             # ============================================
-             # Mode 1: Comma Pedal Control
-             # ============================================
-             pedal_ready = getattr(CS, 'pedal_available', False)
-             pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
-
-             if pedal_ready or pedal_calibrated:
-               # Calculate pedal command from acceleration request
-               pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
-
-               # Check for gas override (human pressing pedal)
-               # NOTE: pedal_interceptor_value is in VOLTAGE units from carstate.py
-               # Human override threshold: voltage > 50 means human is pressing
-               pedal_value_voltage = getattr(CS, 'pedal_interceptor_value', 0.0)
-               HUMAN_OVERRIDE_VOLTAGE_THRESHOLD = 50.0
-
-               if pedal_value_voltage > HUMAN_OVERRIDE_VOLTAGE_THRESHOLD:
-                 # Human is pressing pedal hard - pass through their input
-                 pedal_cmd = pedal_value_voltage
-
-               can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
-             else:
-               # Pedal not ready - send idle command
-               # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
-               idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-
-           elif long_active and not use_pedal:
-             # ============================================
-             # Mode 2: Cruise Button Spam (Tinkla ACC_module)
-             # ============================================
-             # This is a fallback for Pre-AP cars that have stock cruise
-             # but no Comma Pedal installed. Works above 17 MPH.
-             cruise_msg = self._calc_cruise_button(CS, actuators)
-             if cruise_msg is not None:
-               can_sends.append(cruise_msg)
-
-           else:
-             # ============================================
-             # Mode 3: Steering Only (Single Pull)
-             # ============================================
-             # Send idle pedal to keep it alive but not accelerating
-             if use_pedal:
-               # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
-               idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-             # Reset state when not active
-             self.pedal_steady = 0.0
-             self.prev_pedal_di = 0.0
-        else:
-           state = 13 if CC.cruiseControl.cancel else 4  # 4=ACC_ON, 13=ACC_CANCEL_GENERIC_SILENT
-           accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-           cntr = (self.frame // 4) % 8
-           can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive))
-
-    else:
-      # Increment counter so cancel is prioritized even without openpilot longitudinal
-      if CC.cruiseControl.cancel:
-        if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-           # Pre-AP cancellation - send idle pedal with enable=0
-           # NOTE: idx is managed internally by create_pedal_command
-           # Always use di_to_pedal conversion (default calibration provides reasonable baseline)
-           if TINKLA_AVAILABLE and tinkla_conf:
-             idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO)
-           else:
-             # Fallback if tinkla_conf is unavailable
-             idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
-           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-        else:
-           cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
-           can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
+        state = 13 if CC.cruiseControl.cancel else 4  # 4=ACC_ON, 13=ACC_CANCEL_GENERIC_SILENT
+        accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+        cntr = (self.frame // 4) % 8
+        can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive))
 
     # TODO: HUD control
     new_actuators = actuators.as_builder()

@@ -4,7 +4,6 @@ from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons
 from opendbc.car.tesla.radar_interface import RadarInterface
-from cereal import car
 
 # Import config helper - may fail on non-comma devices during testing
 try:
@@ -115,19 +114,7 @@ class CarInterface(CarInterfaceBase):
 
     return ret
 
-  def update(self, can_packets: list[tuple[int, list]]) -> structs.CarState:
-    ret = super().update(can_packets)
-
-    if self.CS.longCtrlEvent:
-      # Map string event to standard event
-      if self.CS.longCtrlEvent == "pccEnabled":
-        ret.events.append(car.CarEvent.new_message(name=car.CarEvent.EventName.pcmEnable, enable=True))
-      elif self.CS.longCtrlEvent == "pccDisabled":
-        ret.events.append(car.CarEvent.new_message(name=car.CarEvent.EventName.pcmDisable, userDisable=True))
-      elif self.CS.longCtrlEvent == "pedalCalibrationNeeded":
-        ret.events.append(car.CarEvent.new_message(name=car.CarEvent.EventName.calibrationIncomplete, noEntry=True))
-      
-      # Clear the event so it doesn't trigger repeatedly
-      self.CS.longCtrlEvent = None
-    
-    return ret
+  # NOTE: Event handling is done in the main openpilot repo's controlsd/selfdrived,
+  # NOT in opendbc's CarInterface. The CS.longCtrlEvent field is available for
+  # the main repo to read via self.CS if needed, but we do NOT modify ret.events here.
+  # The previous attempt to do so caused card to crash.
