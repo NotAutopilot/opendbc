@@ -41,6 +41,9 @@ class CarState(CarStateBase):
 
     # Pre-AP specific state
     self.pedal_interceptor_state = 0
+    self.pedal_interceptor_value = 0.0
+    self.pedal_idx = 0
+    self.prev_pedal_idx = 0
 
     self.autopark = False
     self.autopark_prev = False
@@ -48,6 +51,68 @@ class CarState(CarStateBase):
 
     self.hands_on_level = 0
     self.das_control = None
+
+    # NAP longitudinal control state
+    self.cruise_buttons = 0
+    self.cruise_state = 0
+    self.speed_units = "KPH"
+    self.torqueLevel = 0.0
+
+    # iBooster state
+    self.has_ibooster_ecu = False
+    self.brakeUnavailable = False
+    self.ibstBrakeApplied = False
+
+    # Event tracking for NAP alerts
+    self.longCtrlEvent = None
+    self.pccEvent = None
+
+    # Brake/pedal state
+    self.realBrakePressed = False
+    self.realPedalValue = 0.0
+
+    # Control flags (loaded from NAP params)
+    self.autopilot_disabled = False
+    self.carNotInDrive = True
+    self.alca_engaged = False
+
+    # Autoresume and CC settings
+    self.autoresumeAcc = False
+    self.enableJustCC = False
+    self.enablePedal = False
+
+    # Human override state
+    class HSOState:
+      human_control = False
+    self.HSO = HSOState()
+    self.enableHAO = False
+
+    # Cruise speed tracking
+    self.v_cruise_actual = 0.0
+    self.v_cruise_pcm = 0.0
+    self.acc_speed_kph = 0.0
+    self.cc_state = 0
+    self.speed_control_enabled = 0
+    self.adaptive_cruise = 0
+    self.adaptive_cruise_enabled = False
+    self.pcc_available = False
+    self.pcc_enabled = False
+
+    # Stalk message for virtual button presses
+    self.msg_stw_actn_req = {'MC_STW_ACTN_RQ': 0, 'SpdCtrlLvr_Stat': 0}
+
+    # Speed limit info
+    self.speed_limit_ms = 0.0
+    self.speed_limit_ms_das = 0.0
+    self.userSpeedLimitOffsetMS = 0.0
+
+    # Map-aware speed (for fleet speed feature)
+    self.mapAwareSpeed = False
+    self.rampType = 0
+    self.map_suggested_speed = 0.0
+    self.medianFleetSpeedMPS = 0.0
+    self.splineLocConfidence = 0
+    self.UI_splineID = 0
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -227,17 +292,46 @@ class CarState(CarStateBase):
     else:
       ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
 
+    # NAP: Store cruise state for LONG_module
+    self.cruise_state = int(cp_chassis.vl["DI_state"]["DI_cruiseState"])
+    self.speed_units = speed_units if speed_units else "KPH"
+    self.torqueLevel = epas_status.get("EPAS_torqueLevel", 0.0) if hasattr(epas_status, 'get') else 0.0
+    self.realBrakePressed = ret.brakePressed
+    self.realPedalValue = float(cp_pt.vl["DI_torque1"]["DI_pedalPos"])
+    self.carNotInDrive = ret.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.reverse)
+
+    # NAP: Read cruise stalk buttons
+    stw_actn_rq = cp_chassis.vl.get("STW_ACTN_RQ", {})
+    if stw_actn_rq:
+      self.cruise_buttons = int(stw_actn_rq.get("SpdCtrlLvr_Stat", 0))
+      self.msg_stw_actn_req = dict(stw_actn_rq)
+    else:
+      self.cruise_buttons = 0
+
+    # NAP: Update v_cruise_actual
+    if speed_units == "KPH":
+      self.v_cruise_actual = float(cp_chassis.vl["DI_state"]["DI_digitalSpeed"])
+    elif speed_units == "MPH":
+      self.v_cruise_actual = float(cp_chassis.vl["DI_state"]["DI_digitalSpeed"]) * CV.MPH_TO_KPH
+
     if is_preap:
       # Pre-AP: No DAS ECU, no AEB, no stock LKAS
       ret.stockAeb = False
       ret.stockLkas = False
 
       # Read pedal interceptor state
-      self.pedal_interceptor_state = int(cp_chassis.vl["GAS_SENSOR"]["STATE"])
+      gas_sensor = cp_chassis.vl.get("GAS_SENSOR", {})
+      if gas_sensor:
+        self.prev_pedal_idx = self.pedal_idx
+        self.pedal_interceptor_state = int(gas_sensor.get("STATE", 0))
+        self.pedal_interceptor_value = float(gas_sensor.get("INTERCEPTOR", 0))
+        self.pedal_idx = int(gas_sensor.get("IDX", 0))
+      else:
+        self.pedal_interceptor_state = 0
+        self.pedal_interceptor_value = 0.0
 
-      # Read cruise stalk for button events
-      # SpdCtrlLvr_Stat: 0=idle, 1=cancel, 2=set/resume, etc.
-      # DTR_Dist_Rq: follow distance (0-200 in steps of ~33 = 1-7 bars)
+      # Enable pedal if available and no fault state
+      self.enablePedal = self.pedal_interceptor_state == 0
     else:
       # AEB
       ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1

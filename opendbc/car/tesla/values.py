@@ -221,3 +221,65 @@ LEGACY_CARS = (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_S_H
 
 # Pre-Autopilot cars - no DAS ECU, uses pedal interceptor for longitudinal
 PREAP_CARS = (CAR.TESLA_MODEL_S_PREAP,)
+
+# Tesla-specific accel limits (from Tinkla)
+TESLA_MAX_ACCEL = 2.0   # m/s^2
+TESLA_MIN_ACCEL = -3.48  # m/s^2 (with iBooster), -1.5 for regen only
+
+
+class CruiseButtons:
+    """Cruise control stalk button values from STW_ACTN_RQ.SpdCtrlLvr_Stat"""
+    IDLE = 0
+    CANCEL = 1
+    MAIN = 2  # Pull stalk towards driver
+    DECEL_SET = 3  # Push down 1st detent
+    DECEL_2ND = 4  # Push down 2nd detent (5 mph/kph increment)
+    RES_ACCEL = 5  # Push up 1st detent
+    RES_ACCEL_2ND = 6  # Push up 2nd detent (5 mph/kph increment)
+
+    @classmethod
+    def should_be_throttled(cls, button):
+        """Returns True if button press should be considered human action"""
+        return button not in (cls.IDLE,)
+
+    @classmethod
+    def is_accel(cls, button):
+        return button in (cls.RES_ACCEL, cls.RES_ACCEL_2ND)
+
+    @classmethod
+    def is_decel(cls, button):
+        return button in (cls.DECEL_SET, cls.DECEL_2ND)
+
+
+class CruiseState:
+    """Cruise state values from DI_state.DI_cruiseState"""
+    OFF = 0
+    STANDBY = 1
+    ENABLED = 2
+    STANDSTILL = 3
+    OVERRIDE = 4
+    FAULT = 5
+    PRE_FAULT = 6
+    PRE_CANCEL = 7
+
+    @classmethod
+    def is_enabled_or_standby(cls, state):
+        return state in (cls.STANDBY, cls.ENABLED, cls.STANDSTILL, cls.OVERRIDE)
+
+
+# CAN bus assignments for different Tesla platforms
+CAN_CHASSIS = {
+    CAR.TESLA_MODEL_S_PREAP: CANBUS.party,
+    CAR.TESLA_MODEL_S_HW1: CANBUS.party,
+    CAR.TESLA_MODEL_S_HW2: CANBUS.party,
+    CAR.TESLA_MODEL_S_HW3: CANBUS.chassis,
+    CAR.TESLA_MODEL_X_HW1: CANBUS.party,
+}
+
+CAN_POWERTRAIN = {
+    CAR.TESLA_MODEL_S_PREAP: CANBUS.party,
+    CAR.TESLA_MODEL_S_HW1: CANBUS.party,
+    CAR.TESLA_MODEL_S_HW2: CANBUS.powertrain,
+    CAR.TESLA_MODEL_S_HW3: CANBUS.powertrain,
+    CAR.TESLA_MODEL_X_HW1: CANBUS.party,
+}
