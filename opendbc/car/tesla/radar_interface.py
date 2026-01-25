@@ -33,7 +33,7 @@ class RadarInterface(RadarInterfaceBase):
         ])
 
     self.radar_off_can = CP.radarUnavailable
-    if not  CP.radarUnavailable:
+    if not CP.radarUnavailable:
       self.rcp = CANParser(DBC[CP.carFingerprint][Bus.radar], messages, CANBUS.radar)
     else:
       self.rcp = None
@@ -49,9 +49,10 @@ class RadarInterface(RadarInterfaceBase):
     values = self.rcp.update(can_msgs)
     self.updated_messages.update(values)
 
-    ret = structs.RadarData()
     if self.trigger_msg not in self.updated_messages:
-      return ret
+      return None
+
+    ret = structs.RadarData()
 
     if self.rcp is None:
       return ret

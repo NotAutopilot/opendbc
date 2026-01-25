@@ -42,7 +42,7 @@ class ACCState:
 
 
 def _current_time_millis():
-    return int(round(time.time() * 1000))
+    return int(round(time.monotonic() * 1000))
 
 
 class ACCController:

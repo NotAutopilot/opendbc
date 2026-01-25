@@ -7,10 +7,10 @@ Handles cruise engagement via double-pull of the cruise stalk.
 Migrated from Tinkla with NAP-specific parameter names and event types.
 """
 import time
+import numpy as np
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.common.numpy_fast import clip, interp
 from opendbc.car.tesla.values import CruiseButtons, CarControllerParams
-from opendbc.car.tesla.nap_params import load_float_param, load_int_param, NAPParamKeys
+from opendbc.car.tesla.nap_params import load_int_param, NAPParamKeys
 from opendbc.car.tesla.tunes import (
     PEDAL_BP, PEDAL_V, PEDAL_DI_PRESSED, PEDAL_DI_MIN,
     PEDAL_CALIBRATED, transform_di_to_pedal
@@ -57,7 +57,7 @@ class PCCState:
 
 
 def _current_time_millis():
-    return int(round(time.time() * 1000))
+    return int(round(time.monotonic() * 1000))
 
 
 class PCCController:
@@ -234,7 +234,7 @@ class PCCController:
                 self.pedal_speed_kph = self.pedal_speed_kph - 5 * speed_uom_kph
 
             # Clip PCC speed
-            self.pedal_speed_kph = clip(
+            self.pedal_speed_kph = np.clip(
                 self.pedal_speed_kph, MIN_PCC_V_KPH, MAX_PCC_V_KPH
             )
             if not PEDAL_CALIBRATED:
@@ -325,11 +325,11 @@ class PCCController:
         # Regen braking deceleration varies with speed
         REGEN_DECEL_BP = [10., 20.]
         REGEN_DECEL_V = [-0.8, -1.45]
-        REGEN_DECEL = interp(CS.out.vEgo, REGEN_DECEL_BP, REGEN_DECEL_V)
+        REGEN_DECEL = np.interp(CS.out.vEgo, REGEN_DECEL_BP, REGEN_DECEL_V)
 
         MAX_PEDAL_BP = PEDAL_BP
         MAX_PEDAL_V = PEDAL_V[PEDAL_PROFILE]
-        MAX_PEDAL_VALUE = interp(CS.out.vEgo, MAX_PEDAL_BP, MAX_PEDAL_V)
+        MAX_PEDAL_VALUE = np.interp(CS.out.vEgo, MAX_PEDAL_BP, MAX_PEDAL_V)
 
         MIN_PEDAL_REGEN_VALUE = PEDAL_DI_MIN
 
@@ -347,7 +347,7 @@ class PCCController:
         BRAKE_LOOKUP_V = [1.0, 0.]
 
         enable_pedal = 1.0 if self.enable_pedal_cruise else 0.0
-        tesla_pedal = int(round(interp(a_pid, ACCEL_LOOKUP_BP, ACCEL_LOOKUP_V)))
+        tesla_pedal = int(round(np.interp(a_pid, ACCEL_LOOKUP_BP, ACCEL_LOOKUP_V)))
 
         # Pedal hysteresis when close to set speed
         if abs(CS.out.vEgo * CV.MS_TO_KPH - self.pedal_speed_kph) < 0.8 and CS.out.vEgo > 5.:
@@ -357,7 +357,7 @@ class PCCController:
             # Hold brake at standstill
             tesla_brake = 0.43
         else:
-            tesla_brake = clip(interp(a_pid, BRAKE_LOOKUP_BP, BRAKE_LOOKUP_V), 0, 1)
+            tesla_brake = np.clip(np.interp(a_pid, BRAKE_LOOKUP_BP, BRAKE_LOOKUP_V), 0, 1)
 
         # If gas pedal pressed, don't apply brake
         if CS.pedal_interceptor_value > (PEDAL_DI_PRESSED + 5.):
@@ -366,8 +366,8 @@ class PCCController:
         if CS.has_ibooster_ecu and CS.brakeUnavailable:
             CS.longCtrlEvent = car.CarEvent.EventName.napIBoosterFault
 
-        tesla_pedal = clip(tesla_pedal, self.prev_tesla_pedal - PEDAL_MAX_DOWN, self.prev_tesla_pedal + PEDAL_MAX_UP)
-        tesla_pedal = clip(tesla_pedal, MIN_PEDAL_REGEN_VALUE, MAX_PEDAL_VALUE)
+        tesla_pedal = np.clip(tesla_pedal, self.prev_tesla_pedal - PEDAL_MAX_DOWN, self.prev_tesla_pedal + PEDAL_MAX_UP)
+        tesla_pedal = np.clip(tesla_pedal, MIN_PEDAL_REGEN_VALUE, MAX_PEDAL_VALUE)
 
         if CS.ibstBrakeApplied:
             # Wait for iBooster to release before accelerating

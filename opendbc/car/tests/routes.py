@@ -31,7 +31,11 @@ non_tested_cars = [
   HONDA.ACURA_TLX_2G,
   HONDA.HONDA_NBOX_2G,
   HONDA.ACURA_MDX_4G_MMR,
-  HONDA.HONDA_CITY_7G
+  HONDA.HONDA_CITY_7G,
+  # Tesla legacy platforms need real test routes from actual vehicles
+  TESLA.TESLA_MODEL_X_HW1,
+  TESLA.TESLA_MODEL_S,  # HW4
+  TESLA.TESLA_MODEL_Y_JUNIPER,
 ]
 
 
@@ -336,6 +340,7 @@ routes = [
   CarTestRoute("9227f2c54e175788/00000000--650ad7d3e0", TESLA.TESLA_MODEL_S_HW1),
   CarTestRoute("026a62571e42f996/00000000--75adbce194", TESLA.TESLA_MODEL_S_HW2),
   CarTestRoute("66c1699b7697267d/00000176--4b6b80db68", TESLA.TESLA_MODEL_S_HW3),
+  CarTestRoute("d0cdc986c5d023f5/2026-01-14--17-52-38", TESLA.TESLA_MODEL_S_PREAP),
 
   CarTestRoute("5d61e2f6e1f247f3/00000054--d3dfb01b34", MG.MG_5_EV),
 

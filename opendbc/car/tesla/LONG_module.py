@@ -6,10 +6,10 @@ Handles speed limits, iBooster braking, and pedal command generation.
 
 Migrated from Tinkla with NAP-specific parameter names and event types.
 """
+import numpy as np
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.common.numpy_fast import interp, clip
 from opendbc.car.tesla.values import (
-    CruiseButtons, CarControllerParams, CruiseState,
+    CarControllerParams, CruiseState,
     TESLA_MAX_ACCEL, TESLA_MIN_ACCEL, CAR, CAN_CHASSIS, CAN_POWERTRAIN, PREAP_CARS
 )
 from opendbc.car.tesla.ACC_module import ACCController
@@ -45,8 +45,8 @@ def _get_accel_multiplier(speed: float, speed_target: float, accel: float) -> fl
     # Only for positive acceleration
     if accel <= 0:
         return mult
-    mult = mult * interp(speed, ACCEL_MULTIPLIERS_BP, ACCEL_MULT_SPEED_V)
-    mult = mult * interp(abs(speed - speed_target), ACCEL_MULTIPLIERS_BP, ACCEL_MULT_SPEED_DELTA_V)
+    mult = mult * np.interp(speed, ACCEL_MULTIPLIERS_BP, ACCEL_MULT_SPEED_V)
+    mult = mult * np.interp(abs(speed - speed_target), ACCEL_MULTIPLIERS_BP, ACCEL_MULT_SPEED_DELTA_V)
     return mult
 
 
@@ -135,12 +135,12 @@ class LONGController:
             my_accel = my_accel * BRAKE_FACTOR
 
         # Clip accel to limits
-        target_accel = clip(my_accel, TESLA_MIN_ACCEL, TESLA_MAX_ACCEL)
+        target_accel = np.clip(my_accel, TESLA_MIN_ACCEL, TESLA_MAX_ACCEL)
 
         # Pre-AP has additional speed-dependent brake factor
         if self.CP.carFingerprint in PREAP_CARS or CS.autopilot_disabled:
-            target_accel = clip(
-                my_accel * interp(CS.out.vEgo, BRAKE_FACTOR_BP, BRAKE_FACTOR_V),
+            target_accel = np.clip(
+                my_accel * np.interp(CS.out.vEgo, BRAKE_FACTOR_BP, BRAKE_FACTOR_V),
                 TESLA_MIN_ACCEL, TESLA_MAX_ACCEL
             )
 
