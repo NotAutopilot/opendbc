@@ -6,6 +6,7 @@ static bool tesla_external_panda = false;
 static bool tesla_hw1 = false;
 static bool tesla_hw2 = false;
 static bool tesla_hw3 = false;
+static bool tesla_preap = false;
 
 static int chassis_bus = 0U;
 static int das_control_msg = 0x2bfU;
@@ -44,6 +45,13 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   // Gas pressed
   if ((tesla_external_panda || tesla_hw1) && (msg->bus == 0U) && (msg->addr == di_torque1_msg)) {
     gas_pressed = msg->data[6] != 0U;
+  }
+
+  // Pre-AP: Gas pressed from pedal interceptor (GAS_SENSOR 0x552)
+  if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x552U)) {
+    // GAS_SENSOR: interceptor_gas is in bytes 0-1
+    int interceptor_gas = (msg->data[0] << 8) | msg->data[1];
+    gas_pressed = interceptor_gas > 0;
   }
 
   if (((tesla_external_panda) && (msg->bus == 0U) && (msg->addr == 0x1f8U)) ||
@@ -163,6 +171,28 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     violation |= longitudinal_accel_checks(raw_accel_min, TESLA_LONG_LIMITS);
   }
 
+  // Pre-AP: GAS_COMMAND (pedal interceptor) - 0x551
+  if (tesla_preap && (msg->addr == 0x551U)) {
+    // GAS_COMMAND format: gas_command in bytes 0-1, gas_command2 in bytes 2-3
+    int gas_command = (msg->data[0] << 8) | msg->data[1];
+    int gas_command2 = (msg->data[2] << 8) | msg->data[3];
+
+    // Both gas commands must match (redundancy check)
+    if (gas_command != gas_command2) {
+      violation = true;
+    }
+
+    // Gas command must be in valid range (0-10000 = 0-100%)
+    if (gas_command > 10000) {
+      violation = true;
+    }
+
+    // Only allow gas when controls are allowed
+    if (!controls_allowed && (gas_command > 0)) {
+      violation = true;
+    }
+  }
+
   if (violation) {
     tx = false;
   }
@@ -198,12 +228,14 @@ static safety_config tesla_legacy_init(uint16_t param) {
   const int TESLA_FLAG_HW1 = 4;
   const int TESLA_FLAG_HW2 = 8;
   const int TESLA_FLAG_HW3 = 16;
+  const int TESLA_FLAG_PREAP = 32;
 
   // Extract flags
   tesla_external_panda = GET_FLAG(param, TESLA_FLAG_EXTERNAL_PANDA);
   tesla_hw1 = GET_FLAG(param, TESLA_FLAG_HW1);
   tesla_hw2 = GET_FLAG(param, TESLA_FLAG_HW2);
   tesla_hw3 = GET_FLAG(param, TESLA_FLAG_HW3);
+  tesla_preap = GET_FLAG(param, TESLA_FLAG_PREAP);
 
   // Initialize state variables
   tesla_legacy_stock_aeb = false;
@@ -264,7 +296,27 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {.msg = {{0x488, 2, 4, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DAS_steeringControl
   };
 
+  // Pre-AP: Single bus, pedal interceptor for longitudinal, no DAS ECU
+  static const CanMsg TESLA_TX_PREAP_MSGS[] = {
+    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x551, 0, 6, .check_relay = true, .disable_static_blocking = true},  // GAS_COMMAND (pedal interceptor)
+  };
+
+  static RxCheck tesla_preap_rx_checks[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_B (vehicle speed)
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
+    {.msg = {{0x552, 0, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GAS_SENSOR (pedal interceptor)
+  };
+
   // Determine configuration based on hardware type
+  if (tesla_preap) {
+    // Pre-AP: Single CAN bus, pedal interceptor, no DAS ECU
+    // WARNING: Pre-AP cannot brake! Regen only (~1.5 m/s^2)
+    return BUILD_SAFETY_CFG(tesla_preap_rx_checks, TESLA_TX_PREAP_MSGS);
+  }
+
   if (tesla_external_panda && (tesla_hw3 || tesla_hw2)) {
     return BUILD_SAFETY_CFG(tesla_legacy_pt_rx_checks, TESLA_LEGACY_PT_MSGS);
   }
