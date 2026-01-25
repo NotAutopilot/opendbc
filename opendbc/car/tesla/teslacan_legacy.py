@@ -55,3 +55,30 @@ class TeslaCANRaven:
     data = self.packers[CANBUS.party].make_can_msg("APS_eacMonitor", CANBUS.party, values)[1]
     values["APS_eacMonitorChecksum"] = self.checksum(0x27d, data[:2])
     return self.packers[CANBUS.party].make_can_msg("APS_eacMonitor", CANBUS.party, values)
+
+  @staticmethod
+  def pedal_checksum(dat):
+    # Pedal interceptor uses simple sum checksum
+    return sum(dat) & 0xFF
+
+  def create_pedal_command(self, gas_command, enable, counter):
+    """
+    Create GAS_COMMAND message for pedal interceptor.
+    gas_command: 0.0-1.0 throttle position
+    enable: bool, whether openpilot is controlling throttle
+    counter: 0-15 rolling counter
+    """
+    # Scale gas command to 0-10000 range (0.01 resolution per DBC)
+    gas_value = int(gas_command * 10000)
+
+    values = {
+      "GAS_COMMAND": gas_value,
+      "GAS_COMMAND2": gas_value,  # Redundant for safety
+      "ENABLE": 1 if enable else 0,
+      "COUNTER_PEDAL": counter,
+    }
+
+    # Build message without checksum first
+    data = self.packers[CANBUS.party].make_can_msg("GAS_COMMAND", CANBUS.party, values)[1]
+    values["CHECKSUM_PEDAL"] = self.pedal_checksum(data[:5])
+    return self.packers[CANBUS.party].make_can_msg("GAS_COMMAND", CANBUS.party, values)

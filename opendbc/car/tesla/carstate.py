@@ -3,7 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS
+from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS, PREAP_CARS
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
@@ -20,6 +20,12 @@ class CarState(CarStateBase):
       elif self.CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
         CANBUS.powertrain = CANBUS.party
         CANBUS.autopilot_powertrain = CANBUS.autopilot_party
+      elif self.CP.carFingerprint in PREAP_CARS:
+        # Pre-AP: single bus, no autopilot bus, no DAS ECU
+        CANBUS.powertrain = CANBUS.party
+        CANBUS.chassis = CANBUS.party
+        CANBUS.autopilot_party = CANBUS.party
+        CANBUS.autopilot_powertrain = CANBUS.party
 
       self.can_define_party = CANDefine(DBC[CP.carFingerprint][Bus.party])
       self.can_define_pt = CANDefine(DBC[CP.carFingerprint][Bus.pt])
@@ -32,6 +38,9 @@ class CarState(CarStateBase):
       self.shifter_values = self.can_defines["DI_torque2"]["DI_gear"]
     else:
       self.shifter_values = self.can_define.dv["DI_systemStatus"]["DI_gear"]
+
+    # Pre-AP specific state
+    self.pedal_interceptor_state = 0
 
     self.autopark = False
     self.autopark_prev = False
@@ -149,6 +158,8 @@ class CarState(CarStateBase):
     cp_chassis = can_parsers[Bus.chassis]
     ret = structs.CarState()
 
+    is_preap = self.CP.carFingerprint in PREAP_CARS
+
     # Vehicle speed
     ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
@@ -216,25 +227,46 @@ class CarState(CarStateBase):
     else:
       ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
 
-    # AEB
-    ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
+    if is_preap:
+      # Pre-AP: No DAS ECU, no AEB, no stock LKAS
+      ret.stockAeb = False
+      ret.stockLkas = False
 
-    # LKAS
-    ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
+      # Read pedal interceptor state
+      self.pedal_interceptor_state = int(cp_chassis.vl["GAS_SENSOR"]["STATE"])
 
-    # Stock Autosteer should be off (includes FSD)
-    # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+      # Read cruise stalk for button events
+      # SpdCtrlLvr_Stat: 0=idle, 1=cancel, 2=set/resume, etc.
+      # DTR_Dist_Rq: follow distance (0-200 in steps of ~33 = 1-7 bars)
+    else:
+      # AEB
+      ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
+
+      # LKAS
+      ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
+
+      # Stock Autosteer should be off (includes FSD)
+      # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+
+      # Messages needed by carcontroller
+      self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
 
     # Buttons # ToDo: add Gap adjust button
-
-    # Messages needed by carcontroller
-    self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
 
     return ret
 
   @staticmethod
   def get_can_parsers(CP):
-    if CP.carFingerprint in LEGACY_CARS:
+    if CP.carFingerprint in PREAP_CARS:
+      # Pre-AP: single CAN bus, no autopilot bus
+      return {
+        Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),  # Same as party, no AP bus
+        Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),
+        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),  # Same as pt, no AP bus
+        Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], [], CANBUS.party),
+      }
+    elif CP.carFingerprint in LEGACY_CARS:
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
         Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.autopilot_party),

@@ -110,6 +110,15 @@ class CAR(Platforms):
       Bus.radar: 'tesla_radar_continental_generated',
     },
   )
+  TESLA_MODEL_S_PREAP = TeslaPlatformConfig(
+    [CarDocs("Tesla Model S (Pre-AP) 2012-14", "All", car_parts=CarParts.common([CarHarness.tesla_model_s_hw1]))],
+    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
+    {
+      Bus.chassis: 'tesla_preap',
+      Bus.party: 'tesla_preap',
+      Bus.pt: 'tesla_preap',
+    },
+  )
 
 
 FW_QUERY_CONFIG = FwQueryConfig(
@@ -183,6 +192,10 @@ class CarControllerParams:
   JERK_LIMIT_MAX = 4.9  # m/s^3, ACC faults at 5.0
   JERK_LIMIT_MIN = -4.9  # m/s^3, ACC faults at 5.0
 
+  # Pre-AP specific limits (regen braking only, no friction brakes)
+  PREAP_ACCEL_MAX = 2.0    # m/s^2 (same as other Teslas)
+  PREAP_ACCEL_MIN = -1.5   # m/s^2 (regen braking limit from Tinkla)
+
 
 class TeslaLegacyParams(IntFlag):
   NO_SDM1 = 1
@@ -194,6 +207,7 @@ class TeslaSafetyFlags(IntFlag):
   FLAG_HW1 = 4
   FLAG_HW2 = 8
   FLAG_HW3 = 16
+  FLAG_PREAP = 32
 
 
 class TeslaFlags(IntFlag):
@@ -203,4 +217,7 @@ DBC = CAR.create_dbc_map()
 
 STEER_THRESHOLD = 1
 
-LEGACY_CARS = (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_S_HW3, CAR.TESLA_MODEL_X_HW1)
+LEGACY_CARS = (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_S_HW3, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP)
+
+# Pre-Autopilot cars - no DAS ECU, uses pedal interceptor for longitudinal
+PREAP_CARS = (CAR.TESLA_MODEL_S_PREAP,)

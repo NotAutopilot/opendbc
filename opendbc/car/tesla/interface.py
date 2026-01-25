@@ -2,7 +2,7 @@ from opendbc.car import get_safety_config, structs
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
-from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS
+from opendbc.car.tesla.values import TeslaSafetyFlags, CAR, TeslaLegacyParams, LEGACY_CARS, PREAP_CARS
 from opendbc.car.tesla.radar_interface import RadarInterface
 
 
@@ -47,7 +47,13 @@ class CarInterface(CarInterfaceBase):
     if not any(0x201 in f for f in fingerprint.values()):
       ret.flags |= TeslaLegacyParams.NO_SDM1.value
 
-    if candidate in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
+    if candidate in PREAP_CARS:
+      # Pre-Autopilot: No DAS ECU, no AEB, uses pedal interceptor for longitudinal
+      # WARNING: Pre-AP cannot brake! Driver must always be ready to brake manually.
+      ret.safetyConfigs = [
+        get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_PREAP)),
+      ]
+    elif candidate in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
       ret.safetyConfigs = [
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(TeslaSafetyFlags.FLAG_HW1)),
       ]
@@ -67,15 +73,28 @@ class CarInterface(CarInterfaceBase):
     ret.steerAtStandstill = True
 
     ret.steerControlType = structs.CarParams.SteerControlType.angle
-    ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
+    ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, ) or candidate in PREAP_CARS
 
-    ret.alphaLongitudinalAvailable = True
-    ret.openpilotLongitudinalControl = True
-    ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+    if candidate in PREAP_CARS:
+      # Pre-AP: Uses pedal interceptor for throttle
+      # CAN decelerate via regen braking (~1.5 m/s^2) when pedal is released
+      # No friction braking - driver must be ready to brake for emergencies
+      ret.alphaLongitudinalAvailable = True
+      ret.openpilotLongitudinalControl = True
+      ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
-    ret.vEgoStopping = 0.1
-    ret.vEgoStarting = 0.1
-    ret.stoppingDecelRate = 0.3
+      # Pre-AP stopping behavior - uses regen braking (from Tinkla)
+      ret.vEgoStopping = 0.1
+      ret.vEgoStarting = 0.1
+      ret.stoppingDecelRate = 1.0  # Regen provides ~1.5 m/s^2 decel
+    else:
+      ret.alphaLongitudinalAvailable = True
+      ret.openpilotLongitudinalControl = True
+      ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+
+      ret.vEgoStopping = 0.1
+      ret.vEgoStarting = 0.1
+      ret.stoppingDecelRate = 0.3
 
     # ret.dashcamOnly = candidate in (CAR.TESLA_MODEL_X) # dashcam only, pending find invalidLkasSetting signal
 
