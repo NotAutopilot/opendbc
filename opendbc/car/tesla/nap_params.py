@@ -42,7 +42,7 @@ class NAPParamKeys:
     ADJUST_ACC_WITH_SPEED_LIMIT = "NAPAdjustAccWithSpeedLimit"
     SPEED_LIMIT_USE_RELATIVE = "NAPSpeedLimitUseRelative"
     USE_LONG_CONTROL_DATA = "NAPUseLongControlData"
-    AUTOPILOT_DISABLED = "NAPAutopilotDisabled"
+    AUTOPILOT_DISABLED = "NAPDisableCruiseControl"
 
     # Human Override
     HSO_ENABLED = "NAPHSOEnabled"

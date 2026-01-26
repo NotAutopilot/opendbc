@@ -138,7 +138,7 @@ class LONGController:
         target_accel = np.clip(my_accel, TESLA_MIN_ACCEL, TESLA_MAX_ACCEL)
 
         # Pre-AP has additional speed-dependent brake factor
-        if self.CP.carFingerprint in PREAP_CARS or CS.autopilot_disabled:
+        if self.CP.carFingerprint in PREAP_CARS or self.autopilot_disabled:
             target_accel = np.clip(
                 my_accel * np.interp(CS.out.vEgo, BRAKE_FACTOR_BP, BRAKE_FACTOR_V),
                 TESLA_MIN_ACCEL, TESLA_MAX_ACCEL
@@ -183,7 +183,7 @@ class LONGController:
             return messages
 
         # Pre-AP Model S handling
-        if self.CP.carFingerprint in PREAP_CARS or CS.autopilot_disabled:
+        if self.CP.carFingerprint in PREAP_CARS or self.autopilot_disabled:
             messages = self._update_preap(
                 enabled, CS, frame, actuators, target_accel, pcm_speed, pcm_override,
                 long_plan, radar_state, tesla_accel_limits, tesla_jerk_limits

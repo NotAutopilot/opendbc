@@ -1,3 +1,5 @@
+import struct
+from ctypes import create_string_buffer
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import V_CRUISE_MAX
 from opendbc.car.tesla.values import CANBUS, CarControllerParams
@@ -56,63 +58,60 @@ class TeslaCANRaven:
     values["APS_eacMonitorChecksum"] = self.checksum(0x27d, data[:2])
     return self.packers[CANBUS.party].make_can_msg("APS_eacMonitor", CANBUS.party, values)
 
-  @staticmethod
-  def pedal_checksum(dat):
-    # Pedal interceptor uses simple sum checksum
-    return sum(dat) & 0xFF
-
   def create_pedal_command(self, gas_command, enable, counter):
     """
     Create GAS_COMMAND message for pedal interceptor.
-    gas_command: 0.0-1.0 throttle position
+    gas_command: 0.0-1.0 throttle position (or raw value if > 1)
     enable: bool, whether openpilot is controlling throttle
     counter: 0-15 rolling counter
     """
-    # Scale gas command to 0-10000 range (0.01 resolution per DBC)
-    gas_value = int(gas_command * 10000)
+    # Use the same implementation as create_pedal_command_msg
+    return self.create_pedal_command_msg(gas_command, 1 if enable else 0, counter, CANBUS.party)
 
-    values = {
-      "GAS_COMMAND": gas_value,
-      "GAS_COMMAND2": gas_value,  # Redundant for safety
-      "ENABLE": 1 if enable else 0,
-      "COUNTER_PEDAL": counter,
-    }
-
-    # Build message without checksum first
-    data = self.packers[CANBUS.party].make_can_msg("GAS_COMMAND", CANBUS.party, values)[1]
-    values["CHECKSUM_PEDAL"] = self.pedal_checksum(data[:5])
-    return self.packers[CANBUS.party].make_can_msg("GAS_COMMAND", CANBUS.party, values)
-
-  def create_pedal_command_msg(self, gas_command, enable, counter, bus):
+  def create_pedal_command_msg(self, accel_command, enable, idx, pedalcan):
     """
-    Create GAS_COMMAND message for pedal interceptor (LONG_module compatible signature).
+    Create GAS_COMMAND (0x551) message to comma pedal.
+    Uses Tinkla's proven raw struct packing approach.
 
-    gas_command: pedal position value (already scaled)
+    accel_command: pedal position value (in DI pedal units, typically 0-100)
     enable: 0 or 1, whether throttle control is enabled
-    counter: 0-15 rolling counter
-    bus: CAN bus to send on
+    idx: 0-15 rolling counter
+    pedalcan: CAN bus to send on
     """
-    # Scale gas command to 0-10000 range if it's a small float
-    if isinstance(gas_command, float) and gas_command < 100:
-      gas_value = int(gas_command * 100)  # Convert percentage to 0-10000
+    msg_id = 0x551
+    msg_len = 6
+    msg = create_string_buffer(msg_len)
+
+    # Conversion factors from Tinkla (match DBC scaling)
+    m1 = 0.050796813
+    m2 = 0.101593626
+    d = -22.85856576
+
+    if enable == 1:
+      int_accel_command = int((accel_command - d) / m1)
+      int_accel_command2 = int((accel_command - d) / m2)
     else:
-      gas_value = int(gas_command)
+      int_accel_command = 0
+      int_accel_command2 = 0
 
     # Clamp to valid range
-    gas_value = max(0, min(10000, gas_value))
+    int_accel_command = max(0, min(65534, int_accel_command))
+    int_accel_command2 = max(0, min(65534, int_accel_command2))
 
-    values = {
-      "GAS_COMMAND": gas_value,
-      "GAS_COMMAND2": gas_value,  # Redundant for safety
-      "ENABLE": int(enable),
-      "COUNTER_PEDAL": counter,
-    }
-
-    # Build message without checksum first
-    packer = self.packers.get(bus, self.packers[CANBUS.party])
-    data = packer.make_can_msg("GAS_COMMAND", bus, values)[1]
-    values["CHECKSUM_PEDAL"] = self.pedal_checksum(data[:5])
-    return packer.make_can_msg("GAS_COMMAND", bus, values)
+    # Pack message bytes (big endian)
+    struct.pack_into(
+      "BBBBB",
+      msg,
+      0,
+      int((int_accel_command >> 8) & 0xFF),
+      int_accel_command & 0xFF,
+      int((int_accel_command2 >> 8) & 0xFF),
+      int_accel_command2 & 0xFF,
+      ((enable << 7) + idx) & 0xFF,
+    )
+    # Add checksum
+    struct.pack_into("B", msg, msg_len - 1, self.checksum(msg_id, msg.raw))
+    return [msg_id, 0, msg.raw, pedalcan]
 
   def create_action_request(self, msg_stw_actn_req, button_to_press, bus, counter):
     """
