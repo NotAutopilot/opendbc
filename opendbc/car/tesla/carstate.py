@@ -101,6 +101,12 @@ class CarState(CarStateBase):
     # Stalk message for virtual button presses
     self.msg_stw_actn_req = {'MC_STW_ACTN_RQ': 0, 'SpdCtrlLvr_Stat': 0}
 
+    # NAP: Independent stalk-based engagement (for pre-AP)
+    # One pull = lateral only, double pull = lateral + long, cancel = disable
+    self.cruiseEnabled = False  # Master engagement flag (controlled by stalk, not stock cruise)
+    self.prev_cruise_buttons = 0
+    self.enableHumanLongControl = False  # Set True for pre-AP or autopilot disabled
+
     # Speed limit info
     self.speed_limit_ms = 0.0
     self.speed_limit_ms_das = 0.0
@@ -319,6 +325,7 @@ class CarState(CarStateBase):
       # Pre-AP: No DAS ECU, no AEB, no stock LKAS
       ret.stockAeb = False
       ret.stockLkas = False
+      self.enableHumanLongControl = True  # Pre-AP uses independent stalk-based engagement
 
       # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc)
       gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
@@ -333,6 +340,45 @@ class CarState(CarStateBase):
 
       # Enable pedal if available and no fault state
       self.enablePedal = self.pedal_interceptor_state == 0
+
+      # NAP: Independent stalk-based engagement for pre-AP (like Tinkla)
+      # One stalk pull (MAIN button) toggles cruiseEnabled (lateral control)
+      # Double pull enables PCC (longitudinal) - handled in PCC_module
+      # Cancel button disables everything
+      from opendbc.car.tesla.values import CruiseButtons, CruiseState
+
+      # Check if stock cruise is off (we override engagement when cruise is off)
+      stock_cruise_off = CruiseState.is_off(self.cruise_state)
+
+      # Handle MAIN button (stalk pull towards driver)
+      if self.cruise_buttons == CruiseButtons.MAIN and self.prev_cruise_buttons != CruiseButtons.MAIN:
+        # Toggle cruiseEnabled when stock cruise is off or pedal is enabled
+        if stock_cruise_off or self.enablePedal:
+          self.cruiseEnabled = not self.enableJustCC  # Enable unless using stock CC only
+
+      # Handle CANCEL button
+      if self.cruise_buttons == CruiseButtons.CANCEL:
+        self.cruiseEnabled = False
+
+      # Update previous button state
+      self.prev_cruise_buttons = self.cruise_buttons
+
+      # Safety conditions for engagement
+      safe_to_engage = (
+        not ret.doorOpen and
+        ret.gearShifter == structs.CarState.GearShifter.drive and
+        not ret.seatbeltUnlatched
+      )
+
+      # Override cruiseState for pre-AP based on our own cruiseEnabled flag
+      ret.cruiseState.enabled = self.cruiseEnabled and safe_to_engage
+      self.cruiseEnabled = ret.cruiseState.enabled  # Update to reflect safety check
+      ret.cruiseState.available = True  # Always available for pre-AP with pedal
+      if self.has_ibooster_ecu:
+        ret.cruiseState.standstill = False  # Can start from stop with iBooster
+      else:
+        ret.cruiseState.standstill = ret.standstill
+      ret.cruiseState.speed = self.acc_speed_kph * CV.KPH_TO_MS
     else:
       # AEB
       ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1

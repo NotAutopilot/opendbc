@@ -263,6 +263,10 @@ class CruiseState:
     PRE_CANCEL = 7
 
     @classmethod
+    def is_off(cls, state):
+        return state in (cls.OFF, cls.STANDBY)
+
+    @classmethod
     def is_enabled_or_standby(cls, state):
         return state in (cls.STANDBY, cls.ENABLED, cls.STANDSTILL, cls.OVERRIDE)
 
