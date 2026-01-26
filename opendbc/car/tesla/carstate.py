@@ -319,13 +319,13 @@ class CarState(CarStateBase):
       ret.stockAeb = False
       ret.stockLkas = False
 
-      # Read pedal interceptor state
-      gas_sensor = cp_chassis.vl.get("GAS_SENSOR", {})
+      # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc from Tinkla)
+      gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
       if gas_sensor:
         self.prev_pedal_idx = self.pedal_idx
         self.pedal_interceptor_state = int(gas_sensor.get("STATE", 0))
-        self.pedal_interceptor_value = float(gas_sensor.get("INTERCEPTOR", 0))
-        self.pedal_idx = int(gas_sensor.get("IDX", 0))
+        self.pedal_interceptor_value = float(gas_sensor.get("INTERCEPTOR_GAS", 0))
+        self.pedal_idx = int(gas_sensor.get("COUNTER_PEDAL", 0))
       else:
         self.pedal_interceptor_state = 0
         self.pedal_interceptor_value = 0.0
@@ -352,12 +352,18 @@ class CarState(CarStateBase):
   @staticmethod
   def get_can_parsers(CP):
     if CP.carFingerprint in PREAP_CARS:
-      # Pre-AP: single CAN bus, no autopilot bus
+      # Pre-AP: main car messages on bus 0, pedal on configurable bus (0 or 2)
+      from openpilot.common.params import Params
+      params = Params()
+      try:
+        pedal_bus = int(params.get("NAPPedalCanBus") or 2)
+      except Exception:
+        pedal_bus = 2
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
-        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),  # Same as party, no AP bus
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], pedal_bus),  # Pedal on configured bus
         Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),
-        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),  # Same as pt, no AP bus
+        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),
         Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], [], CANBUS.party),
       }
     elif CP.carFingerprint in LEGACY_CARS:

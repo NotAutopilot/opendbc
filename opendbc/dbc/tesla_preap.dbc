@@ -146,9 +146,6 @@ BO_ 104 EPB_epasControl: 3 EPB
 BO_ 872 SDM1: 8 SDM
  SG_ SDM_bcklDrivStatus : 7|2@0+ (1,0) [0|3] "" NEO
 
-BO_ 1160 RCM_status: 8 RCM
- SG_ RCM_buckleDriverStatus : 7|2@0+ (1,0) [0|3] "" NEO
-
 BO_ 1361 GAS_COMMAND: 6 NEO
  SG_ GAS_COMMAND2 : 7|16@0+ (0.01,0) [0|1] "" PEDAL
  SG_ GAS_COMMAND : 23|16@0+ (0.01,0) [0|1] "" PEDAL
