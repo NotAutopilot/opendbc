@@ -80,6 +80,8 @@ class CarState(CarStateBase):
     self.autoresumeAcc = False
     self.enableJustCC = False
     self.enablePedal = False
+    self.enablePedalHardware = False  # Loaded from NAPPedalEnabled param
+    self.enablePedalOverCC = False    # Loaded from NAPDisableCruiseControl param (allows pedal when stock CC is on)
 
     # Human override state
     class HSOState:
@@ -327,6 +329,18 @@ class CarState(CarStateBase):
       ret.stockLkas = False
       self.enableHumanLongControl = True  # Pre-AP uses independent stalk-based engagement
 
+      # Load pedal settings from NAP params (like Tinkla)
+      from openpilot.common.params import Params
+      params = Params()
+      try:
+        self.enablePedalHardware = params.get_bool("NAPPedalEnabled")
+      except Exception:
+        self.enablePedalHardware = False
+      try:
+        self.enablePedalOverCC = params.get_bool("NAPDisableCruiseControl")
+      except Exception:
+        self.enablePedalOverCC = False
+
       # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc)
       gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
       if gas_sensor:
@@ -338,22 +352,22 @@ class CarState(CarStateBase):
         self.pedal_interceptor_state = 0
         self.pedal_interceptor_value = 0.0
 
-      # Enable pedal if available and no fault state
-      self.enablePedal = self.pedal_interceptor_state == 0
+      # Enable pedal like Tinkla: hardware enabled AND (stock CC off OR enablePedalOverCC) AND openpilot long control
+      from opendbc.car.tesla.values import CruiseState
+      pedal_hardware_ok = self.enablePedalHardware and self.pedal_interceptor_state == 0
+      stock_cruise_allows = CruiseState.is_off(self.cruise_state) or self.enablePedalOverCC
+      self.enablePedal = pedal_hardware_ok and stock_cruise_allows and self.CP.openpilotLongitudinalControl
 
       # NAP: Independent stalk-based engagement for pre-AP (like Tinkla)
       # One stalk pull (MAIN button) toggles cruiseEnabled (lateral control)
       # Double pull enables PCC (longitudinal) - handled in PCC_module
       # Cancel button disables everything
-      from opendbc.car.tesla.values import CruiseButtons, CruiseState
-
-      # Check if stock cruise is off (we override engagement when cruise is off)
-      stock_cruise_off = CruiseState.is_off(self.cruise_state)
+      from opendbc.car.tesla.values import CruiseButtons
 
       # Handle MAIN button (stalk pull towards driver)
       if self.cruise_buttons == CruiseButtons.MAIN and self.prev_cruise_buttons != CruiseButtons.MAIN:
-        # Toggle cruiseEnabled when stock cruise is off or pedal is enabled
-        if stock_cruise_off or self.enablePedal:
+        # Toggle cruiseEnabled when stock cruise allows or pedal is enabled
+        if stock_cruise_allows or self.enablePedal:
           self.cruiseEnabled = not self.enableJustCC  # Enable unless using stock CC only
 
       # Handle CANCEL button
