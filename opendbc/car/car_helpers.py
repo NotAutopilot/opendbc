@@ -1,6 +1,7 @@
 import os
 import time
 
+from openpilot.common.params import Params
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.can_definitions import CanRecvCallable, CanSendCallable
 from opendbc.car.carlog import carlog
@@ -140,6 +141,16 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   if fixed_fingerprint:
     car_fingerprint = fixed_fingerprint
     source = CarParams.FingerprintSource.fixed
+
+  # NAP: Force pre-AP fingerprint if enabled in settings
+  try:
+    params = Params()
+    if params.get_bool("NAPForcePreAP"):
+      car_fingerprint = "TESLA_MODEL_S_PREAP"
+      source = CarParams.FingerprintSource.fixed
+      carlog.warning("NAP: Forcing pre-AP fingerprint")
+  except Exception:
+    pass
 
   carlog.error({"event": "fingerprinted", "car_fingerprint": str(car_fingerprint), "source": source, "fuzzy": not exact_match,
                 "cached": cached, "fw_count": len(car_fw), "ecu_responses": list(ecu_rx_addrs), "vin_rx_addr": vin_rx_addr,
