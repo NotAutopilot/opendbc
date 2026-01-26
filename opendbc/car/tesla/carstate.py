@@ -225,7 +225,7 @@ class CarState(CarStateBase):
 
     is_preap = self.CP.carFingerprint in PREAP_CARS
 
-    # Vehicle speed
+    # Vehicle speed - all cars use ESP_B (pre-AP has it at address 341)
     ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
 
@@ -243,6 +243,7 @@ class CarState(CarStateBase):
       epas_status = cp_chassis.vl["EPAS_sysStatus"]
     self.hands_on_level = epas_status["EPAS_handsOnLevel"]
     ret.steeringAngleDeg = -epas_status["EPAS_internalSAS"]
+    # STW_ANGLHP_STAT is at address 14 on pre-AP, 850 on other legacy cars
     ret.steeringRateDeg = -cp_chassis.vl["STW_ANGLHP_STAT"]["StW_AnglHP_Spd"]
     ret.steeringTorque = -epas_status["EPAS_torsionBarTorque"]
 
@@ -278,13 +279,13 @@ class CarState(CarStateBase):
     # Gear
     ret.gearShifter = GEAR_MAP[self.can_defines["DI_torque2"]["DI_gear"].get(int(cp_chassis.vl["DI_torque2"]["DI_gear"]), "DI_GEAR_INVALID")]
 
-    # Doors
+    # Doors - GTW_carState is at address 792 (0x318) on pre-AP, 1328 (0x530) on other legacy
     DOORS = ["DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE"]
     ret.doorOpen = any((self.can_defines["GTW_carState"][door].get(int(cp_chassis.vl["GTW_carState"][door]), "OPEN") == "OPEN") for door in DOORS)
 
-    # Blinkers
-    ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] == 1
-    ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] == 1
+    # Blinkers - GTW_carState has BC_indicatorLStatus/RStatus (values 0-3 on pre-AP, check for non-zero)
+    ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] != 0
+    ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] != 0
 
     # Seatbelt
     if self.CP.flags & TeslaLegacyParams.NO_SDM1:
@@ -319,13 +320,13 @@ class CarState(CarStateBase):
       ret.stockAeb = False
       ret.stockLkas = False
 
-      # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc from Tinkla)
+      # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc)
       gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
       if gas_sensor:
         self.prev_pedal_idx = self.pedal_idx
         self.pedal_interceptor_state = int(gas_sensor.get("STATE", 0))
         self.pedal_interceptor_value = float(gas_sensor.get("INTERCEPTOR_GAS", 0))
-        self.pedal_idx = int(gas_sensor.get("COUNTER_PEDAL", 0))
+        self.pedal_idx = int(gas_sensor.get("IDX", 0))
       else:
         self.pedal_interceptor_state = 0
         self.pedal_interceptor_value = 0.0
