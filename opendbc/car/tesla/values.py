@@ -228,14 +228,25 @@ TESLA_MIN_ACCEL = -3.48  # m/s^2 (with iBooster), -1.5 for regen only
 
 
 class CruiseButtons:
-    """Cruise control stalk button values from STW_ACTN_RQ.SpdCtrlLvr_Stat"""
+    """Cruise control stalk button values from STW_ACTN_RQ.SpdCtrlLvr_Stat
+
+    From DBC: VAL_ 69 SpdCtrlLvr_Stat 32 "DN_1ST" 16 "UP_1ST" 8 "DN_2ND" 4 "UP_2ND" 2 "RWD" 1 "FWD" 0 "IDLE"
+
+    Stalk behavior (from Tinkla):
+    - Pull toward driver (RWD/MAIN=2): Engage/toggle cruise
+    - Push away from driver (FWD/CANCEL=1): Disengage cruise
+    - Push up 1st detent (UP_1ST=16): Increase speed by 1
+    - Push up 2nd detent (UP_2ND=4): Increase speed by 5
+    - Push down 1st detent (DN_1ST=32): Decrease speed by 1
+    - Push down 2nd detent (DN_2ND=8): Decrease speed by 5
+    """
     IDLE = 0
-    CANCEL = 1
-    MAIN = 2  # Pull stalk towards driver
-    DECEL_SET = 3  # Push down 1st detent
-    DECEL_2ND = 4  # Push down 2nd detent (5 mph/kph increment)
-    RES_ACCEL = 5  # Push up 1st detent
-    RES_ACCEL_2ND = 6  # Push up 2nd detent (5 mph/kph increment)
+    CANCEL = 1       # FWD - Push stalk away from driver
+    MAIN = 2         # RWD - Pull stalk towards driver
+    RES_ACCEL = 16   # UP_1ST - Push up 1st detent (+1 speed)
+    RES_ACCEL_2ND = 4  # UP_2ND - Push up 2nd detent (+5 speed)
+    DECEL_SET = 32   # DN_1ST - Push down 1st detent (-1 speed)
+    DECEL_2ND = 8    # DN_2ND - Push down 2nd detent (-5 speed)
 
     @classmethod
     def should_be_throttled(cls, button):

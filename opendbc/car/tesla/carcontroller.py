@@ -72,16 +72,23 @@ class CarController(CarControllerBase):
     # Longitudinal control
     if self.CP.carFingerprint in PREAP_CARS:
       # Pre-AP: Use pedal interceptor for throttle control
+      # Pedal commands require double-pull engagement (CS.pcc_enabled) like Tinkla
+      # Single stalk pull only enables lateral control
       if self.CP.openpilotLongitudinalControl and self.frame % 2 == 0:
+        # Check if PCC is engaged (double stalk pull) - matches tinkla behavior
+        pcc_engaged = getattr(CS, 'pcc_enabled', False)
+
         accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         # Convert accel to pedal command (0-1 range)
-        # Only positive accel maps to pedal; braking relies on driver
-        if CC.longActive and accel > 0:
+        # Only positive accel maps to pedal; braking relies on driver or iBooster
+        if CC.longActive and pcc_engaged and accel > 0:
           # Simple linear mapping: 0-2 m/s^2 -> 0-1 pedal
           gas_command = min(accel / CarControllerParams.ACCEL_MAX, 1.0)
         else:
           gas_command = 0.0
-        can_sends.append(self.tesla_can.create_pedal_command(gas_command, CC.longActive, self.pedal_counter))
+        # Always send pedal commands to keep interceptor communication alive
+        # but only apply throttle when PCC is engaged
+        can_sends.append(self.tesla_can.create_pedal_command(gas_command, CC.longActive and pcc_engaged, self.pedal_counter))
         self.pedal_counter = (self.pedal_counter + 1) % 16
     elif self.CP.openpilotLongitudinalControl:
       if self.frame % 4 == 0:

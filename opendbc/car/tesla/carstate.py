@@ -109,6 +109,12 @@ class CarState(CarStateBase):
     self.prev_cruise_buttons = 0
     self.enableHumanLongControl = False  # Set True for pre-AP or autopilot disabled
 
+    # Double-pull detection for PCC (longitudinal) engagement
+    # Pull stalk twice within STALK_DOUBLE_PULL_MS to enable longitudinal
+    self.STALK_DOUBLE_PULL_MS = 750  # From Tinkla
+    self.stalk_pull_time_ms = 0
+    self.prev_stalk_pull_time_ms = -1000
+
     # Speed limit info
     self.speed_limit_ms = 0.0
     self.speed_limit_ms_das = 0.0
@@ -309,12 +315,14 @@ class CarState(CarStateBase):
     self.realPedalValue = float(cp_pt.vl["DI_torque1"]["DI_pedalPos"])
     self.carNotInDrive = ret.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.reverse)
 
-    # NAP: Read cruise stalk buttons
-    stw_actn_rq = cp_chassis.vl.get("STW_ACTN_RQ", {})
-    if stw_actn_rq:
-      self.cruise_buttons = int(stw_actn_rq.get("SpdCtrlLvr_Stat", 0))
-      self.msg_stw_actn_req = dict(stw_actn_rq)
-    else:
+    # NAP: Read cruise stalk buttons (direct access matches modern openpilot pattern)
+    try:
+      self.cruise_buttons = int(cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"])
+      self.msg_stw_actn_req = {
+        'MC_STW_ACTN_RQ': int(cp_chassis.vl["STW_ACTN_RQ"]["MC_STW_ACTN_RQ"]),
+        'SpdCtrlLvr_Stat': self.cruise_buttons,
+      }
+    except (KeyError, TypeError):
       self.cruise_buttons = 0
 
     # NAP: Update v_cruise_actual
@@ -342,37 +350,63 @@ class CarState(CarStateBase):
         self.enablePedalOverCC = False
 
       # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc)
-      gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
-      if gas_sensor:
+      try:
         self.prev_pedal_idx = self.pedal_idx
-        self.pedal_interceptor_state = int(gas_sensor.get("STATE", 0))
-        self.pedal_interceptor_value = float(gas_sensor.get("INTERCEPTOR_GAS", 0))
-        self.pedal_idx = int(gas_sensor.get("IDX", 0))
-      else:
+        self.pedal_interceptor_state = int(cp_ap_party.vl["GAS_SENSOR"]["STATE"])
+        self.pedal_interceptor_value = float(cp_ap_party.vl["GAS_SENSOR"]["INTERCEPTOR_GAS"])
+        self.pedal_idx = int(cp_ap_party.vl["GAS_SENSOR"]["IDX"])
+      except (KeyError, TypeError):
         self.pedal_interceptor_state = 0
         self.pedal_interceptor_value = 0.0
 
       # Enable pedal like Tinkla: hardware enabled AND (stock CC off OR enablePedalOverCC) AND openpilot long control
-      from opendbc.car.tesla.values import CruiseState
+      from opendbc.car.tesla.values import CruiseState, CruiseButtons
       pedal_hardware_ok = self.enablePedalHardware and self.pedal_interceptor_state == 0
       stock_cruise_allows = CruiseState.is_off(self.cruise_state) or self.enablePedalOverCC
       self.enablePedal = pedal_hardware_ok and stock_cruise_allows and self.CP.openpilotLongitudinalControl
 
-      # NAP: Independent stalk-based engagement for pre-AP (like Tinkla)
-      # One stalk pull (MAIN button) toggles cruiseEnabled (lateral control)
-      # Double pull enables PCC (longitudinal) - handled in PCC_module
-      # Cancel button disables everything
-      from opendbc.car.tesla.values import CruiseButtons
+      # Compute enableACC and enableJustCC like Tinkla
+      # enableACC: Use ACC (no pedal) when stock cruise is active and openpilot long is enabled
+      self.enableACC = (
+        (not self.enablePedalHardware) and
+        CruiseState.is_enabled_or_standby(self.cruise_state) and
+        self.CP.openpilotLongitudinalControl
+      )
+      # enableJustCC: Using stock cruise control only (no openpilot long control)
+      self.enableJustCC = (not (
+        self.enableACC or
+        self.enablePedal
+      )) and CruiseState.is_enabled_or_standby(self.cruise_state)
 
-      # Handle MAIN button (stalk pull towards driver)
+      # NAP: Independent stalk-based engagement for pre-AP (like Tinkla)
+      # One stalk pull (MAIN button) enables cruiseEnabled (lateral control)
+      # Double pull enables PCC (longitudinal)
+      # Cancel button disables everything
+      import time
+
+      # Handle MAIN button (stalk pull towards driver) - like Tinkla
       if self.cruise_buttons == CruiseButtons.MAIN and self.prev_cruise_buttons != CruiseButtons.MAIN:
-        # Toggle cruiseEnabled when stock cruise allows or pedal is enabled
-        if stock_cruise_allows or self.enablePedal:
-          self.cruiseEnabled = not self.enableJustCC  # Enable unless using stock CC only
+        # Rising edge of MAIN button - new stalk pull
+        curr_time_ms = int(time.monotonic() * 1000)
+        self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
+        self.stalk_pull_time_ms = curr_time_ms
+
+        # Check for double-pull (within 750ms)
+        double_pull = (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) < self.STALK_DOUBLE_PULL_MS
+
+        # Single pull enables lateral (cruiseEnabled)
+        self.cruiseEnabled = not self.enableJustCC  # Enable unless using stock CC only
+
+        # Double pull enables longitudinal (pcc_enabled)
+        if double_pull and self.enablePedal:
+          self.pcc_enabled = True
 
       # Handle CANCEL button
       if self.cruise_buttons == CruiseButtons.CANCEL:
         self.cruiseEnabled = False
+        self.pcc_enabled = False
+        self.stalk_pull_time_ms = 0
+        self.prev_stalk_pull_time_ms = -1000
 
       # Update previous button state
       self.prev_cruise_buttons = self.cruise_buttons
