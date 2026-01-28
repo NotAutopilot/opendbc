@@ -1,4 +1,5 @@
 import copy
+import time
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -83,6 +84,11 @@ class CarState(CarStateBase):
     self.enablePedalHardware = False  # Loaded from NAPPedalEnabled param
     self.enablePedalOverCC = False    # Loaded from NAPDisableCruiseControl param (allows pedal when stock CC is on)
 
+    # Frame counter for 1Hz param refresh (pre-AP only)
+    self.param_frame = 0
+    if self.CP.carFingerprint in PREAP_CARS:
+      self._refresh_preap_params()
+
     # Human override state
     class HSOState:
       human_control = False
@@ -127,6 +133,21 @@ class CarState(CarStateBase):
     self.medianFleetSpeedMPS = 0.0
     self.splineLocConfidence = 0
     self.UI_splineID = 0
+
+  def _refresh_preap_params(self):
+    """Refresh NAP params for pre-AP cars. Called at init and 1Hz during update."""
+    try:
+      from openpilot.common.params import Params
+      params = Params()
+      self.enablePedalHardware = params.get_bool("NAPPedalEnabled")
+    except Exception:
+      self.enablePedalHardware = False
+    try:
+      from openpilot.common.params import Params
+      params = Params()
+      self.enablePedalOverCC = params.get_bool("NAPDisableCruiseControl")
+    except Exception:
+      self.enablePedalOverCC = False
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -337,17 +358,10 @@ class CarState(CarStateBase):
       ret.stockLkas = False
       self.enableHumanLongControl = True  # Pre-AP uses independent stalk-based engagement
 
-      # Load pedal settings from NAP params (like Tinkla)
-      from openpilot.common.params import Params
-      params = Params()
-      try:
-        self.enablePedalHardware = params.get_bool("NAPPedalEnabled")
-      except Exception:
-        self.enablePedalHardware = False
-      try:
-        self.enablePedalOverCC = params.get_bool("NAPDisableCruiseControl")
-      except Exception:
-        self.enablePedalOverCC = False
+      # Pedal settings are loaded in __init__ and refreshed at 1Hz, not every frame
+      self.param_frame += 1
+      if self.param_frame % 100 == 0:  # 1Hz at 100Hz update rate
+        self._refresh_preap_params()
 
       # Read pedal interceptor state from bus 2 (signal names match tesla_preap.dbc)
       try:
@@ -382,7 +396,6 @@ class CarState(CarStateBase):
       # One stalk pull (MAIN button) enables cruiseEnabled (lateral control)
       # Double pull enables PCC (longitudinal)
       # Cancel button disables everything
-      import time
 
       # Handle MAIN button (stalk pull towards driver) - like Tinkla
       if self.cruise_buttons == CruiseButtons.MAIN and self.prev_cruise_buttons != CruiseButtons.MAIN:
