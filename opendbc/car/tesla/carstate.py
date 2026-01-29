@@ -315,23 +315,29 @@ class CarState(CarStateBase):
     ret.gearShifter = GEAR_MAP[self.can_defines["DI_torque2"]["DI_gear"].get(int(cp_chassis.vl["DI_torque2"]["DI_gear"]), "DI_GEAR_INVALID")]
 
     # Doors - GTW_carState is at address 792 (0x318) on pre-AP, 1328 (0x530) on other legacy
+    # DBC uses lowercase "open"/"closed" values
     DOORS = ["DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE"]
-    ret.doorOpen = any((self.can_defines["GTW_carState"][door].get(int(cp_chassis.vl["GTW_carState"][door]), "OPEN") == "OPEN") for door in DOORS)
+    ret.doorOpen = any((self.can_defines["GTW_carState"][door].get(int(cp_chassis.vl["GTW_carState"][door]), "closed") == "open") for door in DOORS)
 
     # Blinkers - GTW_carState has BC_indicatorLStatus/RStatus (values 0-3 on pre-AP, check for non-zero)
     ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] != 0
     ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] != 0
 
-    # Seatbelt
-    if self.CP.flags & TeslaLegacyParams.NO_SDM1:
-      ret.seatbeltUnlatched = cp_chassis.vl["RCM_status"]["RCM_buckleDriverStatus"] != 1
-    else:
-      ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
+    # Seatbelt - handle both SDM1 and RCM_status, with fallback for pre-AP
+    try:
+      if self.CP.flags & TeslaLegacyParams.NO_SDM1:
+        ret.seatbeltUnlatched = cp_chassis.vl["RCM_status"]["RCM_buckleDriverStatus"] != 1
+      else:
+        ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
+    except KeyError:
+      # Pre-AP may not have RCM_status in DBC, default to seatbelt latched
+      ret.seatbeltUnlatched = False
 
     # NAP: Store cruise state for LONG_module
     self.cruise_state = int(cp_chassis.vl["DI_state"]["DI_cruiseState"])
     self.speed_units = speed_units if speed_units else "KPH"
-    self.torqueLevel = epas_status.get("EPAS_torqueLevel", 0.0) if hasattr(epas_status, 'get') else 0.0
+    # Note: Signal is EPAS_torsionBarTorque in DBC, not EPAS_torqueLevel
+    self.torqueLevel = float(epas_status.get("EPAS_torsionBarTorque", 0.0)) if isinstance(epas_status, dict) else 0.0
     self.realBrakePressed = ret.brakePressed
     self.realPedalValue = float(cp_pt.vl["DI_torque1"]["DI_pedalPos"])
     self.carNotInDrive = ret.gearShifter not in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.reverse)
