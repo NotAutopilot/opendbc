@@ -1,5 +1,4 @@
 import copy
-import time
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -114,12 +113,6 @@ class CarState(CarStateBase):
     self.cruiseEnabled = False  # Master engagement flag (controlled by stalk, not stock cruise)
     self.prev_cruise_buttons = 0
     self.enableHumanLongControl = False  # Set True for pre-AP or autopilot disabled
-
-    # Double-pull detection for PCC (longitudinal) engagement
-    # Pull stalk twice within STALK_DOUBLE_PULL_MS to enable longitudinal
-    self.STALK_DOUBLE_PULL_MS = 750  # From Tinkla
-    self.stalk_pull_time_ms = 0
-    self.prev_stalk_pull_time_ms = -1000
 
     # Speed limit info
     self.speed_limit_ms = 0.0
@@ -398,34 +391,14 @@ class CarState(CarStateBase):
         self.enablePedal
       )) and CruiseState.is_enabled_or_standby(self.cruise_state)
 
-      # NAP: Independent stalk-based engagement for pre-AP (like Tinkla)
-      # One stalk pull (MAIN button) enables cruiseEnabled (lateral control)
-      # Double pull enables PCC (longitudinal)
+      # NAP: Stalk-based engagement for pre-AP (like Tinkla)
+      # MAIN button enables cruiseEnabled (lateral control)
+      # Double pull for PCC is handled in PCC_module, not here
       # Cancel button disables everything
-
-      # Handle MAIN button (stalk pull towards driver) - like Tinkla
-      if self.cruise_buttons == CruiseButtons.MAIN and self.prev_cruise_buttons != CruiseButtons.MAIN:
-        # Rising edge of MAIN button - new stalk pull
-        curr_time_ms = int(time.monotonic() * 1000)
-        self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
-        self.stalk_pull_time_ms = curr_time_ms
-
-        # Check for double-pull (within 750ms)
-        double_pull = (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) < self.STALK_DOUBLE_PULL_MS
-
-        # Single pull enables lateral (cruiseEnabled)
+      if self.cruise_buttons == CruiseButtons.MAIN:
         self.cruiseEnabled = not self.enableJustCC  # Enable unless using stock CC only
-
-        # Double pull enables longitudinal (pcc_enabled)
-        if double_pull and self.enablePedal:
-          self.pcc_enabled = True
-
-      # Handle CANCEL button
       if self.cruise_buttons == CruiseButtons.CANCEL:
         self.cruiseEnabled = False
-        self.pcc_enabled = False
-        self.stalk_pull_time_ms = 0
-        self.prev_stalk_pull_time_ms = -1000
 
       # Update previous button state
       self.prev_cruise_buttons = self.cruise_buttons
