@@ -42,6 +42,12 @@ When in doubt about pre-AP implementation details, check Tinkla first.
 - STATE=0 means pedal hardware OK
 - Pedal enabled when: hardware OK AND (stock CC off OR enablePedalOverCC)
 
+### Disable Cruise Control Toggle (NAPDisableCruiseControl)
+- When enabled AND PCC is active: actively sends CANCEL to prevent stock CC from engaging
+- This prevents the pedal and stock CC from fighting each other
+- Sends CANCEL at 10Hz whenever stock CC tries to engage while PCC is in use
+- Located in LONG_module.py `_update_preap()` function
+
 ### iBooster Braking
 - Optional hardware for friction braking
 - ECU_BrakeCommand message for brake commands

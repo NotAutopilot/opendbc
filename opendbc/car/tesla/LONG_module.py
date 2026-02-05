@@ -9,7 +9,7 @@ Migrated from Tinkla with NAP-specific parameter names and event types.
 import numpy as np
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.values import (
-    CarControllerParams, CruiseState,
+    CarControllerParams, CruiseState, CruiseButtons,
     TESLA_MAX_ACCEL, TESLA_MIN_ACCEL, CAR, CAN_CHASSIS, CAN_POWERTRAIN, PREAP_CARS
 )
 from opendbc.car.tesla.ACC_module import ACCController
@@ -201,6 +201,21 @@ class LONGController:
         pedal_can_sends = self.PCC.update_stat(CS, frame)
         if len(pedal_can_sends) > 0:
             messages.extend(pedal_can_sends)
+
+        # When "Disable Cruise Control" toggle is enabled (enablePedalOverCC=True) and PCC is active,
+        # actively cancel stock CC if it tries to engage. This prevents the two systems from fighting.
+        if (CS.enablePedalOverCC and
+            self.PCC.pcc_available and
+            self.PCC.enable_pedal_cruise and
+            CruiseState.is_enabled_or_standby(CS.cruise_state) and
+            frame % 10 == 0):  # Send at 10Hz to ensure it takes effect
+            stlk_counter = ((CS.msg_stw_actn_req['MC_STW_ACTN_RQ'] + 1) % 16)
+            messages.insert(0, self.tesla_can.create_action_request(
+                msg_stw_actn_req=CS.msg_stw_actn_req,
+                button_to_press=CruiseButtons.CANCEL,
+                bus=CAN_CHASSIS[self.CP.carFingerprint],
+                counter=stlk_counter
+            ))
 
         if self.PCC.pcc_available:
             self.ACC.enable_adaptive_cruise = False
