@@ -440,18 +440,55 @@ class CarState(CarStateBase):
   def get_can_parsers(CP):
     if CP.carFingerprint in PREAP_CARS:
       # Pre-AP: main car messages on bus 0, pedal on configurable bus (0 or 2)
+      # CRITICAL: Explicit message lists ensure signals are pre-registered with default values
+      # This prevents KeyError crashes when CAN frames haven't arrived yet
       from openpilot.common.params import Params
       params = Params()
       try:
         pedal_bus = int(params.get("NAPPedalCanBus") or 2)
+        enable_pedal = params.get_bool("NAPPedalEnabled")
+        has_ibooster = params.get_bool("NAPIBoosterEnabled")
       except Exception:
         pedal_bus = 2
+        enable_pedal = False
+        has_ibooster = False
+
+      # Modern openpilot CANParser format: (message_name, frequency)
+      # Frequency 0 = no timeout check, just register the message
+      chassis_messages = [
+        ("ESP_B", 50),              # Speed, wheel pulses
+        ("BrakeMessage", 50),       # Brake status
+        ("STW_ANGLHP_STAT", 20),    # Steering angle rate
+        ("EPAS_sysStatus", 5),      # EPAS steering torque, hands on level
+        ("DI_state", 10),           # Cruise state, speed units
+        ("GTW_carState", 10),       # Door states, blinkers
+        ("SDM1", 10),               # Seatbelt
+        ("STW_ACTN_RQ", 10),        # Stalk buttons
+      ]
+
+      # Powertrain messages
+      pt_messages = [
+        ("DI_torque1", 20),         # Pedal position, motor torque
+        ("DI_torque2", 20),         # Gear, brake pedal
+      ]
+
+      # iBooster messages (optional hardware)
+      if has_ibooster:
+        chassis_messages.append(("ECU_BrakeStatus", 0))
+
+      # Pedal interceptor message (on configured bus)
+      pedal_messages = []
+      if enable_pedal:
+        pedal_messages = [("GAS_SENSOR", 0)]
+
+      # Pre-AP: all car signals on bus 0, pedal on configured bus
+      # Note: For pre-AP, party/pt/chassis all point to bus 0
       return {
-        Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
-        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], pedal_bus),  # Pedal on configured bus
-        Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),
+        Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], chassis_messages, CANBUS.party),
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], pedal_messages, pedal_bus),
+        Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CANBUS.party),
         Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.party),
-        Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], [], CANBUS.party),
+        Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.party),
       }
     elif CP.carFingerprint in LEGACY_CARS:
       return {

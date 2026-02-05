@@ -67,6 +67,12 @@ DECEL_2ND = 8    # DN_2ND - Push down 2nd detent (-5 speed)
 4. **Pre-AP has no RCM_status** - use SDM1 for seatbelt, wrap in try/except
 5. **Signal name is EPAS_torsionBarTorque** - not EPAS_torqueLevel
 6. **Pre-AP uses single CAN bus** - all buses point to CANBUS.party
+7. **CRITICAL: CANParser must have explicit message lists** - Don't pass empty `[]` to CANParser!
+   - Empty lists cause race conditions: signals may not exist when first accessed
+   - Any KeyError in `update_legacy()` causes entire method to fail, returning stale data
+   - Tinkla lists all messages explicitly with frequencies
+   - Modern openpilot format: `[("ESP_B", 50), ("DI_state", 10), ...]`
+   - This pre-registers all signals with default value 0.0
 
 ## NAP Parameter Mapping (Tinkla → NAP)
 | Tinkla Param | NAP Param |
