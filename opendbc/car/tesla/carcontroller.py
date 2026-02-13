@@ -151,12 +151,16 @@ class CarController(CarControllerBase):
         use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
 
         # ==============================================
-        # Pedal Over CC: Cancel stock cruise when pedal CC is active
-        # (Tinkla carcontroller.py lines 130-134)
-        # When our pedal CC is managing speed, stock CC must not also
-        # respond to stalk presses. Send CANCEL every 10 frames (100ms).
+        # Pedal Over CC: Cancel stock cruise when openpilot disengages
+        # (Tinkla carcontroller.py lines 127-134)
+        # Only send CANCEL when our internal state disengages but stock
+        # cruise might still be latched on. NOT continuous spam.
         # ==============================================
-        if long_active and use_pedal and self.frame % 10 == 0:
+        pcm_cancel_cmd = CC.cruiseControl.cancel
+        if not long_active and CS.out.cruiseState.enabled:
+          # Openpilot disengaged but stock cruise still on - cancel it
+          pcm_cancel_cmd = True
+        if pcm_cancel_cmd and self.frame % 10 == 0:
           msg_stw = getattr(CS, 'msg_stw_actn_req', None)
           if msg_stw is not None:
             stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16

@@ -1,4 +1,5 @@
 import struct
+import crcmod
 from ctypes import create_string_buffer
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import V_CRUISE_MAX
@@ -83,6 +84,9 @@ class TeslaCANPreAP(TeslaCANRaven):
     # This is required by the pedal firmware's watchdog - it expects consecutive counters
     # If counter doesn't increment, the firmware rejects the message (FAULT_BAD_CHECKSUM or timeout)
     self.pedal_idx = 0
+    # CRC-8 for STW_ACTN_RQ (Tinkla teslacan.py line 18-19)
+    # Polynomial 0x1D, init=0x00, xorOut=0xFF — NOT the simple byte-sum checksum
+    self.stw_crc = crcmod.mkCrcFun(0x11d, initCrc=0x00, rev=False, xorOut=0xff)
 
   @staticmethod
   def pedal_checksum(msg_id: int, dat: bytes) -> int:
@@ -302,5 +306,6 @@ class TeslaCANPreAP(TeslaCANRaven):
       }
     
     data = self.packers[CANBUS.party].make_can_msg("STW_ACTN_RQ", bus, values)[1]
-    values["CRC_STW_ACTN_RQ"] = self.checksum(0x45, data)
+    # STW_ACTN_RQ uses CRC-8 polynomial (Tinkla teslacan.py line 308), NOT byte-sum checksum
+    values["CRC_STW_ACTN_RQ"] = self.stw_crc(data[:7])
     return self.packers[CANBUS.party].make_can_msg("STW_ACTN_RQ", bus, values)
