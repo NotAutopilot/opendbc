@@ -76,6 +76,12 @@ class CarState(CarStateBase):
     # - enableJustCC: True = steering only mode (no longitudinal)
     self.enableLongControl = False
     self.enableJustCC = False
+
+    # Software-managed target speed (Tinkla PCC_module port)
+    # Pre-AP has no stock cruise, so we manage the target speed ourselves.
+    # Set on double-pull, adjusted by stalk up/down, fed to cruiseState.speed.
+    self.pedal_speed_kph = 0.0
+    self.speed_units = "MPH"  # Updated from DI_state each frame
     
     # ============================================
     # Comma Pedal State (Tinkla PCC_module port)
@@ -285,14 +291,23 @@ class CarState(CarStateBase):
       ret.cruiseState.enabled = cruise_enabled
       ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
 
-    if speed_units == "KPH":
-      ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
-    elif speed_units == "MPH":
-      ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
-    
+    # Save speed units for stalk button handling
+    if speed_units is not None:
+      self.speed_units = speed_units
+
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      # Pre-AP: use software-managed target speed (like Tinkla PCC_module)
+      # DI_digitalSpeed shows CURRENT speed, not a target. Pre-AP has no stock cruise.
+      ret.cruiseState.speed = self.pedal_speed_kph * CV.KPH_TO_MS
+    else:
+      if speed_units == "KPH":
+        ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
+      elif speed_units == "MPH":
+        ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
+
     if self.CP.carFingerprint != CAR.TESLA_MODEL_S_PREAP:
       ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
-    
+
     ret.cruiseState.standstill = False  # This needs to be false, since we can resume from stop without sending anything special
     ret.standstill = cruise_state == "STANDSTILL"
     ret.accFaulted = cruise_state == "FAULT"
@@ -427,6 +442,10 @@ class CarState(CarStateBase):
             self.enableJustCC = False
             self.pending_enable = False
             self.longCtrlEvent = "pccEnabled"
+            # Capture target speed (Tinkla PCC_module.py line 172-178)
+            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+            current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
+            self.pedal_speed_kph = max(current_speed_kph, 10.0)  # At least 10 kph (~6 mph)
           else:
             # First pull - mark as pending, wait for possible second pull
             self.pending_enable = True
@@ -436,6 +455,10 @@ class CarState(CarStateBase):
           self.enableLongControl = True
           self.enableJustCC = False
           self.pending_enable = False
+          # Capture target speed
+          speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+          current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
+          self.pedal_speed_kph = max(current_speed_kph, 10.0)
       
       # General button event handling (for UI/buttonEvents)
       if self.cruise_buttons != self.prev_cruise_buttons:
@@ -456,19 +479,35 @@ class CarState(CarStateBase):
           self.enableLongControl = False
           self.enableJustCC = False
           self.pending_enable = False
+          self.pedal_speed_kph = 0.0
           # Reset timing to prevent false double-pulls after cancel
           self.stalk_pull_time_ms = 0
           self.prev_stalk_pull_time_ms = -1000
           if was_long_active:
             self.longCtrlEvent = "pccDisabled"
-          
+
         elif CruiseButtons.is_accel(state):
-          # Up - accelerate
+          # Up - accelerate (Tinkla PCC_module.py lines 194-207)
           be.type = ButtonType.accelCruise
-          
+          if self.enableLongControl:
+            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+            actual_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
+            if state == CruiseButtons.RES_ACCEL:
+              self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + speed_uom_kph
+            else:  # RES_ACCEL_2ND
+              self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + 5 * speed_uom_kph
+            self.pedal_speed_kph = min(self.pedal_speed_kph, 270.0)
+
         elif CruiseButtons.is_decel(state):
-          # Down - decelerate
+          # Down - decelerate (Tinkla PCC_module.py lines 204-207)
           be.type = ButtonType.decelCruise
+          if self.enableLongControl:
+            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+            if state == CruiseButtons.DECEL_SET:
+              self.pedal_speed_kph = self.pedal_speed_kph - speed_uom_kph
+            else:  # DECEL_2ND
+              self.pedal_speed_kph = self.pedal_speed_kph - 5 * speed_uom_kph
+            self.pedal_speed_kph = max(self.pedal_speed_kph, 0.0)
           
         else:
           be.type = ButtonType.unknown
