@@ -36,6 +36,18 @@ MIN_CRUISE_SPEED_MS = 17.1 * 0.44704  # 17.1 MPH in m/s (~7.6 m/s)
 CRUISE_BUTTON_COOLDOWN_MS = 400  # Don't spam faster than this (Tinkla uses 400ms)
 HUMAN_ACTION_COOLDOWN_MS = 3000  # Don't override human input for 3 seconds
 
+# Fallback pedal constants (used when tinkla_conf unavailable)
+# From Tinkla tunes.py
+PEDAL_DI_MIN_DEFAULT = -5
+PEDAL_DI_ZERO_DEFAULT = 0
+PEDAL_CALIB_FACTOR_DEFAULT = 1.0
+PEDAL_CALIB_ZERO_DEFAULT = 0.0
+PEDAL_ZERO_DEFAULT = PEDAL_CALIB_ZERO_DEFAULT - 1.0 / PEDAL_CALIB_FACTOR_DEFAULT  # = -1.0
+
+def _transform_di_to_pedal(val):
+  """Default DI→pedal transform when tinkla_conf unavailable. Matches Tinkla tunes.py."""
+  return PEDAL_ZERO_DEFAULT + (val - PEDAL_DI_ZERO_DEFAULT) / PEDAL_CALIB_FACTOR_DEFAULT
+
 
 def get_safety_CP():
   # We use the TESLA_MODEL_Y platform for lateral limiting to match safety
@@ -43,21 +55,6 @@ def get_safety_CP():
   from opendbc.car.tesla.interface import CarInterface
   return CarInterface.get_non_essential_params("TESLA_MODEL_Y")
 
-
-# Constants from Tinkla tunes.py
-PEDAL_DI_MIN = -5
-PEDAL_DI_ZERO = 0
-PEDAL_DI_PRESSED = 2
-PEDAL_CALIB_MIN = -3.
-PEDAL_CALIB_MAX = 99.6
-PEDAL_CALIB_FACTOR = 1.
-PEDAL_CALIB_ZERO = 0.
-# Derived constants
-PEDAL_FACTOR = PEDAL_CALIB_FACTOR
-PEDAL_ZERO = PEDAL_CALIB_ZERO - 1 / PEDAL_FACTOR
-
-def transform_di_to_pedal(val):
-  return PEDAL_ZERO + (val - PEDAL_DI_ZERO) / PEDAL_FACTOR
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
@@ -140,90 +137,80 @@ class CarController(CarControllerBase):
       cntr = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(cntr))
 
-    # ==============================================
-    # Pre-AP Longitudinal Control (Tinkla port)
-    # CRITICAL: Pedal keepalive logic moved OUTSIDE of openpilotLongitudinalControl check
-    # to ensure pedal always gets messages when present, preventing firmware faults.
-    # ==============================================
-    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-      # Detect if pedal hardware is present (from CarState parsing GAS_SENSOR messages)
-      pedal_detected = getattr(CS, 'pedal_available', False)
-      pedal_timeout = getattr(CS, 'pedal_timeout', True)
-      
-      # Config-based pedal enable (user explicitly enabled pedal control)
-      use_pedal_config = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
-      
-      # SAFETY: If pedal hardware is detected OR config says use pedal, we MUST send keepalive
-      # This prevents the pedal firmware from faulting due to message timeout
-      pedal_hardware_present = pedal_detected or use_pedal_config
-      
-      if self.frame % 4 == 0:  # 25Hz pedal message rate
-        if self.CP.openpilotLongitudinalControl and pedal_hardware_present:
-          # Get engagement state from CarState (Tinkla-style)
-          cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
-          cs_enable_long = getattr(CS, 'enableLongControl', False)
-          
-          # Long control is active when cruise is enabled AND double-pull was detected
-          long_active = cs_cruise_enabled and cs_enable_long
-          
-          # Track state transitions
-          self.prev_enable_long_control = cs_enable_long
-          
-          pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
-          
-          if long_active and (pedal_detected or pedal_calibrated):
-            # ============================================
-            # Active Pedal Control Mode
-            # ============================================
-            # Calculate pedal command from acceleration request
-            pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+    # Longitudinal control
+    if self.CP.openpilotLongitudinalControl:
+      if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+        # ==============================================
+        # Pre-AP Longitudinal Control (Tinkla port)
+        # Pedal at 50Hz (frame % 2) to match Tinkla LONG_module.py line 213
+        # ==============================================
+        if self.frame % 2 == 0:
+           # Get engagement state from CarState (Tinkla-style)
+           cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
+           cs_enable_long = getattr(CS, 'enableLongControl', False)
+           long_active = cs_cruise_enabled and cs_enable_long
+           self.prev_enable_long_control = cs_enable_long
 
-            # Check for gas override (human pressing pedal)
-            pedal_value_voltage = getattr(CS, 'pedal_interceptor_value', 0.0)
-            HUMAN_OVERRIDE_VOLTAGE_THRESHOLD = 50.0
+           use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
 
-            if pedal_value_voltage > HUMAN_OVERRIDE_VOLTAGE_THRESHOLD:
-              # Human is pressing pedal hard - pass through their input
-              pedal_cmd = pedal_value_voltage
+           if long_active and use_pedal:
+             # ============================================
+             # Mode 1: Comma Pedal Control
+             # ============================================
+             pedal_ready = getattr(CS, 'pedal_available', False)
+             pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
 
-            can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
-          else:
-            # ============================================
-            # Idle/Keepalive Mode (NOT actively controlling)
-            # CRITICAL: Still send messages to prevent pedal firmware fault
-            # ============================================
-            idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
-            can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-            # Reset state when not active
-            self.pedal_steady = 0.0
-            self.prev_pedal_di = 0.0
-            
-        elif pedal_hardware_present and not self.CP.openpilotLongitudinalControl:
-          # ============================================
-          # Pedal detected but long control disabled
-          # STILL send keepalive to prevent firmware fault
-          # ============================================
-          idle_pedal = self._transform_di_to_pedal(PEDAL_DI_ZERO)
-          can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-          
-        # Cruise button spam fallback (for cars without pedal)
-        elif self.CP.openpilotLongitudinalControl and not pedal_hardware_present:
-          cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
-          cs_enable_long = getattr(CS, 'enableLongControl', False)
-          long_active = cs_cruise_enabled and cs_enable_long
-          
-          if long_active:
-            cruise_msg = self._calc_cruise_button(CS, actuators)
-            if cruise_msg is not None:
-              can_sends.append(cruise_msg)
-              
-    elif self.CP.openpilotLongitudinalControl:
-      # Non-Pre-AP longitudinal control (HW1/HW2/HW3 with DAS_control)
-      if self.frame % 4 == 0:
+             if pedal_ready or pedal_calibrated:
+               # Tinkla PCC_module.py line 294: if CS.out.gasPressed, stop commanding
+               # This is the SAFE approach - let the human have full control
+               if CS.out.gasPressed:
+                 can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
+               else:
+                 pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+             else:
+               # Pedal not ready - send idle command
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+
+           elif long_active and not use_pedal:
+             # ============================================
+             # Mode 2: Cruise Button Spam (Tinkla ACC_module)
+             # Fallback for Pre-AP with stock cruise, no pedal
+             # ============================================
+             cruise_msg = self._calc_cruise_button(CS, actuators)
+             if cruise_msg is not None:
+               can_sends.append(cruise_msg)
+
+           else:
+             # ============================================
+             # Mode 3: Steering Only (Single Pull) or Not Engaged
+             # Send idle pedal keepalive to prevent firmware fault
+             # Tinkla PCC_module.py line 132: sends reset at frame % 50 (2Hz)
+             # ============================================
+             if use_pedal:
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+             # Reset state when not active
+             self.pedal_steady = 0.0
+             self.prev_pedal_di = 0.0
+
+      elif self.frame % 4 == 0:
+        # Non-Pre-AP longitudinal control (HW1/HW2/HW3 with DAS_control) at 25Hz
         state = 13 if CC.cruiseControl.cancel else 4  # 4=ACC_ON, 13=ACC_CANCEL_GENERIC_SILENT
         accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         cntr = (self.frame // 4) % 8
         can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive))
+
+    else:
+      # Not openpilotLongitudinalControl - handle cancel
+      if CC.cruiseControl.cancel:
+        if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+           idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if (TINKLA_AVAILABLE and tinkla_conf) else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+        else:
+           cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
+           can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
 
     # TODO: HUD control
     new_actuators = actuators.as_builder()
@@ -236,9 +223,6 @@ class CarController(CarControllerBase):
   # Pedal Control Logic (Ported from Tinkla PCC_module.py)
   # ============================================
   
-  def _transform_di_to_pedal(self, val):
-      return PEDAL_ZERO + (val - PEDAL_DI_ZERO) / PEDAL_FACTOR
-
   def _calc_pedal_command(self, accel_request: float, v_ego: float) -> float:
     """
     Calculate pedal command from acceleration request.
@@ -254,10 +238,9 @@ class CarController(CarControllerBase):
     """
     if not TINKLA_AVAILABLE or not tinkla_conf:
       # Fallback: simple linear mapping if tinkla_conf unavailable
-      # Map accel request to DI units, then convert to pedal voltage using default calibration
-      # DI range: -5 (regen) to 100 (max accel) - Matches Tinkla's range
+      # DI range: -5 (regen) to 100 (max accel) - matches Tinkla PCC_module.py
       pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 100.]), -5, 100))
-      pedal_cmd = self._transform_di_to_pedal(pedal_di)
+      pedal_cmd = _transform_di_to_pedal(pedal_di)
       return pedal_cmd
     
     # ============================================
@@ -299,11 +282,9 @@ class CarController(CarControllerBase):
     # PEDAL_MAX_DOWN = MAX_PEDAL_VALUE * _DT / 0.4
     # PEDAL_MAX_UP = (MAX_PEDAL_VALUE - self.prev_tesla_pedal) * _DT
     #
-    # Tinkla uses _DT = 0.01 (100Hz internal loop) but we run at 25Hz (frame % 4).
-    # We must use the same _DT as Tinkla for equivalent rate limiting behavior.
-    # The rate limits are per-iteration, so with 4x fewer iterations we need
-    # to scale the limits to match the same per-second rate.
-    dt = 0.04  # 25Hz (frame % 4) - 4x Tinkla's 100Hz
+    # Tinkla uses _DT = 0.01 (100Hz). We send pedal at 50Hz (frame % 2).
+    # Scale dt to match per-second rate: 2x Tinkla's 100Hz.
+    dt = 0.02  # 50Hz (frame % 2) - 2x Tinkla's 100Hz
     pedal_max_down = max_pedal_value * dt / 0.4  # Smooth deceleration
     pedal_max_up = (max_pedal_value - self.prev_pedal_di) * dt  # Smooth acceleration
     
