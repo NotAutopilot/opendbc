@@ -602,7 +602,7 @@ class CarState(CarStateBase):
           ("DAS_control", 0),
           ("DAS_steeringControl", 0),
         ]
-        # Comma Pedal on Bus 2 for Pre-AP
+        # Comma Pedal on Bus 2 for Pre-AP (or Bus 0 if pedal_can_zero)
         if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
           # These are in comma_pedal.dbc
           pedal_messages = [
@@ -612,7 +612,10 @@ class CarState(CarStateBase):
           ap_messages = [
             ("ESP_B", 0),
           ]
-          ap_bus = CANBUS.party # Bus 0 - Pedal is on Bus 0
+          # Pedal bus: matches Tinkla get_cam_can_parser() — bus 2 by default, bus 0 if pedal_can_zero
+          pedal_can_zero = tinkla_conf.pedal_can_zero if (TINKLA_CONF_AVAILABLE and tinkla_conf) else False
+          pedal_bus = 0 if pedal_can_zero else 2
+          ap_bus = CANBUS.party  # Bus 0 for non-pedal AP messages
         
         # HW1 with autopilot_disabled (Pre-AP emulation) or genuine HW1
         # If it's actually a Pre-AP car masquerading as HW1, it won't have DAS messages either
@@ -631,10 +634,14 @@ class CarState(CarStateBase):
       if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
         ap_messages = [m for m in ap_messages if m[0] not in ['DAS_control', 'DAS_steeringControl']]
 
+      # For Pre-AP: use pedal_bus for comma_pedal parser (bus 2 by default, bus 0 if pedal_can_zero)
+      # For HW1/others: use ap_bus as before
+      ap_party_bus = pedal_bus if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else ap_bus
+
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
-        Bus.ap_party: CANParser("comma_pedal" if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else DBC[CP.carFingerprint][Bus.party], 
-                                pedal_messages if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else ap_messages, ap_bus),
+        Bus.ap_party: CANParser("comma_pedal" if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else DBC[CP.carFingerprint][Bus.party],
+                                pedal_messages if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else ap_messages, ap_party_bus),
         Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, pt_bus),
         Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain),
         Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),

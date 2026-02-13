@@ -156,22 +156,17 @@ class CarController(CarControllerBase):
            if long_active and use_pedal:
              # ============================================
              # Mode 1: Comma Pedal Control
+             # Matches Tinkla Pre-AP behavior: always send commands when
+             # use_pedal is True and long is active. Tinkla's pcc_available
+             # is always True for Pre-AP (autopilot_disabled=True).
              # ============================================
-             pedal_ready = getattr(CS, 'pedal_available', False)
-             pedal_calibrated = tinkla_conf.pedal_calibrated if tinkla_conf else False
-
-             if pedal_ready or pedal_calibrated:
+             if CS.out.gasPressed:
                # Tinkla PCC_module.py line 294: if CS.out.gasPressed, stop commanding
                # This is the SAFE approach - let the human have full control
-               if CS.out.gasPressed:
-                 can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
-               else:
-                 pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
-                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+               can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
              else:
-               # Pedal not ready - send idle command
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+               pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+               can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
 
            elif long_active and not use_pedal:
              # ============================================
