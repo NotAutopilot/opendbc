@@ -65,6 +65,7 @@ class CarState(CarStateBase):
     self.cruise_buttons = 0
     self.prev_cruise_buttons = 0
     self.cruiseEnabled = False
+    self.msg_stw_actn_req = None  # Full STW_ACTN_RQ message for spoofing cancel commands
     
     # Double-pull state machine (Tinkla-style engagement)
     self.stalk_pull_time_ms = 0
@@ -391,6 +392,8 @@ class CarState(CarStateBase):
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       self.prev_cruise_buttons = self.cruise_buttons
       self.cruise_buttons = int(cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"])
+      # Save full STW_ACTN_RQ message for spoofing cancel commands (Tinkla carstate.py line 432)
+      self.msg_stw_actn_req = copy.copy(cp_chassis.vl["STW_ACTN_RQ"])
       curr_time_ms = _current_time_millis()
       
       buttonEvents = []

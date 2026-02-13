@@ -144,14 +144,27 @@ class CarController(CarControllerBase):
         # Pre-AP Longitudinal Control (Tinkla port)
         # Pedal at 50Hz (frame % 2) to match Tinkla LONG_module.py line 213
         # ==============================================
-        if self.frame % 2 == 0:
-           # Get engagement state from CarState (Tinkla-style)
-           cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
-           cs_enable_long = getattr(CS, 'enableLongControl', False)
-           long_active = cs_cruise_enabled and cs_enable_long
-           self.prev_enable_long_control = cs_enable_long
+        # Get engagement state (used for both pedal and pedal-over-CC)
+        cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
+        cs_enable_long = getattr(CS, 'enableLongControl', False)
+        long_active = cs_cruise_enabled and cs_enable_long
+        use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
 
-           use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
+        # ==============================================
+        # Pedal Over CC: Cancel stock cruise when pedal CC is active
+        # (Tinkla carcontroller.py lines 130-134)
+        # When our pedal CC is managing speed, stock CC must not also
+        # respond to stalk presses. Send CANCEL every 10 frames (100ms).
+        # ==============================================
+        if long_active and use_pedal and self.frame % 10 == 0:
+          msg_stw = getattr(CS, 'msg_stw_actn_req', None)
+          if msg_stw is not None:
+            stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
+            can_sends.insert(0, self.tesla_can.create_action_request(
+              CruiseButtons.CANCEL, CANBUS.party, stlk_counter, msg_stw))
+
+        if self.frame % 2 == 0:
+           self.prev_enable_long_control = cs_enable_long
 
            if long_active and use_pedal:
              # ============================================
