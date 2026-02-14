@@ -5,6 +5,7 @@ from opendbc.car import Bus
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
+from opendbc.car.carlog import carlog
 from opendbc.car.tesla.teslacan import TeslaCAN
 from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven, TeslaCANPreAP
 from opendbc.car.tesla.values import CarControllerParams, CANBUS, LEGACY_CARS, CAR
@@ -216,24 +217,32 @@ class CarController(CarControllerBase):
              # use_pedal is True and long is active. Tinkla's pcc_available
              # is always True for Pre-AP (autopilot_disabled=True).
              # ============================================
-             if CS.out.gasPressed:
-               # Tinkla PCC_module.py line 294: if CS.out.gasPressed, stop commanding
-               # This is the SAFE approach - let the human have full control
-               can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
-             else:
-               # Safety guard: damp initial positive accel right after engagement.
-               # This prevents launch spikes if planner accel is briefly high.
-               accel_request = float(actuators.accel)
-               frames_since_engage = self.frame - self.preap_long_engage_frame
-               if frames_since_engage < 200:
-                 accel_request = min(accel_request, 0.6)
-               if CS.out.vEgo < 2.0:
-                 accel_request = min(accel_request, 0.8)
+             try:
+               if CS.out.gasPressed:
+                 # Tinkla PCC_module.py line 294: if CS.out.gasPressed, stop commanding
+                 # This is the SAFE approach - let the human have full control
+                 can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
+               else:
+                 # Safety guard: damp initial positive accel right after engagement.
+                 # This prevents launch spikes if planner accel is briefly high.
+                 accel_request = float(actuators.accel)
+                 frames_since_engage = self.frame - self.preap_long_engage_frame
+                 if frames_since_engage < 200:
+                   accel_request = min(accel_request, 0.6)
+                 if CS.out.vEgo < 2.0:
+                   accel_request = min(accel_request, 0.8)
 
-               self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
-               target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
-               pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
-               can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+                 self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
+                 target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
+                 pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
+                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+             except Exception:
+               # Fail-safe: on any unexpected pedal path exception, send disabled pedal.
+               carlog.exception("Pre-AP pedal command path failed; sending disabled pedal command")
+               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+               self.pedal_steady = 0.0
+               self.prev_pedal_di = 0.0
 
            elif long_active and use_pedal and not pedal_calibrated:
              # Safety gate: block pedal actuation until calibration is complete.
