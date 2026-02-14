@@ -220,7 +220,10 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
 
   // Pre-AP Brake Check
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x20aU)) {
-    brake_pressed = (((msg->data[0] & 0x0CU) >> 2) != 1U);
+    const bool preap_brake_pressed = (((msg->data[0] & 0x0CU) >> 2) != 1U);
+    // Match Tinkla Pre-AP pedal behavior: keep controls allowed on brake so
+    // selfdrive can drop longitudinal only (override) while lateral remains active.
+    brake_pressed = tesla_enable_pedal ? false : preap_brake_pressed;
   }
 
   // Cruise
