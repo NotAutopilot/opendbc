@@ -454,7 +454,9 @@ class CarState(CarStateBase):
             # Capture target speed (Tinkla PCC_module.py line 172-178)
             speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
             current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-            self.pedal_speed_kph = max(current_speed_kph, 10.0)  # At least 10 kph (~6 mph)
+            # Match Tinkla: latch to current rounded speed (or speed-limit target),
+            # do not force a minimum speed on engagement.
+            self.pedal_speed_kph = max(current_speed_kph, 0.0)
           else:
             # First pull - mark as pending, wait for possible second pull
             self.pending_enable = True
@@ -467,7 +469,8 @@ class CarState(CarStateBase):
           # Capture target speed
           speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
           current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-          self.pedal_speed_kph = max(current_speed_kph, 10.0)
+          # Match Tinkla: latch to current rounded speed, no artificial minimum.
+          self.pedal_speed_kph = max(current_speed_kph, 0.0)
       
       # General button event handling (for UI/buttonEvents)
       if self.cruise_buttons != self.prev_cruise_buttons:

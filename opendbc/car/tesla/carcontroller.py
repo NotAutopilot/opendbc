@@ -86,6 +86,8 @@ class CarController(CarControllerBase):
     self.prev_enable_long_control = False
     self.prev_requested_long = False
     self.preap_cancel_pending = False
+    self.prev_preap_long_active = False
+    self.preap_long_engage_frame = -1000000
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
@@ -152,6 +154,8 @@ class CarController(CarControllerBase):
         requested_long = cs_cruise_enabled and cs_enable_long
         long_active = requested_long and CC.longActive
         use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
+        if long_active and not self.prev_preap_long_active:
+          self.preap_long_engage_frame = self.frame
 
         # ==============================================
         # Pedal Over CC: one-shot CANCEL to keep stock CC unlatch
@@ -207,7 +211,16 @@ class CarController(CarControllerBase):
                # This is the SAFE approach - let the human have full control
                can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
              else:
-               pedal_cmd = self._calc_pedal_command(actuators.accel, CS.out.vEgo)
+               # Safety guard: damp initial positive accel right after engagement.
+               # This prevents launch spikes if planner accel is briefly high.
+               accel_request = float(actuators.accel)
+               frames_since_engage = self.frame - self.preap_long_engage_frame
+               if frames_since_engage < 200:
+                 accel_request = min(accel_request, 0.6)
+               if CS.out.vEgo < 2.0:
+                 accel_request = min(accel_request, 0.8)
+
+               pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo)
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
 
            elif long_active and not use_pedal:
@@ -231,6 +244,8 @@ class CarController(CarControllerBase):
              # Reset state when not active
              self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
+
+        self.prev_preap_long_active = long_active
 
       elif self.frame % 4 == 0:
         # Non-Pre-AP longitudinal control (HW1/HW2/HW3 with DAS_control) at 25Hz
