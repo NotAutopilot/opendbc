@@ -354,35 +354,33 @@ class CarController(CarControllerBase):
     accel_bp = [regen_decel, 0.0, ACCEL_MAX]
     accel_v = [PEDAL_DI_MIN, zero_accel, max_pedal_value]
     
-    pedal_di = float(interp(accel_request, accel_bp, accel_v))
+    # Match Tinkla: quantize to integer DI before hysteresis/rate limiting.
+    pedal_di = float(int(round(interp(accel_request, accel_bp, accel_v))))
     
     # ============================================
-    # Step 3: Apply rate limiting
-    # ============================================
-    # From PCC_module.py:
-    # PEDAL_MAX_DOWN = MAX_PEDAL_VALUE * _DT / 0.4
-    # PEDAL_MAX_UP = (MAX_PEDAL_VALUE - self.prev_tesla_pedal) * _DT
-    #
-    # Tinkla uses _DT = 0.01 (100Hz). We send pedal at 50Hz (frame % 2).
-    # Scale dt to match per-second rate: 2x Tinkla's 100Hz.
-    dt = 0.02  # 50Hz (frame % 2) - 2x Tinkla's 100Hz
-    pedal_max_down = max_pedal_value * dt / 0.4  # Smooth deceleration
-    pedal_max_up = (max_pedal_value - self.prev_pedal_di) * dt  # Smooth acceleration
-    
-    pedal_di = float(clip(pedal_di, self.prev_pedal_di - pedal_max_down, self.prev_pedal_di + pedal_max_up))
-    pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
-    
-    # ============================================
-    # Step 4: Apply hysteresis (conditionally, like Tinkla)
+    # Step 3: Apply hysteresis (conditionally, like Tinkla)
     # ============================================
     # From PCC_module.py:
     #   if abs(CS.out.vEgo * CV.MS_TO_KPH - self.pedal_speed_kph) < 0.8 and CS.out.vEgo > 5.:
     #     tesla_pedal = self.pedal_hysteresis(tesla_pedal, enable_pedal)
     if target_speed_kph is not None and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8 and v_ego > 5.0:
-      pedal_di = self._pedal_hysteresis(pedal_di, True)
-    else:
-      # Keep hysteresis state aligned when we're outside the hysteresis zone.
-      self.pedal_steady = pedal_di
+      pedal_di = float(self._pedal_hysteresis(pedal_di, True))
+    
+    # ============================================
+    # Step 4: Apply rate limiting
+    # ============================================
+    # From PCC_module.py:
+    # PEDAL_MAX_DOWN = MAX_PEDAL_VALUE * _DT / 0.4
+    # PEDAL_MAX_UP = (MAX_PEDAL_VALUE - self.prev_tesla_pedal) * _DT
+    #
+    # Tinkla uses _DT = 0.01 (100Hz). We send pedal at 50Hz (frame % 2),
+    # so use dt=0.02 to keep equivalent per-second ramp behavior.
+    dt = 0.02
+    pedal_max_down = max_pedal_value * dt / 0.4
+    pedal_max_up = (max_pedal_value - self.prev_pedal_di) * dt
+    
+    pedal_di = float(clip(pedal_di, self.prev_pedal_di - pedal_max_down, self.prev_pedal_di + pedal_max_up))
+    pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
     
     # ============================================
     # Step 5: Transform DI units to pedal voltage

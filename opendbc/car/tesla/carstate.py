@@ -16,10 +16,6 @@ except ImportError:
   tinkla_conf = None
   PEDAL_DI_PRESSED = 2  # Fallback threshold for "pedal pressed" detection
 
-# Comma Pedal constants (from Tinkla)
-PEDAL_M1 = 0.050796813
-PEDAL_M2 = 0.101593626
-PEDAL_D = -22.85856576
 PEDAL_TIMEOUT_MS = 500
 
 # HSO (Human Steering Override) default constants (fallback if tinkla_conf unavailable)
@@ -583,8 +579,8 @@ class CarState(CarStateBase):
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       curr_time_ms = _current_time_millis()
       
-      # Parse pedal feedback from GAS_SENSOR (comma_pedal.dbc)
-      # cp_ap_party is configured to use comma_pedal DBC for Pre-AP
+      # Parse pedal feedback from GAS_SENSOR.
+      # For Pre-AP, this is decoded from tesla_preap.dbc and already scaled.
       try:
         gas_sensor = cp_ap_party.vl.get("GAS_SENSOR", {})
         if gas_sensor:
@@ -592,16 +588,20 @@ class CarState(CarStateBase):
           self.prev_pedal_idx = self.pedal_idx
           
           # Read pedal sensor values
-          # From comma_pedal.dbc: INTERCEPTOR_GAS, INTERCEPTOR_GAS2, STATE, IDX
-          interceptor_gas_raw = gas_sensor.get("INTERCEPTOR_GAS", 0)
-          interceptor_gas2_raw = gas_sensor.get("INTERCEPTOR_GAS2", 0)
+          # From DBC: INTERCEPTOR_GAS, INTERCEPTOR_GAS2, STATE, IDX
+          interceptor_gas = float(gas_sensor.get("INTERCEPTOR_GAS", 0.0))
+          interceptor_gas2 = float(gas_sensor.get("INTERCEPTOR_GAS2", 0.0))
           self.pedal_interceptor_state = int(gas_sensor.get("STATE", 0))
           self.pedal_idx = int(gas_sensor.get("IDX", 0))
           
-          # Convert raw values to voltage using Tinkla formula
-          # From Tinkla: value = raw * M1 + D (or raw * M2 + D for redundant)
-          self.pedal_interceptor_value = interceptor_gas_raw * PEDAL_M1 + PEDAL_D
-          self.pedal_interceptor_value2 = interceptor_gas2_raw * PEDAL_M2 + PEDAL_D
+          # Match Tinkla semantics: convert decoded pedal value to DI units.
+          # Do NOT apply M1/M2 scaling here; DBC decoding already did that.
+          if TINKLA_CONF_AVAILABLE and tinkla_conf is not None:
+            self.pedal_interceptor_value = float(tinkla_conf.pedal_to_di(interceptor_gas))
+            self.pedal_interceptor_value2 = float(tinkla_conf.pedal_to_di(interceptor_gas2))
+          else:
+            self.pedal_interceptor_value = interceptor_gas
+            self.pedal_interceptor_value2 = interceptor_gas2
           
           # Track pedal responsiveness
           if self.pedal_idx != self.prev_pedal_idx:
@@ -623,7 +623,7 @@ class CarState(CarStateBase):
       
       # Read torque level for pedal zero learning (from DI_torque1)
       try:
-        self.torqueLevel = cp_pt.vl["DI_torque1"].get("DI_torque1Motor", 0)
+        self.torqueLevel = cp_pt.vl["DI_torque1"].get("DI_torqueMotor", 0)
       except Exception:
         self.torqueLevel = 0.0
 
