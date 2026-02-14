@@ -1,3 +1,5 @@
+import numpy as np
+
 from opendbc.car import get_safety_config, structs, STD_CARGO_KG
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.carcontroller import CarController
@@ -11,11 +13,28 @@ try:
 except ImportError:
   tinkla_conf = None
 
+# Conservative Tinkla-like accel envelope for Pre-AP pedal mode.
+# Speed breakpoints are in m/s.
+ACCEL_LOOKUP_BP = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]
+ACCEL_MAX_LOOKUP_V_STANDARD = [0.3, 0.9, 1.2, 1.0, 0.8, 0.6]
+
 
 class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
   RadarInterface = RadarInterface
+
+  @staticmethod
+  def get_pid_accel_limits(CP, current_speed, cruise_speed):
+    # Match Tinkla behavior more closely on Pre-AP pedal cars:
+    # keep low-speed accel conservative to avoid launch spikes.
+    if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      use_pedal = bool(tinkla_conf.use_pedal) if tinkla_conf is not None else False
+      if use_pedal:
+        a_max = float(np.interp(current_speed, ACCEL_LOOKUP_BP, ACCEL_MAX_LOOKUP_V_STANDARD))
+        return -1.5, a_max
+
+    return CarInterfaceBase.get_pid_accel_limits(CP, current_speed, cruise_speed)
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:

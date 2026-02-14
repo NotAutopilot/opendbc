@@ -2,6 +2,7 @@ import time
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.tesla.teslacan import TeslaCAN
@@ -35,6 +36,10 @@ except ImportError:
 MIN_CRUISE_SPEED_MS = 17.1 * 0.44704  # 17.1 MPH in m/s (~7.6 m/s)
 CRUISE_BUTTON_COOLDOWN_MS = 400  # Don't spam faster than this (Tinkla uses 400ms)
 HUMAN_ACTION_COOLDOWN_MS = 3000  # Don't override human input for 3 seconds
+
+# Zero-torque learning thresholds (from Tinkla PCC_module.py)
+TORQUE_LEVEL_ACC = 0.0
+TORQUE_LEVEL_DECEL = -30.0
 
 # Fallback pedal constants (used when tinkla_conf unavailable)
 # From Tinkla tunes.py
@@ -72,6 +77,9 @@ class CarController(CarControllerBase):
     self.prev_pedal_di = 0.0      # Previous pedal value in DI units (for rate limiting)
     self.pedal_steady = 0.0       # Hysteresis state (smoothed pedal value)
     self.pedal_for_zero_torque = 0.0  # Learned zero-torque pedal position
+    self.last_torque_for_zero = TORQUE_LEVEL_DECEL
+    self.last_apid_for_zero = 0.0
+    self.prev_a_pid = 0.0
     self.prev_v_ego = 0.0         # Previous vehicle speed
     
     # ============================================
@@ -154,6 +162,8 @@ class CarController(CarControllerBase):
         requested_long = cs_cruise_enabled and cs_enable_long
         long_active = requested_long and CC.longActive
         use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
+        pedal_calibrated = bool(tinkla_conf.pedal_calibrated) if (TINKLA_AVAILABLE and tinkla_conf) else False
+        pedal_long_allowed = bool(use_pedal and pedal_calibrated)
         if long_active and not self.prev_preap_long_active:
           self.preap_long_engage_frame = self.frame
 
@@ -166,7 +176,7 @@ class CarController(CarControllerBase):
         # Do NOT use CC.cruiseControl.cancel directly here, as controlsd
         # keeps it asserted when pcmCruise is False.
         # ==============================================
-        if use_pedal:
+        if pedal_long_allowed:
           if (not self.prev_requested_long) and requested_long and CS.out.cruiseState.enabled:
             self.preap_cancel_pending = True
           if self.prev_requested_long and (not requested_long) and CS.out.cruiseState.enabled:
@@ -199,7 +209,7 @@ class CarController(CarControllerBase):
         if self.frame % 2 == 0:
            self.prev_enable_long_control = cs_enable_long
 
-           if long_active and use_pedal:
+           if long_active and pedal_long_allowed:
              # ============================================
              # Mode 1: Comma Pedal Control
              # Matches Tinkla Pre-AP behavior: always send commands when
@@ -220,8 +230,17 @@ class CarController(CarControllerBase):
                if CS.out.vEgo < 2.0:
                  accel_request = min(accel_request, 0.8)
 
-               pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo)
+               self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
+               target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
+               pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+
+           elif long_active and use_pedal and not pedal_calibrated:
+             # Safety gate: block pedal actuation until calibration is complete.
+             idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+             can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+             self.pedal_steady = 0.0
+             self.prev_pedal_di = 0.0
 
            elif long_active and not use_pedal:
              # ============================================
@@ -275,7 +294,7 @@ class CarController(CarControllerBase):
   # Pedal Control Logic (Ported from Tinkla PCC_module.py)
   # ============================================
   
-  def _calc_pedal_command(self, accel_request: float, v_ego: float) -> float:
+  def _calc_pedal_command(self, accel_request: float, v_ego: float, target_speed_kph: float | None = None) -> float:
     """
     Calculate pedal command from acceleration request.
     
@@ -347,13 +366,13 @@ class CarController(CarControllerBase):
     # Step 4: Apply hysteresis (conditionally, like Tinkla)
     # ============================================
     # From PCC_module.py:
-    # Tinkla ONLY applies hysteresis when very close to set speed:
     #   if abs(CS.out.vEgo * CV.MS_TO_KPH - self.pedal_speed_kph) < 0.8 and CS.out.vEgo > 5.:
-    #       tesla_pedal = self.pedal_hysteresis(tesla_pedal, enable_pedal)
-    #
-    # Since we don't track pedal_speed_kph here, we skip hysteresis by default.
-    # The rate limiting above provides sufficient smoothing.
-    # TODO: Pass in target speed to enable hysteresis when close to target
+    #     tesla_pedal = self.pedal_hysteresis(tesla_pedal, enable_pedal)
+    if target_speed_kph is not None and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8 and v_ego > 5.0:
+      pedal_di = self._pedal_hysteresis(pedal_di, True)
+    else:
+      # Keep hysteresis state aligned when we're outside the hysteresis zone.
+      self.pedal_steady = pedal_di
     
     # ============================================
     # Step 5: Transform DI units to pedal voltage
@@ -381,6 +400,24 @@ class CarController(CarControllerBase):
     self.prev_v_ego = v_ego
     
     return pedal_cmd
+
+  def _update_zero_torque_learning(self, CS, v_ego: float, accel_request: float) -> None:
+    """
+    Learn pedal value that corresponds to near-zero drive torque at speed.
+    Matches Tinkla PCC zero-torque learning behavior.
+    """
+    torque_level = float(getattr(CS, "torqueLevel", 0.0))
+    if (
+      torque_level < TORQUE_LEVEL_ACC
+      and torque_level > TORQUE_LEVEL_DECEL
+      and v_ego >= 10.0 * CV.MPH_TO_MS
+      and abs(torque_level) < abs(self.last_torque_for_zero)
+    ):
+      self.pedal_for_zero_torque = self.prev_pedal_di
+      self.last_torque_for_zero = torque_level
+      self.last_apid_for_zero = self.prev_a_pid
+
+    self.prev_a_pid = accel_request
   
   def _pedal_hysteresis(self, pedal: float, enabled: bool) -> float:
     """

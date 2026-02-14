@@ -401,6 +401,9 @@ class CarState(CarStateBase):
       # Save full STW_ACTN_RQ message for spoofing cancel commands (Tinkla carstate.py line 432)
       self.msg_stw_actn_req = copy.copy(cp_chassis.vl["STW_ACTN_RQ"])
       curr_time_ms = _current_time_millis()
+      use_pedal = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
+      pedal_calibrated = bool(tinkla_conf.pedal_calibrated) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
+      pedal_long_allowed = (not use_pedal) or pedal_calibrated
       
       buttonEvents = []
       
@@ -445,32 +448,39 @@ class CarState(CarStateBase):
           )
           
           if double_pull:
-            # Double pull detected! Enable full control (steering + longitudinal)
+            # Double pull detected.
             self.cruiseEnabled = True
-            self.enableLongControl = True
-            self.enableJustCC = False
             self.pending_enable = False
-            self.longCtrlEvent = "pccEnabled"
-            # Capture target speed (Tinkla PCC_module.py line 172-178)
-            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
-            current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-            # Match Tinkla: latch to current rounded speed (or speed-limit target),
-            # do not force a minimum speed on engagement.
-            self.pedal_speed_kph = max(current_speed_kph, 0.0)
+            self.enableLongControl = pedal_long_allowed
+            self.enableJustCC = not pedal_long_allowed
+            if pedal_long_allowed:
+              self.longCtrlEvent = "pccEnabled"
+              # Capture target speed (Tinkla PCC_module.py line 172-178)
+              speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+              current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
+              # Match Tinkla: latch to current rounded speed (or speed-limit target),
+              # do not force a minimum speed on engagement.
+              self.pedal_speed_kph = max(current_speed_kph, 0.0)
+            else:
+              # Safety gate: pedal long requires completed calibration.
+              self.pedal_speed_kph = 0.0
           else:
             # First pull - mark as pending, wait for possible second pull
             self.pending_enable = True
         else:
-          # Double-pull disabled: single pull = full control (stock behavior)
+          # Double-pull disabled: single pull = full control unless pedal calibration gate blocks long.
           self.cruiseEnabled = True
-          self.enableLongControl = True
-          self.enableJustCC = False
           self.pending_enable = False
-          # Capture target speed
-          speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
-          current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-          # Match Tinkla: latch to current rounded speed, no artificial minimum.
-          self.pedal_speed_kph = max(current_speed_kph, 0.0)
+          self.enableLongControl = pedal_long_allowed
+          self.enableJustCC = not pedal_long_allowed
+          if pedal_long_allowed:
+            # Capture target speed
+            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+            current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
+            # Match Tinkla: latch to current rounded speed, no artificial minimum.
+            self.pedal_speed_kph = max(current_speed_kph, 0.0)
+          else:
+            self.pedal_speed_kph = 0.0
       
       # General button event handling (for UI/buttonEvents)
       if self.cruise_buttons != self.prev_cruise_buttons:
