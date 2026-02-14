@@ -714,7 +714,13 @@ class CarState(CarStateBase):
         Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party] if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else DBC[CP.carFingerprint][Bus.party],
                                 pedal_messages if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else ap_messages, ap_party_bus),
         Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, pt_bus),
-        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_messages, ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain),
+        # Pre-AP does not consume ap_pt signals in update_legacy; keep parser empty to
+        # avoid false canValid drops from unnecessary legacy AP/PT expectations.
+        Bus.ap_pt: CANParser(
+          DBC[CP.carFingerprint][Bus.pt],
+          [] if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP else ap_messages,
+          ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain
+        ),
         Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
       }
 
