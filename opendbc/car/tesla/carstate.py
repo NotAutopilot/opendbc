@@ -487,8 +487,7 @@ class CarState(CarStateBase):
           # immediately after MAIN/RES/DECEL press edges.
           # This prevents self-cancel when spoofing stock-CC cancellation.
           is_possible_auto_cancel = (
-            be.pressed
-            and self.enableLongControl
+            self.enableLongControl
             and (curr_time_ms - self.last_stalk_non_cancel_ms) < 600
           )
           if not is_possible_auto_cancel:
