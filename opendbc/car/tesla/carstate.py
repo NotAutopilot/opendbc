@@ -402,8 +402,10 @@ class CarState(CarStateBase):
       self.msg_stw_actn_req = copy.copy(cp_chassis.vl["STW_ACTN_RQ"])
       curr_time_ms = _current_time_millis()
       use_pedal = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
-      pedal_calibrated = bool(tinkla_conf.pedal_calibrated) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
-      pedal_long_allowed = (not use_pedal) or pedal_calibrated
+      pedal_factor = float(tinkla_conf.pedal_factor) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else 1.0
+      # Allow long if pedal transform is numerically valid; only block when transform is broken.
+      pedal_transform_valid = math.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
+      pedal_long_allowed = (not use_pedal) or pedal_transform_valid
       
       buttonEvents = []
       

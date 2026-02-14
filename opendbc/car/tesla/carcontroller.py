@@ -163,8 +163,9 @@ class CarController(CarControllerBase):
         requested_long = cs_cruise_enabled and cs_enable_long
         long_active = requested_long and CC.longActive
         use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
-        pedal_calibrated = bool(tinkla_conf.pedal_calibrated) if (TINKLA_AVAILABLE and tinkla_conf) else False
-        pedal_long_allowed = bool(use_pedal and pedal_calibrated)
+        pedal_factor = float(tinkla_conf.pedal_factor) if (TINKLA_AVAILABLE and tinkla_conf) else 1.0
+        pedal_transform_valid = bool(np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6)
+        pedal_long_allowed = bool(use_pedal and pedal_transform_valid)
         if long_active and not self.prev_preap_long_active:
           self.preap_long_engage_frame = self.frame
 
@@ -244,8 +245,8 @@ class CarController(CarControllerBase):
                self.pedal_steady = 0.0
                self.prev_pedal_di = 0.0
 
-           elif long_active and use_pedal and not pedal_calibrated:
-             # Safety gate: block pedal actuation until calibration is complete.
+           elif long_active and use_pedal and not pedal_transform_valid:
+             # Safety gate: block pedal actuation when pedal transform is invalid.
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              self.pedal_steady = 0.0
