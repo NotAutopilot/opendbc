@@ -152,7 +152,6 @@ class CarController(CarControllerBase):
         requested_long = cs_cruise_enabled and cs_enable_long
         long_active = requested_long and CC.longActive
         use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
-        pedal_available = bool(getattr(CS, 'pedal_available', True))
 
         # ==============================================
         # Pedal Over CC: one-shot CANCEL to keep stock CC unlatch
@@ -196,7 +195,7 @@ class CarController(CarControllerBase):
         if self.frame % 2 == 0:
            self.prev_enable_long_control = cs_enable_long
 
-           if long_active and use_pedal and pedal_available:
+           if long_active and use_pedal:
              # ============================================
              # Mode 1: Comma Pedal Control
              # Matches Tinkla Pre-AP behavior: always send commands when

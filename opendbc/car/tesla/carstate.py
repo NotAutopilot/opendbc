@@ -250,7 +250,10 @@ class CarState(CarStateBase):
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
 
     # Gas pedal
-    ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > 0
+    # Pre-AP note: using a strict >0 threshold on DI_pedalPos can keep
+    # gas override active and prevent planner longitudinal output.
+    # Tinkla uses a small threshold in DI units for interceptor-based gas.
+    ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > PEDAL_DI_PRESSED
 
     # Brake pedal
     ret.brake = 0
@@ -595,6 +598,12 @@ class CarState(CarStateBase):
         # Pedal not present or parsing failed
         self.pedal_available = False
         self.pedal_timeout = True
+
+      # In pedal mode, use interceptor threshold for gas override semantics.
+      # This matches Tinkla behavior and avoids sticky DI_pedalPos > 0 overrides.
+      use_pedal = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
+      if use_pedal:
+        ret.gasPressed = self.pedal_interceptor_value > PEDAL_DI_PRESSED
       
       # Read torque level for pedal zero learning (from DI_torque1)
       try:
