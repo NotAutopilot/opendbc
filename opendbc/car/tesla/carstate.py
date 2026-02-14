@@ -9,11 +9,12 @@ from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR
 
 # Import Tinkla configuration (dynamic params)
 try:
-  from opendbc.car.tesla.tinkla_conf import tinkla_conf
+  from opendbc.car.tesla.tinkla_conf import tinkla_conf, PEDAL_DI_PRESSED
   TINKLA_CONF_AVAILABLE = True
 except ImportError:
   TINKLA_CONF_AVAILABLE = False
   tinkla_conf = None
+  PEDAL_DI_PRESSED = 2  # Fallback threshold for "pedal pressed" detection
 
 # Comma Pedal constants (from Tinkla)
 PEDAL_M1 = 0.050796813
