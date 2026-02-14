@@ -3,6 +3,12 @@ from opendbc.car import Bus, structs
 from opendbc.car.tesla.values import DBC, CANBUS, CAR
 from opendbc.car.interfaces import RadarInterfaceBase
 
+# Optional Tinkla config import (available on device/runtime)
+try:
+  from opendbc.car.tesla.tinkla_conf import tinkla_conf
+except ImportError:
+  tinkla_conf = None
+
 
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP):
@@ -40,6 +46,12 @@ class RadarInterface(RadarInterfaceBase):
 
     self.updated_messages = set()
     self.track_id = 0
+    # Keep parity with Tinkla radar lateral alignment behavior.
+    # For behind-nosecone installs, users can configure horizontal offset in meters.
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and tinkla_conf is not None:
+      self.radar_offset = float(tinkla_conf.radar_offset)
+    else:
+      self.radar_offset = 0.0
 
   def update(self, can_msgs):
 
@@ -102,7 +114,7 @@ class RadarInterface(RadarInterfaceBase):
 
       # Parse track data
       self.pts[i].dRel = msg_a['LongDist']
-      self.pts[i].yRel = msg_a['LatDist']
+      self.pts[i].yRel = msg_a['LatDist'] + self.radar_offset
       self.pts[i].vRel = msg_a['LongSpeed']
       self.pts[i].aRel = msg_a['LongAccel']
       self.pts[i].yvRel = msg_b['LatSpeed']
