@@ -9,14 +9,14 @@ from opendbc.car.tesla.radar_interface import RadarInterface
 
 # Import config helper - may fail on non-comma devices during testing
 try:
-  from opendbc.car.tesla.tinkla_conf import tinkla_conf
+  from opendbc.car.tesla.tinkla_conf import tinkla_conf, ACCEL_LOOKUP_BP
 except ImportError:
   tinkla_conf = None
 
-# Conservative Tinkla-like accel envelope for Pre-AP pedal mode.
-# Speed breakpoints are in m/s.
-ACCEL_LOOKUP_BP = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]
-ACCEL_MAX_LOOKUP_V_STANDARD = [0.3, 0.9, 1.2, 1.0, 0.8, 0.6]
+# Conservative fallback accel envelope for Pre-AP pedal mode.
+# Matches Tinkla "Chill" profile by default for safer first-drive behavior.
+ACCEL_LOOKUP_BP_FALLBACK = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]  # m/s
+ACCEL_MAX_LOOKUP_V_FALLBACK = [0.3, 0.7, 0.9, 0.7, 0.6, 0.5]
 
 
 class CarInterface(CarInterfaceBase):
@@ -26,12 +26,17 @@ class CarInterface(CarInterfaceBase):
 
   @staticmethod
   def get_pid_accel_limits(CP, current_speed, cruise_speed):
-    # Match Tinkla behavior more closely on Pre-AP pedal cars:
-    # keep low-speed accel conservative to avoid launch spikes.
+    # Match Tinkla behavior on Pre-AP pedal cars using profile-selectable
+    # accel envelopes (Chill / Standard / MadMax).
     if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       use_pedal = bool(tinkla_conf.use_pedal) if tinkla_conf is not None else False
       if use_pedal:
-        a_max = float(np.interp(current_speed, ACCEL_LOOKUP_BP, ACCEL_MAX_LOOKUP_V_STANDARD))
+        accel_bp = ACCEL_LOOKUP_BP_FALLBACK
+        accel_profile_values = ACCEL_MAX_LOOKUP_V_FALLBACK
+        if tinkla_conf is not None:
+          accel_bp = ACCEL_LOOKUP_BP
+          accel_profile_values = tinkla_conf.get_accel_profile_values()
+        a_max = float(np.interp(current_speed, accel_bp, accel_profile_values))
         return -1.5, a_max
 
     return CarInterfaceBase.get_pid_accel_limits(CP, current_speed, cruise_speed)

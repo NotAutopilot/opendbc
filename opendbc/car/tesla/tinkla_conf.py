@@ -27,9 +27,10 @@ DEFAULT_CONFIG = {
   'pedal_calibrated': False,
   'acc_spam_enabled': True,
   'acc_spam_cooldown_ms': 400,
+  'accel_profile': 'Chill',
   # Pedal Hardware
   'pedal_can_zero': False,
-  'pedal_profile': 'Generic',
+  'pedal_profile': 'P85+',
   # Pedal Calibration
   'pedal_min': 0,
   'pedal_max': 1023,
@@ -75,8 +76,18 @@ PEDAL_PROFILES = {
   'Generic': [99., 99., 99., 99., 99., 99.],
 }
 
-# Default to Generic profile
-PEDAL_V_DEFAULT = PEDAL_PROFILES['Generic']
+# Default to the most conservative profile for safer first-drive behavior
+PEDAL_V_DEFAULT = PEDAL_PROFILES['P85+']
+
+# Speed-dependent planner acceleration envelopes (from Tinkla tunes.py)
+# Profiles: Chill (soft), Standard, MadMax (aggressive)
+ACCEL_LOOKUP_BP = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]  # m/s
+ACCEL_MAX_PROFILES = {
+  'Chill': [0.3, 0.7, 0.9, 0.7, 0.6, 0.5],
+  'Standard': [0.3, 0.9, 1.2, 1.0, 0.8, 0.6],
+  'MadMax': [0.3, 1.6, 1.9, 1.5, 1.2, 1.0],
+}
+ACCEL_MAX_DEFAULT = ACCEL_MAX_PROFILES['Chill']
 
 
 def transform_di_to_pedal(val: float, pedal_zero: float, pedal_factor: float) -> float:
@@ -334,6 +345,22 @@ class TinklaConf:
   def acc_spam_cooldown_ms(self, value: int) -> None:
     # Clamp to 200 - 1000 ms
     self._put('acc_spam_cooldown_ms', max(200, min(1000, int(value))))
+
+  @property
+  def accel_profile(self) -> str:
+    """
+    Planner acceleration profile.
+    - Chill: softer pickup and reduced low-speed aggression
+    - Standard: Tinkla default balance
+    - MadMax: maximum response
+    """
+    val = self._get('accel_profile', 'Chill')
+    return val if val in ACCEL_MAX_PROFILES else 'Chill'
+
+  @accel_profile.setter
+  def accel_profile(self, value: str) -> None:
+    if value in ACCEL_MAX_PROFILES:
+      self._put('accel_profile', value)
   
   # ============================================
   # Pedal Calibration Parameters
@@ -415,8 +442,8 @@ class TinklaConf:
   @property
   def pedal_profile(self) -> str:
     """Pedal profile name (S60, S85, P85, P85+, Generic)."""
-    val = self._get('pedal_profile', 'Generic')
-    return val if val in PEDAL_PROFILES else 'Generic'
+    val = self._get('pedal_profile', 'P85+')
+    return val if val in PEDAL_PROFILES else 'P85+'
   
   @pedal_profile.setter
   def pedal_profile(self, value: str) -> None:
@@ -435,6 +462,10 @@ class TinklaConf:
   def get_pedal_profile_values(self) -> list:
     """Get the max pedal values for current profile."""
     return PEDAL_PROFILES.get(self.pedal_profile, PEDAL_V_DEFAULT)
+
+  def get_accel_profile_values(self) -> list:
+    """Get the planner accel envelope for current accel profile."""
+    return ACCEL_MAX_PROFILES.get(self.accel_profile, ACCEL_MAX_DEFAULT)
   
   def di_to_pedal(self, val: float) -> float:
     """Convert DI units to pedal voltage using current calibration."""
@@ -459,6 +490,7 @@ class TinklaConf:
     print(f"    Pedal Calibrated:     {'YES' if self.pedal_calibrated else 'NO'}")
     print(f"    ACC Spam Enabled:     {'ON' if self.acc_spam_enabled else 'OFF'}")
     print(f"    ACC Spam Cooldown:    {self.acc_spam_cooldown_ms}ms")
+    print(f"    Accel Profile:        {self.accel_profile}")
     print("")
     print("  [PEDAL CALIBRATION]")
     print(f"    Pedal Min (raw):      {self.pedal_min}")
@@ -489,6 +521,7 @@ class TinklaConf:
       'pedal_calibrated': self.pedal_calibrated,
       'acc_spam_enabled': self.acc_spam_enabled,
       'acc_spam_cooldown_ms': self.acc_spam_cooldown_ms,
+      'accel_profile': self.accel_profile,
       # Pedal Calibration
       'pedal_min': self.pedal_min,
       'pedal_max': self.pedal_max,

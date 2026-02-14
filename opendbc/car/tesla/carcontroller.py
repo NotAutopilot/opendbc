@@ -227,14 +227,21 @@ class CarController(CarControllerBase):
                  # Safety guard: damp initial positive accel right after engagement.
                  # This prevents launch spikes if planner accel is briefly high.
                  accel_request = float(actuators.accel)
+                 target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
                  frames_since_engage = self.frame - self.preap_long_engage_frame
                  if frames_since_engage < 200:
                    accel_request = min(accel_request, 0.6)
-                 if CS.out.vEgo < 2.0:
-                   accel_request = min(accel_request, 0.8)
+                 # Extra low-speed shaping: keep pickup smooth under ~13 mph while
+                 # leaving highway behavior unchanged.
+                 if accel_request > 0.0 and CS.out.vEgo < 6.0:
+                   low_speed_cap = float(interp(
+                     CS.out.vEgo,
+                     [0.0, 1.0, 2.0, 4.0, 6.0],   # m/s
+                     [0.25, 0.35, 0.45, 0.55, 0.6],  # m/s^2
+                   ))
+                   accel_request = min(accel_request, low_speed_cap)
 
                  self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
-                 target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
                  pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
                  can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
              except Exception:
