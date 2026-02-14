@@ -1,4 +1,5 @@
 import copy
+import math
 import time
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
@@ -675,7 +676,8 @@ class CarState(CarStateBase):
         if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
           # These are in comma_pedal.dbc
           pedal_messages = [
-            ("GAS_SENSOR", 0)
+            # Optional pedal feedback: don't invalidate whole CAN health if missing.
+            ("GAS_SENSOR", math.nan)
           ]
           # These are in tesla_can.dbc - Pre-AP doesn't have DAS messages
           ap_messages = [
