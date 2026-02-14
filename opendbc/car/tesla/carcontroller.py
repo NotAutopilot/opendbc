@@ -84,6 +84,8 @@ class CarController(CarControllerBase):
     
     # State tracking
     self.prev_enable_long_control = False
+    self.prev_requested_long = False
+    self.preap_cancel_pending = False
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP):
@@ -147,30 +149,36 @@ class CarController(CarControllerBase):
         # Get engagement state (used for both pedal and pedal-over-CC)
         cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
         cs_enable_long = getattr(CS, 'enableLongControl', False)
-        long_active = cs_cruise_enabled and cs_enable_long
+        requested_long = cs_cruise_enabled and cs_enable_long
+        long_active = requested_long and CC.longActive
         use_pedal = TINKLA_AVAILABLE and tinkla_conf and tinkla_conf.use_pedal
+        pedal_available = bool(getattr(CS, 'pedal_available', True))
 
         # ==============================================
         # Pedal Over CC: Cancel stock cruise when openpilot disengages
         # (Tinkla carcontroller.py lines 127-134)
-        # Only send CANCEL when our internal state disengages but stock
-        # cruise might still be latched on. NOT continuous spam.
+        # Only send CANCEL on the falling edge of our requested longitudinal
+        # mode while stock cruise appears enabled.
+        # Do not use CC.cruiseControl.cancel on Pre-AP with pcmCruise=False,
+        # as controlsd keeps it asserted while enabled.
         # ==============================================
-        pcm_cancel_cmd = CC.cruiseControl.cancel
-        if not long_active and CS.out.cruiseState.enabled:
-          # Openpilot disengaged but stock cruise still on - cancel it
-          pcm_cancel_cmd = True
+        if self.prev_requested_long and not requested_long and CS.out.cruiseState.enabled:
+          self.preap_cancel_pending = True
+        pcm_cancel_cmd = self.preap_cancel_pending
         if pcm_cancel_cmd and self.frame % 10 == 0:
           msg_stw = getattr(CS, 'msg_stw_actn_req', None)
           if msg_stw is not None:
             stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
             can_sends.insert(0, self.tesla_can.create_action_request(
               CruiseButtons.CANCEL, CANBUS.party, stlk_counter, msg_stw))
+            self.preap_cancel_pending = False
+
+        self.prev_requested_long = requested_long
 
         if self.frame % 2 == 0:
            self.prev_enable_long_control = cs_enable_long
 
-           if long_active and use_pedal:
+           if long_active and use_pedal and pedal_available:
              # ============================================
              # Mode 1: Comma Pedal Control
              # Matches Tinkla Pre-AP behavior: always send commands when
@@ -196,7 +204,7 @@ class CarController(CarControllerBase):
 
            else:
              # ============================================
-             # Mode 3: Steering Only (Single Pull) or Not Engaged
+             # Mode 3: Steering only, planner-long inactive, or pedal unavailable
              # Send idle pedal keepalive to prevent firmware fault
              # Tinkla PCC_module.py line 132: sends reset at frame % 50 (2Hz)
              # ============================================
