@@ -282,8 +282,12 @@ class CarState(CarStateBase):
     ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                           eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
-    # Reset engagement state machine on steering disengage rising edge
-    if ret.steeringDisengage and not self.prev_steering_disengage:
+    # Reset engagement state machine on steering disengage falling edge (EPAS recovery).
+    # We wait for steeringDisengage to clear (True→False) so that the EPAS is no longer
+    # EAC_INHIBITED before allowing a fresh stalk-pull engagement.  Resetting on the
+    # rising edge would leave steerFaultTemporary active, blocking latActive and causing
+    # "steering unavailable" / "controls mismatch" on the next engage attempt.
+    if self.prev_steering_disengage and not ret.steeringDisengage:
       was_long_active = self.enableLongControl
       self.cruiseEnabled = False
       self.enableLongControl = False
