@@ -153,7 +153,6 @@ class CarInterface(CarInterfaceBase):
     ret.vEgoStarting = 0.1
     # Tinkla uses a stronger stopping decel ramp for Pre-AP.
     ret.stoppingDecelRate = 1.0 if candidate == CAR.TESLA_MODEL_S_PREAP else 0.3
-    ret.stoppingControl = True
 
     # ret.dashcamOnly = candidate in (CAR.TESLA_MODEL_X) # dashcam only, pending find invalidLkasSetting signal
 
