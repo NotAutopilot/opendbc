@@ -218,39 +218,46 @@ class CarController(CarControllerBase):
              # use_pedal is True and long is active. Tinkla's pcc_available
              # is always True for Pre-AP (autopilot_disabled=True).
              # ============================================
-             try:
-               if CS.out.gasPressed:
-                 # Tinkla PCC_module.py line 294: if CS.out.gasPressed, stop commanding
-                 # This is the SAFE approach - let the human have full control
-                 can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
-               else:
-                 # Safety guard: damp initial positive accel right after engagement.
-                 # This prevents launch spikes if planner accel is briefly high.
-                 accel_request = float(actuators.accel)
-                 target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
-                 frames_since_engage = self.frame - self.preap_long_engage_frame
-                 if frames_since_engage < 200:
-                   accel_request = min(accel_request, 0.6)
-                 # Extra low-speed shaping: keep pickup smooth under ~13 mph while
-                 # leaving highway behavior unchanged.
-                 if accel_request > 0.0 and CS.out.vEgo < 6.0:
-                   low_speed_cap = float(interp(
-                     CS.out.vEgo,
-                     [0.0, 1.0, 2.0, 4.0, 6.0],   # m/s
-                     [0.25, 0.35, 0.45, 0.55, 0.6],  # m/s^2
-                   ))
-                   accel_request = min(accel_request, low_speed_cap)
+            try:
+              if CS.out.gasPressed:
+                # Tinkla PCC_module.py line 294: if CS.out.gasPressed, stop commanding
+                # This is the SAFE approach - let the human have full control
+                can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
+              else:
+                # Safety guard: damp initial positive accel right after engagement.
+                # This prevents launch spikes if planner accel is briefly high.
+                accel_request = float(actuators.accel)
+                target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
+                frames_since_engage = self.frame - self.preap_long_engage_frame
+                if frames_since_engage < 200:
+                  accel_request = min(accel_request, 0.6)
+                # Extra low-speed shaping: keep pickup smooth under ~13 mph while
+                # leaving highway behavior unchanged.
+                if accel_request > 0.0 and CS.out.vEgo < 6.0:
+                  low_speed_cap = float(interp(
+                    CS.out.vEgo,
+                    [0.0, 1.0, 2.0, 4.0, 6.0],   # m/s
+                    [0.25, 0.35, 0.45, 0.55, 0.6],  # m/s^2
+                  ))
+                  accel_request = min(accel_request, low_speed_cap)
 
-                 self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
-                 pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
-                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
-             except Exception:
-               # Fail-safe: on any unexpected pedal path exception, send disabled pedal.
-               carlog.exception("Pre-AP pedal command path failed; sending disabled pedal command")
-               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
-               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-               self.pedal_steady = 0.0
-               self.prev_pedal_di = 0.0
+                # Phase 2: emulate Tinkla's smoother low-speed speed-tracking behavior.
+                # Modern OP planner feeds accel directly, so we add a small speed-error
+                # governor near target speed to reduce hill rebound and overshoot.
+                accel_request = self._shape_preap_accel_request(
+                  accel_request, CS.out.vEgo, target_speed_kph
+                )
+
+                self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
+                pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
+                can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+            except Exception:
+              # Fail-safe: on any unexpected pedal path exception, send disabled pedal.
+              carlog.exception("Pre-AP pedal command path failed; sending disabled pedal command")
+              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+              self.pedal_steady = 0.0
+              self.prev_pedal_di = 0.0
 
            elif long_active and use_pedal and not pedal_transform_valid:
              # Safety gate: block pedal actuation when pedal transform is invalid.
@@ -310,6 +317,41 @@ class CarController(CarControllerBase):
   # ============================================
   # Pedal Control Logic (Ported from Tinkla PCC_module.py)
   # ============================================
+
+  def _shape_preap_accel_request(self, accel_request: float, v_ego: float, target_speed_kph: float) -> float:
+    """
+    Shape low-speed accel near set speed to reduce hill oscillation/overshoot.
+
+    Tinkla's PCC path had tighter direct speed-loop behavior; in the modern OP
+    stack we apply this only near target speed, and only at urban velocities,
+    so highway behavior remains unchanged.
+    """
+    if target_speed_kph <= 1e-3 or v_ego > 18.0:
+      return accel_request
+
+    speed_error_kph = float(target_speed_kph - (v_ego * CV.MS_TO_KPH))
+
+    # Already at/above target: avoid positive "rebound" and bias into gentle regen.
+    if speed_error_kph <= 0.0:
+      overspeed_cap = float(interp(
+        speed_error_kph,
+        [-10.0, -6.0, -3.0, -1.0, -0.2, 0.0],
+        [-1.10, -0.80, -0.50, -0.25, -0.08, 0.0],
+      ))
+      return min(accel_request, overspeed_cap)
+
+    # Far below target: let planner/profile control accel authority.
+    if speed_error_kph >= 6.0:
+      return accel_request
+
+    # Near target: progressively tighten positive accel cap to prevent overshoot.
+    near_target_cap = float(interp(
+      speed_error_kph,
+      [0.0, 0.5, 1.0, 2.0, 4.0, 6.0],
+      [0.05, 0.12, 0.20, 0.35, 0.55, 0.80],
+    ))
+    speed_scale = float(interp(v_ego, [0.0, 4.0, 8.0, 18.0], [0.85, 0.95, 1.0, 1.1]))
+    return min(accel_request, near_target_cap * speed_scale)
   
   def _calc_pedal_command(self, accel_request: float, v_ego: float, target_speed_kph: float | None = None) -> float:
     """

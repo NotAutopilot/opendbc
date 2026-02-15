@@ -18,6 +18,11 @@ except ImportError:
 ACCEL_LOOKUP_BP_FALLBACK = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]  # m/s
 ACCEL_MAX_LOOKUP_V_FALLBACK = [0.3, 0.7, 0.9, 0.7, 0.6, 0.5]
 
+# Tinkla pedal longitudinal tune (tunes.py LongTunes.PEDAL).
+PEDAL_LONG_K_BP = [0.0, 5.0, 22.0, 35.0]
+PEDAL_LONG_KP_V = [0.75, 0.75, 0.75, 0.75]
+PEDAL_LONG_KI_V = [0.07, 0.07, 0.07, 0.07]
+
 
 class CarInterface(CarInterfaceBase):
   CarState = CarState
@@ -98,6 +103,20 @@ class CarInterface(CarInterfaceBase):
       ret.openpilotLongitudinalControl = True
       ret.steerControlType = structs.CarParams.SteerControlType.angle
       ret.pcmCruise = False # We control engagement manually
+
+      # Tinkla parity: use dedicated pedal longitudinal tune when pedal mode is enabled.
+      # Without this, OP runs mostly feedforward accel at low speed, which is prone to
+      # hill lag/overshoot on Pre-AP pedal cars.
+      if use_pedal:
+        ret.longitudinalTuning.kpBP = PEDAL_LONG_K_BP
+        ret.longitudinalTuning.kpV = PEDAL_LONG_KP_V
+        ret.longitudinalTuning.kiBP = PEDAL_LONG_K_BP
+        ret.longitudinalTuning.kiV = PEDAL_LONG_KI_V
+      else:
+        ret.longitudinalTuning.kpBP = [0.0]
+        ret.longitudinalTuning.kpV = [0.0]
+        ret.longitudinalTuning.kiBP = [0.0]
+        ret.longitudinalTuning.kiV = [0.0]
       
       # Set physical params explicitly to avoid 0.0 ratio error
       ret.mass = 2100. + STD_CARGO_KG
@@ -132,7 +151,9 @@ class CarInterface(CarInterfaceBase):
 
     ret.vEgoStopping = 0.1
     ret.vEgoStarting = 0.1
-    ret.stoppingDecelRate = 0.3
+    # Tinkla uses a stronger stopping decel ramp for Pre-AP.
+    ret.stoppingDecelRate = 1.0 if candidate == CAR.TESLA_MODEL_S_PREAP else 0.3
+    ret.stoppingControl = True
 
     # ret.dashcamOnly = candidate in (CAR.TESLA_MODEL_X) # dashcam only, pending find invalidLkasSetting signal
 
