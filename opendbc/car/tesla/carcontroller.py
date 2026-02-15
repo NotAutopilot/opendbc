@@ -425,7 +425,18 @@ class CarController(CarControllerBase):
       and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8
       and v_ego > 5.0
     )
-    if near_set_speed:
+    # B test mode: suppress subtle pedal on/off pulses in steady-state follow/hold.
+    # Use low accel demand (not set-speed error) so this also works when following
+    # a slower lead while set speed is much higher.
+    steady_state_band = (
+      target_speed_kph is not None
+      and v_ego > 4.0
+      and abs(accel_request) < 0.30
+    )
+    if steady_state_band and abs(pedal_di - self.prev_pedal_di) <= 1.0:
+      pedal_di = self.prev_pedal_di
+
+    if near_set_speed or steady_state_band:
       pedal_di = float(self._pedal_hysteresis(pedal_di, True))
     
     # ============================================
