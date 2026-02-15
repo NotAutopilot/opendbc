@@ -420,7 +420,12 @@ class CarController(CarControllerBase):
     # From PCC_module.py:
     #   if abs(CS.out.vEgo * CV.MS_TO_KPH - self.pedal_speed_kph) < 0.8 and CS.out.vEgo > 5.:
     #     tesla_pedal = self.pedal_hysteresis(tesla_pedal, enable_pedal)
-    if target_speed_kph is not None and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8 and v_ego > 5.0:
+    near_set_speed = (
+      target_speed_kph is not None
+      and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8
+      and v_ego > 5.0
+    )
+    if near_set_speed:
       pedal_di = float(self._pedal_hysteresis(pedal_di, True))
     
     # ============================================
