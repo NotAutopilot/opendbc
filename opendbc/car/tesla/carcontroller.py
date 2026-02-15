@@ -82,6 +82,7 @@ class CarController(CarControllerBase):
     self.last_apid_for_zero = 0.0
     self.prev_a_pid = 0.0
     self.prev_v_ego = 0.0         # Previous vehicle speed
+    self.smoothed_accel = 0.0     # EMA-filtered accel request (pre-quantization smoother)
     
     # ============================================
     # Cruise Spam State (Tinkla ACC_module port)
@@ -262,6 +263,7 @@ class CarController(CarControllerBase):
               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
               self.pedal_steady = 0.0
               self.prev_pedal_di = 0.0
+              self.smoothed_accel = 0.0
 
            elif long_active and use_pedal and not pedal_transform_valid:
              # Safety gate: block pedal actuation when pedal transform is invalid.
@@ -269,6 +271,7 @@ class CarController(CarControllerBase):
              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
+             self.smoothed_accel = 0.0
 
            elif long_active and not use_pedal:
              # ============================================
@@ -291,6 +294,7 @@ class CarController(CarControllerBase):
              # Reset state when not active
              self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
+             self.smoothed_accel = 0.0
 
         self.prev_preap_long_active = long_active
 
@@ -411,9 +415,22 @@ class CarController(CarControllerBase):
     accel_bp = [regen_decel, 0.0, ACCEL_MAX]
     accel_v = [PEDAL_DI_MIN, zero_accel, max_pedal_value]
     
+    # Pre-quantization EMA: smooth accel_request before int(round()) to prevent
+    # planner jitter from becoming 0/1 DI flips. Tinkla's tighter single PCC loop
+    # naturally damped this; in the modern split planner/PI/pedal stack we need an
+    # explicit filter. Adaptive alpha: heavy smoothing near zero accel (where jitter
+    # lives), fast tracking for real accel/decel changes.
+    if abs(accel_request) < 0.25:
+      ema_alpha = 0.15  # ~130ms time constant at 50Hz — damps small oscillations
+    elif abs(accel_request) < 0.6:
+      ema_alpha = 0.4   # moderate tracking
+    else:
+      ema_alpha = 0.85  # fast tracking for braking/acceleration
+    self.smoothed_accel = ema_alpha * accel_request + (1.0 - ema_alpha) * self.smoothed_accel
+
     # Match Tinkla: quantize to integer DI before hysteresis/rate limiting.
-    pedal_di = float(int(round(interp(accel_request, accel_bp, accel_v))))
-    
+    pedal_di = float(int(round(interp(self.smoothed_accel, accel_bp, accel_v))))
+
     # ============================================
     # Step 3: Apply hysteresis (conditionally, like Tinkla)
     # ============================================
@@ -425,18 +442,7 @@ class CarController(CarControllerBase):
       and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8
       and v_ego > 5.0
     )
-    # B test mode: suppress subtle pedal on/off pulses in steady-state follow/hold.
-    # Use low accel demand (not set-speed error) so this also works when following
-    # a slower lead while set speed is much higher.
-    steady_state_band = (
-      target_speed_kph is not None
-      and v_ego > 4.0
-      and abs(accel_request) < 0.30
-    )
-    if steady_state_band and abs(pedal_di - self.prev_pedal_di) <= 1.0:
-      pedal_di = self.prev_pedal_di
-
-    if near_set_speed or steady_state_band:
+    if near_set_speed:
       pedal_di = float(self._pedal_hysteresis(pedal_di, True))
     
     # ============================================
