@@ -18,10 +18,13 @@ except ImportError:
 ACCEL_LOOKUP_BP_FALLBACK = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]  # m/s
 ACCEL_MAX_LOOKUP_V_FALLBACK = [0.3, 0.7, 0.9, 0.7, 0.6, 0.5]
 
-# Tinkla pedal longitudinal tune (tunes.py LongTunes.PEDAL).
-PEDAL_LONG_K_BP = [0.0, 5.0, 22.0, 35.0]
-PEDAL_LONG_KP_V = [0.75, 0.75, 0.75, 0.75]
-PEDAL_LONG_KI_V = [0.07, 0.07, 0.07, 0.07]
+# Pedal longitudinal tune for modern accel-error PI (see PEDAL_ANALYSIS.md).
+# kp=0: eliminates jitter from proportional gain on noisy aEgo.
+# ki speed-dependent: gentle at creep, stronger at highway for steady-state tracking.
+# Values derived from OPGM Bolt pedal tune adapted for Tesla DI pedal range.
+PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
+PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
+PEDAL_LONG_KI_V = [0.125, 0.175, 0.225, 0.33]
 
 
 class CarInterface(CarInterfaceBase):

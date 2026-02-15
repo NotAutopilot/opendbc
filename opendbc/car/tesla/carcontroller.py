@@ -18,7 +18,7 @@ try:
     tinkla_conf,
     PEDAL_DI_MIN, PEDAL_DI_ZERO, PEDAL_DI_PRESSED,
     PEDAL_BP, PEDAL_V_DEFAULT,
-    ACCEL_MAX, PEDAL_HYST_GAP,
+    ACCEL_MAX,
   )
   TINKLA_AVAILABLE = True
 except ImportError:
@@ -75,14 +75,12 @@ class CarController(CarControllerBase):
     # ============================================
     # Pedal Control State (Tinkla PCC_module port)
     # ============================================
-    self.prev_pedal_di = 0.0      # Previous pedal value in DI units (for rate limiting)
-    self.pedal_steady = 0.0       # Hysteresis state (smoothed pedal value)
+    self.prev_pedal_di = 0.0      # Previous pedal value in DI units
     self.pedal_for_zero_torque = 0.0  # Learned zero-torque pedal position
     self.last_torque_for_zero = TORQUE_LEVEL_DECEL
     self.last_apid_for_zero = 0.0
     self.prev_a_pid = 0.0
     self.prev_v_ego = 0.0         # Previous vehicle speed
-    self.smoothed_accel = 0.0     # EMA-filtered accel request (pre-quantization smoother)
     
     # ============================================
     # Cruise Spam State (Tinkla ACC_module port)
@@ -225,34 +223,8 @@ class CarController(CarControllerBase):
                 # This is the SAFE approach - let the human have full control
                 can_sends.append(self.tesla_can.create_pedal_command(0, enable=0))
               else:
-                # Safety guard: damp initial positive accel right after engagement.
-                # This prevents launch spikes if planner accel is briefly high.
                 accel_request = float(actuators.accel)
                 target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
-                frames_since_engage = self.frame - self.preap_long_engage_frame
-                if frames_since_engage < 200:
-                  accel_request = min(accel_request, 0.6)
-                # Extra low-speed shaping: keep pickup smooth under ~13 mph while
-                # leaving highway behavior unchanged.
-                if accel_request > 0.0 and CS.out.vEgo < 6.0:
-                  low_speed_cap = float(interp(
-                    CS.out.vEgo,
-                    [0.0, 1.0, 2.0, 4.0, 6.0],   # m/s
-                    [0.25, 0.35, 0.45, 0.55, 0.6],  # m/s^2
-                  ))
-                  accel_request = min(accel_request, low_speed_cap)
-
-                # TODO(tesla-parity): Remove this extra post-PID shaper once
-                # we are confident PI tuning alone gives Tinkla-like behavior.
-                # Tinkla PCC did not use this clip stage; it achieved smoothness
-                # via its tighter direct speed loop.
-                # Phase 2: emulate Tinkla's smoother low-speed speed-tracking behavior.
-                # Modern OP planner feeds accel directly, so we add a small speed-error
-                # governor near target speed to reduce hill rebound and overshoot.
-                accel_request = self._shape_preap_accel_request(
-                  accel_request, CS.out.vEgo, target_speed_kph
-                )
-
                 self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
                 pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
@@ -261,17 +233,13 @@ class CarController(CarControllerBase):
               carlog.exception("Pre-AP pedal command path failed; sending disabled pedal command")
               idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-              self.pedal_steady = 0.0
               self.prev_pedal_di = 0.0
-              self.smoothed_accel = 0.0
 
            elif long_active and use_pedal and not pedal_transform_valid:
              # Safety gate: block pedal actuation when pedal transform is invalid.
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
-             self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
-             self.smoothed_accel = 0.0
 
            elif long_active and not use_pedal:
              # ============================================
@@ -292,9 +260,7 @@ class CarController(CarControllerBase):
                idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              # Reset state when not active
-             self.pedal_steady = 0.0
              self.prev_pedal_di = 0.0
-             self.smoothed_accel = 0.0
 
         self.prev_preap_long_active = long_active
 
@@ -326,166 +292,52 @@ class CarController(CarControllerBase):
   # Pedal Control Logic (Ported from Tinkla PCC_module.py)
   # ============================================
 
-  def _shape_preap_accel_request(self, accel_request: float, v_ego: float, target_speed_kph: float) -> float:
-    """
-    Shape low-speed accel near set speed to reduce hill oscillation/overshoot.
-
-    TODO(tesla-parity): this is a transitional adapter for the modern OP
-    planner path. For strict Tinkla parity, prefer removing this function
-    once PI + pedal mapping alone produce stable hill hold and no overshoot.
-
-    Tinkla's PCC path had tighter direct speed-loop behavior; in the modern OP
-    stack we apply this only near target speed, and only at urban velocities,
-    so highway behavior remains unchanged.
-    """
-    if target_speed_kph <= 1e-3 or v_ego > 18.0:
-      return accel_request
-
-    speed_error_kph = float(target_speed_kph - (v_ego * CV.MS_TO_KPH))
-
-    # Already at/above target: avoid positive "rebound" and bias into gentle regen.
-    if speed_error_kph <= 0.0:
-      overspeed_cap = float(interp(
-        speed_error_kph,
-        [-10.0, -6.0, -3.0, -1.0, -0.2, 0.0],
-        [-1.10, -0.80, -0.50, -0.25, -0.08, 0.0],
-      ))
-      return min(accel_request, overspeed_cap)
-
-    # Far below target: let planner/profile control accel authority.
-    if speed_error_kph >= 6.0:
-      return accel_request
-
-    # Near target: progressively tighten positive accel cap to prevent overshoot.
-    near_target_cap = float(interp(
-      speed_error_kph,
-      [0.0, 0.5, 1.0, 2.0, 4.0, 6.0],
-      [0.05, 0.12, 0.20, 0.35, 0.55, 0.80],
-    ))
-    speed_scale = float(interp(v_ego, [0.0, 4.0, 8.0, 18.0], [0.85, 0.95, 1.0, 1.1]))
-    return min(accel_request, near_target_cap * speed_scale)
-  
   def _calc_pedal_command(self, accel_request: float, v_ego: float, target_speed_kph: float | None = None) -> float:
     """
     Calculate pedal command from acceleration request.
-    
-    Ported from Tinkla PCC_module.py update_pdl() method.
-    
-    Args:
-      accel_request: Desired acceleration in m/s^2 (from actuators.accel)
-      v_ego: Current vehicle speed in m/s
-      
-    Returns:
-      Pedal command value (transformed from DI units to pedal voltage)
+
+    Simple linear mapping from accel (m/s^2) to DI pedal units, then through the
+    Tinkla calibration transform to pedal voltage. Trim profiles (P85+/P85/S85/S60)
+    are applied as a speed-dependent max-pedal clamp. Zero-torque learning provides
+    the coast point at speed.
+
+    With the modern accel-error PI (kp=0, ki=speed-dep, implicit kf=1.0),
+    actuators.accel already contains a_target + integral correction. This mapping
+    just converts that accel to pedal position — no additional smoothing or rate
+    limiting needed (the PI loop handles stability).
+
+    See PEDAL_ANALYSIS.md for full rationale.
     """
     if not TINKLA_AVAILABLE or not tinkla_conf:
       # Fallback: simple linear mapping if tinkla_conf unavailable
-      # DI range: -5 (regen) to 100 (max accel) - matches Tinkla PCC_module.py
       pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 100.]), -5, 100))
-      pedal_cmd = _transform_di_to_pedal(pedal_di)
-      return pedal_cmd
-    
-    # ============================================
-    # Step 1: Calculate speed-dependent limits
-    # ============================================
-    
-    # Max pedal value based on speed and profile
-    # From tunes.py: MAX_PEDAL_VALUE = interp(CS.out.vEgo, PEDAL_BP, MAX_PEDAL_V)
+      return _transform_di_to_pedal(pedal_di)
+
+    # Trim-specific max pedal (P85+, P85, S85, S60, Generic)
     pedal_profile = tinkla_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
-    
-    # Regen deceleration is speed-dependent (less regen at low speed)
-    # From PCC_module.py: REGEN_DECEL = interp(CS.out.vEgo, [10., 20.], [-0.8, -1.45])
+
+    # Speed-dependent regen limit (less regen at low speed)
     regen_decel = float(interp(v_ego, [10., 20.], [-0.8, -1.45]))
-    
-    # Zero accel pedal position (learned or default)
-    # At low speed, use 0; otherwise use learned position
-    if v_ego < 5.0 * 0.44704:  # 5 MPH in m/s
-      zero_accel = 0.0
-    else:
-      zero_accel = self.pedal_for_zero_torque
-    
-    # ============================================
-    # Step 2: Map acceleration to DI pedal range
-    # ============================================
-    
-    # From PCC_module.py:
-    # ACCEL_LOOKUP_BP = [REGEN_DECEL, 0, ACCEL_MAX]
-    # ACCEL_LOOKUP_V = [MIN_PEDAL_REGEN_VALUE, ZERO_ACCEL, MAX_PEDAL_VALUE]
+
+    # Zero-torque pedal position (learned at speed, default at low speed)
+    zero_accel = self.pedal_for_zero_torque if v_ego >= 5.0 * 0.44704 else 0.0
+
+    # Linear mapping: accel (m/s^2) -> DI pedal units
     accel_bp = [regen_decel, 0.0, ACCEL_MAX]
     accel_v = [PEDAL_DI_MIN, zero_accel, max_pedal_value]
-    
-    # Pre-quantization EMA: smooth accel_request before int(round()) to prevent
-    # planner jitter from becoming 0/1 DI flips. Tinkla's tighter single PCC loop
-    # naturally damped this; in the modern split planner/PI/pedal stack we need an
-    # explicit filter. Adaptive alpha: heavy smoothing near zero accel (where jitter
-    # lives), fast tracking for real accel/decel changes.
-    if abs(accel_request) < 0.25:
-      ema_alpha = 0.15  # ~130ms time constant at 50Hz — damps small oscillations
-    elif abs(accel_request) < 0.6:
-      ema_alpha = 0.4   # moderate tracking
-    else:
-      ema_alpha = 0.85  # fast tracking for braking/acceleration
-    self.smoothed_accel = ema_alpha * accel_request + (1.0 - ema_alpha) * self.smoothed_accel
+    pedal_di = float(interp(accel_request, accel_bp, accel_v))
 
-    # Match Tinkla: quantize to integer DI before hysteresis/rate limiting.
-    pedal_di = float(int(round(interp(self.smoothed_accel, accel_bp, accel_v))))
-
-    # ============================================
-    # Step 3: Apply hysteresis (conditionally, like Tinkla)
-    # ============================================
-    # From PCC_module.py:
-    #   if abs(CS.out.vEgo * CV.MS_TO_KPH - self.pedal_speed_kph) < 0.8 and CS.out.vEgo > 5.:
-    #     tesla_pedal = self.pedal_hysteresis(tesla_pedal, enable_pedal)
-    near_set_speed = (
-      target_speed_kph is not None
-      and abs(v_ego * CV.MS_TO_KPH - target_speed_kph) < 0.8
-      and v_ego > 5.0
-    )
-    if near_set_speed:
-      pedal_di = float(self._pedal_hysteresis(pedal_di, True))
-    
-    # ============================================
-    # Step 4: Apply rate limiting
-    # ============================================
-    # From PCC_module.py:
-    # PEDAL_MAX_DOWN = MAX_PEDAL_VALUE * _DT / 0.4
-    # PEDAL_MAX_UP = (MAX_PEDAL_VALUE - self.prev_tesla_pedal) * _DT
-    #
-    # Tinkla uses _DT = 0.01 (100Hz). We send pedal at 50Hz (frame % 2),
-    # so use dt=0.02 to keep equivalent per-second ramp behavior.
-    dt = 0.02
-    pedal_max_down = max_pedal_value * dt / 0.4
-    pedal_max_up = (max_pedal_value - self.prev_pedal_di) * dt
-    
-    pedal_di = float(clip(pedal_di, self.prev_pedal_di - pedal_max_down, self.prev_pedal_di + pedal_max_up))
+    # Clamp to trim profile limits
     pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
-    
-    # ============================================
-    # Step 5: Transform DI units to pedal voltage
-    # ============================================
-    # CRITICAL: Raw DI values are too small for the pedal hardware.
-    # The pedal expects voltage/count values scaled via the calibration transform.
-    # 
-    # The old Tinkla code (PCC_module.py line 366-367) ALWAYS applies the 
-    # transform when enabled, regardless of calibration status:
-    #   if enable_pedal == 1:
-    #       pedal2send = transform_di_to_pedal(pedal2send)
-    #
-    # The default calibration values (factor=1.0, zero=-1) provide a reasonable
-    # baseline that works even without explicit calibration. The pedal_calibrated
-    # flag only controls whether to show warnings/allow engagement in the old code,
-    # NOT whether to skip the conversion.
-    #
-    # Formula: pedal_cmd = pedal_zero + (di_value - DI_ZERO) / pedal_factor
-    # With defaults: pedal_cmd = -1 + (di_value - 0) / 1.0 = di_value - 1
-    
+
+    # Transform DI -> pedal voltage via calibration
     pedal_cmd = tinkla_conf.di_to_pedal(pedal_di)
-    
-    # Save state for next iteration
+
+    # Save state for zero-torque learning
     self.prev_pedal_di = pedal_di
     self.prev_v_ego = v_ego
-    
+
     return pedal_cmd
 
   def _update_zero_torque_learning(self, CS, v_ego: float, accel_request: float) -> None:
@@ -505,34 +357,6 @@ class CarController(CarControllerBase):
       self.last_apid_for_zero = self.prev_a_pid
 
     self.prev_a_pid = accel_request
-  
-  def _pedal_hysteresis(self, pedal: float, enabled: bool) -> float:
-    """
-    Apply hysteresis to prevent pedal oscillation.
-    
-    From Tinkla PCC_module.py pedal_hysteresis():
-    For small accel oscillations within PEDAL_HYST_GAP, don't change the command.
-    
-    Args:
-      pedal: Current pedal request in DI units
-      enabled: Whether pedal control is enabled
-      
-    Returns:
-      Smoothed pedal value
-    """
-    if not enabled:
-      self.pedal_steady = 0.0
-      return 0.0
-    
-    if not TINKLA_AVAILABLE:
-      return pedal
-    
-    if pedal > self.pedal_steady + PEDAL_HYST_GAP:
-      self.pedal_steady = pedal - PEDAL_HYST_GAP
-    elif pedal < self.pedal_steady - PEDAL_HYST_GAP:
-      self.pedal_steady = pedal + PEDAL_HYST_GAP
-    
-    return self.pedal_steady
 
   # ============================================
   # Cruise Button Spam (Ported from Tinkla ACC_module.py)
