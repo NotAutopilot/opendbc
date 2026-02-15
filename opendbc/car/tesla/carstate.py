@@ -77,7 +77,6 @@ class CarState(CarStateBase):
     self.enableLongControl = False
     self.enableJustCC = False
     self.prev_steering_disengage = False
-    self.steering_disengage_cancel = False  # Request synthetic CANCEL from carcontroller
     self.preap_brake_pressed_prev = False
 
     # Software-managed target speed (Tinkla PCC_module port)
@@ -283,16 +282,9 @@ class CarState(CarStateBase):
     ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                           eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
-    # On steering disengage rising edge, reset the engagement state machine and
-    # request a synthetic CANCEL via carcontroller for panda sync.
-    #
-    # Direct reset: clears cruiseEnabled so the driver can do a fresh stalk pull.
-    # Synthetic CANCEL: the panda tracks controls_allowed via CAN stalk messages,
-    #   so we send a fake CANCEL to keep it synchronized.
-    # Stuck-engagement guard: cruiseState.enabled is gated on not steerFaultTemporary
-    #   (see line below), so even if a stalk pull sets cruiseEnabled while EPAS is
-    #   still faulted, cruiseState.enabled stays False until EPAS recovers, producing
-    #   a clean rising edge for pcmEnable.
+    # Reset engagement state on steering disengage rising edge.
+    # This mirrors panda safety behavior (controls_allowed is dropped on the same edge)
+    # and guarantees the next engagement comes from a fresh stalk pull sequence.
     if ret.steeringDisengage and not self.prev_steering_disengage:
       was_long_active = self.enableLongControl
       self.cruiseEnabled = False
@@ -304,7 +296,6 @@ class CarState(CarStateBase):
       self.prev_stalk_pull_time_ms = -1000
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
-      self.steering_disengage_cancel = True
     self.prev_steering_disengage = ret.steeringDisengage
 
     # Cruise state
@@ -462,8 +453,12 @@ class CarState(CarStateBase):
       # MAIN button: Rising edge detection (Tinkla pattern)
       if (self.cruise_buttons == CruiseButtons.MAIN 
           and self.prev_cruise_buttons != CruiseButtons.MAIN):
-        
-        if self.enableDoublePull:
+        # Ignore engage pulls while EPS reports a temporary steering fault.
+        # Otherwise cruiseEnabled can become True while entry is blocked, leaving
+        # no fresh False->True edge for pcmEnable once the fault clears.
+        if ret.steerFaultTemporary:
+          self.pending_enable = False
+        elif self.enableDoublePull:
           # Update timing FIRST, then check (order matches Tinkla)
           self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
           self.stalk_pull_time_ms = curr_time_ms
@@ -605,12 +600,7 @@ class CarState(CarStateBase):
       
       # Cruise enabled requires: engaged, door closed, in Drive, seatbelt
       can_engage = (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
-      # Gate on EPAS health: if steerFaultTemporary (EAC_INHIBITED), keep
-      # cruiseState.enabled False even if cruiseEnabled is True.  This prevents
-      # a stuck pcmEnable (no rising edge) if the driver pulls the stalk while
-      # EPAS is still recovering.  When EPAS clears, cruiseState.enabled gets a
-      # clean False→True edge → pcmEnable fires → engagement succeeds.
-      ret.cruiseState.enabled = self.cruiseEnabled and can_engage and not ret.steerFaultTemporary
+      ret.cruiseState.enabled = self.cruiseEnabled and can_engage
 
       # If we can't engage, reset our state
       if not can_engage and self.cruiseEnabled:
