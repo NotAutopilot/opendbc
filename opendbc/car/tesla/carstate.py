@@ -283,17 +283,27 @@ class CarState(CarStateBase):
     ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                           eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
-    # On steering disengage rising edge, request a synthetic CANCEL via carcontroller.
-    # We do NOT reset the state machine directly here because:
-    #   1. The panda tracks controls_allowed via CAN bus signals (stalk position).
-    #      A software-only reset desynchronizes panda and openpilot state.
-    #   2. If a stalk pull re-sets cruiseEnabled while steerFaultTemporary is still
-    #      active, the NO_ENTRY blocks pcmEnable but cruiseState.enabled stays True,
-    #      leaving the system permanently stuck (no rising edge for future pcmEnable).
-    # Sending a synthetic CANCEL on the CAN bus resets both panda (controls_allowed)
-    # and openpilot (via the normal CANCEL button handler) through the same path as
-    # a physical CANCEL press.
+    # On steering disengage rising edge, reset the engagement state machine and
+    # request a synthetic CANCEL via carcontroller for panda sync.
+    #
+    # Direct reset: clears cruiseEnabled so the driver can do a fresh stalk pull.
+    # Synthetic CANCEL: the panda tracks controls_allowed via CAN stalk messages,
+    #   so we send a fake CANCEL to keep it synchronized.
+    # Stuck-engagement guard: cruiseState.enabled is gated on not steerFaultTemporary
+    #   (see line below), so even if a stalk pull sets cruiseEnabled while EPAS is
+    #   still faulted, cruiseState.enabled stays False until EPAS recovers, producing
+    #   a clean rising edge for pcmEnable.
     if ret.steeringDisengage and not self.prev_steering_disengage:
+      was_long_active = self.enableLongControl
+      self.cruiseEnabled = False
+      self.enableLongControl = False
+      self.enableJustCC = False
+      self.pending_enable = False
+      self.pedal_speed_kph = 0.0
+      self.stalk_pull_time_ms = 0
+      self.prev_stalk_pull_time_ms = -1000
+      if was_long_active:
+        self.longCtrlEvent = "pccDisabled"
       self.steering_disengage_cancel = True
     self.prev_steering_disengage = ret.steeringDisengage
 
@@ -595,8 +605,13 @@ class CarState(CarStateBase):
       
       # Cruise enabled requires: engaged, door closed, in Drive, seatbelt
       can_engage = (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
-      ret.cruiseState.enabled = self.cruiseEnabled and can_engage
-      
+      # Gate on EPAS health: if steerFaultTemporary (EAC_INHIBITED), keep
+      # cruiseState.enabled False even if cruiseEnabled is True.  This prevents
+      # a stuck pcmEnable (no rising edge) if the driver pulls the stalk while
+      # EPAS is still recovering.  When EPAS clears, cruiseState.enabled gets a
+      # clean False→True edge → pcmEnable fires → engagement succeeds.
+      ret.cruiseState.enabled = self.cruiseEnabled and can_engage and not ret.steerFaultTemporary
+
       # If we can't engage, reset our state
       if not can_engage and self.cruiseEnabled:
         self.cruiseEnabled = False
