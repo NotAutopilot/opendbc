@@ -241,6 +241,10 @@ class CarController(CarControllerBase):
                   ))
                   accel_request = min(accel_request, low_speed_cap)
 
+                # TODO(tesla-parity): Remove this extra post-PID shaper once
+                # we are confident PI tuning alone gives Tinkla-like behavior.
+                # Tinkla PCC did not use this clip stage; it achieved smoothness
+                # via its tighter direct speed loop.
                 # Phase 2: emulate Tinkla's smoother low-speed speed-tracking behavior.
                 # Modern OP planner feeds accel directly, so we add a small speed-error
                 # governor near target speed to reduce hill rebound and overshoot.
@@ -321,6 +325,10 @@ class CarController(CarControllerBase):
   def _shape_preap_accel_request(self, accel_request: float, v_ego: float, target_speed_kph: float) -> float:
     """
     Shape low-speed accel near set speed to reduce hill oscillation/overshoot.
+
+    TODO(tesla-parity): this is a transitional adapter for the modern OP
+    planner path. For strict Tinkla parity, prefer removing this function
+    once PI + pedal mapping alone produce stable hill hold and no overshoot.
 
     Tinkla's PCC path had tighter direct speed-loop behavior; in the modern OP
     stack we apply this only near target speed, and only at urban velocities,
