@@ -77,6 +77,7 @@ class CarState(CarStateBase):
     self.enableLongControl = False
     self.enableJustCC = False
     self.prev_steering_disengage = False
+    self.steering_disengage_cancel = False  # Request synthetic CANCEL from carcontroller
     self.preap_brake_pressed_prev = False
 
     # Software-managed target speed (Tinkla PCC_module port)
@@ -282,22 +283,18 @@ class CarState(CarStateBase):
     ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                           eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
-    # Reset engagement state machine on steering disengage falling edge (EPAS recovery).
-    # We wait for steeringDisengage to clear (True→False) so that the EPAS is no longer
-    # EAC_INHIBITED before allowing a fresh stalk-pull engagement.  Resetting on the
-    # rising edge would leave steerFaultTemporary active, blocking latActive and causing
-    # "steering unavailable" / "controls mismatch" on the next engage attempt.
-    if self.prev_steering_disengage and not ret.steeringDisengage:
-      was_long_active = self.enableLongControl
-      self.cruiseEnabled = False
-      self.enableLongControl = False
-      self.enableJustCC = False
-      self.pending_enable = False
-      self.pedal_speed_kph = 0.0
-      self.stalk_pull_time_ms = 0
-      self.prev_stalk_pull_time_ms = -1000
-      if was_long_active:
-        self.longCtrlEvent = "pccDisabled"
+    # On steering disengage rising edge, request a synthetic CANCEL via carcontroller.
+    # We do NOT reset the state machine directly here because:
+    #   1. The panda tracks controls_allowed via CAN bus signals (stalk position).
+    #      A software-only reset desynchronizes panda and openpilot state.
+    #   2. If a stalk pull re-sets cruiseEnabled while steerFaultTemporary is still
+    #      active, the NO_ENTRY blocks pcmEnable but cruiseState.enabled stays True,
+    #      leaving the system permanently stuck (no rising edge for future pcmEnable).
+    # Sending a synthetic CANCEL on the CAN bus resets both panda (controls_allowed)
+    # and openpilot (via the normal CANCEL button handler) through the same path as
+    # a physical CANCEL press.
+    if ret.steeringDisengage and not self.prev_steering_disengage:
+      self.steering_disengage_cancel = True
     self.prev_steering_disengage = ret.steeringDisengage
 
     # Cruise state

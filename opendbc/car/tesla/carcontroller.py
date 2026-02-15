@@ -196,6 +196,12 @@ class CarController(CarControllerBase):
               if pedal_over_cc_button and requested_long and CS.out.cruiseState.enabled:
                 self.preap_cancel_pending = True
 
+        # Steering disengage: send synthetic CANCEL so panda and carstate
+        # both reset through the normal CANCEL path (see carstate.py comment).
+        if getattr(CS, 'steering_disengage_cancel', False):
+          self.preap_cancel_pending = True
+          CS.steering_disengage_cancel = False
+
         pcm_cancel_cmd = self.preap_cancel_pending
         if pcm_cancel_cmd and self.frame % 10 == 0:
           msg_stw = getattr(CS, 'msg_stw_actn_req', None)
