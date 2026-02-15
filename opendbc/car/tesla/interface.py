@@ -148,7 +148,9 @@ class CarInterface(CarInterfaceBase):
     ret.steerControlType = structs.CarParams.SteerControlType.angle
     ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
 
-    ret.alphaLongitudinalAvailable = True
+    # Legacy Tesla ports in this tree run openpilot longitudinal by default
+    # (not as an optional alpha toggle), so mark alpha availability false.
+    ret.alphaLongitudinalAvailable = False
     ret.openpilotLongitudinalControl = True
     ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
