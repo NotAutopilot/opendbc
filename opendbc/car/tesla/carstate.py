@@ -76,6 +76,7 @@ class CarState(CarStateBase):
     # - enableJustCC: True = steering only mode (no longitudinal)
     self.enableLongControl = False
     self.enableJustCC = False
+    self.preap_brake_pressed_prev = False
 
     # Software-managed target speed (Tinkla PCC_module port)
     # Pre-AP has no stock cruise, so we manage the target speed ourselves.
@@ -255,7 +256,8 @@ class CarState(CarStateBase):
 
     # Brake pedal
     ret.brake = 0
-    ret.brakePressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
+    real_brake_pressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
+    ret.brakePressed = real_brake_pressed
 
     # Steering wheel
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
@@ -558,7 +560,21 @@ class CarState(CarStateBase):
           self.cruiseEnabled = True
           self.enableLongControl = False
           self.enableJustCC = True
+          self.pedal_speed_kph = 0.0
           self.pending_enable = False
+
+      # In pedal mode, brake press should drop longitudinal persistently while
+      # keeping lateral engaged (Tinkla-style steering-only transition).
+      brake_rising_edge = real_brake_pressed and not self.preap_brake_pressed_prev
+      if use_pedal:
+        if brake_rising_edge and self.cruiseEnabled and self.enableLongControl:
+          self.enableLongControl = False
+          self.enableJustCC = True
+          self.pending_enable = False
+          self.pedal_speed_kph = 0.0
+          self.longCtrlEvent = "pccDisabled"
+        # Prevent generic openpilot brake-disengage path from toggling state.
+        ret.brakePressed = False
       
       ret.buttonEvents = buttonEvents
       
@@ -572,6 +588,8 @@ class CarState(CarStateBase):
         self.enableLongControl = False
         self.enableJustCC = False
         self.pending_enable = False
+
+      self.preap_brake_pressed_prev = real_brake_pressed
 
     # ============================================
     # Comma Pedal Parsing (Pre-AP only)
