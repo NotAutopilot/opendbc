@@ -76,6 +76,7 @@ class CarState(CarStateBase):
     # - enableJustCC: True = steering only mode (no longitudinal)
     self.enableLongControl = False
     self.enableJustCC = False
+    self.prev_steering_disengage = False
     self.preap_brake_pressed_prev = False
 
     # Software-managed target speed (Tinkla PCC_module port)
@@ -281,6 +282,19 @@ class CarState(CarStateBase):
     ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                           eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
+    # Reset engagement state machine on steering disengage rising edge
+    if ret.steeringDisengage and not self.prev_steering_disengage:
+      was_long_active = self.enableLongControl
+      self.cruiseEnabled = False
+      self.enableLongControl = False
+      self.enableJustCC = False
+      self.pending_enable = False
+      self.pedal_speed_kph = 0.0
+      self.stalk_pull_time_ms = 0
+      self.prev_stalk_pull_time_ms = -1000
+      if was_long_active:
+        self.longCtrlEvent = "pccDisabled"
+    self.prev_steering_disengage = ret.steeringDisengage
 
     # Cruise state
     cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
