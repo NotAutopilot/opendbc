@@ -181,6 +181,16 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
 
     // Disengage on normal user override, or if high angle rate fault from user overriding extremely quickly
     steering_disengage = (hands_on_level >= 3) || ((eac_status == 0) && (eac_error_code == 9));
+
+    // Pre-AP re-arm fix:
+    // Steering disengage drops controls_allowed in generic_rx_checks, but Pre-AP uses
+    // stalk edges (pcm_cruise_check) to re-enable controls. If cruise_engaged_prev is
+    // still true, the next stalk pull(true) is not a rising edge and controls stay off.
+    // Force a local "cruise disengaged" on steering-disengage rising edge so the next
+    // stalk pull can reliably re-arm controls_allowed.
+    if (tesla_preap && steering_disengage && !steering_disengage_prev) {
+      pcm_cruise_check(false);
+    }
   }
 
   // Vehicle speed (ESP_B: ESP_vehicleSpeed)
