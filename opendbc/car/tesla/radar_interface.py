@@ -25,7 +25,7 @@ class RadarInterface(RadarInterfaceBase):
       self.trigger_msg = 1119
       self.radar_point_frq = 16
     elif self.bosch_radar:
-      messages.append(('TeslaRadarSguInfo', 10))
+      messages.append(('TeslaRadarSguInfo', 8))
 
       self.num_points = 32
       self.trigger_msg = 878
