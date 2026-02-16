@@ -19,6 +19,7 @@ static bool tesla_hw3 = false;
 static bool tesla_preap = false;
 static bool tesla_enable_pedal = false;
 static bool tesla_radar_behind_nosecone = false;
+static bool tesla_radar_emulation = false;
 
 static int chassis_bus = 0U;
 static int das_control_msg = 0x2bfU;
@@ -36,6 +37,11 @@ static int pedal_pressed = 0;
 static int radar_epas_type = 0; 
 static int radar_position = 0; 
 
+// Radar connection tracking for Pre-AP emulation parity with tinkla
+static int tesla_radar_status = 0;         // 0=not present, 1=initializing, 2=active
+static uint32_t tesla_last_radar_signal = 0U;
+static const uint32_t TESLA_RADAR_TIMEOUT = 10000000U;  // 10 seconds
+
 // Pre-AP Safety State
 static int tesla_gear = 4;  // Initialize to Drive (4) to avoid false disables on startup
 static int tesla_gear_prev = 4;  // Track previous gear for edge detection
@@ -51,23 +57,22 @@ static uint8_t tesla_legacy_compute_checksum(const CANPacket_t *to_push) {
   return checksum;
 }
 
-/*
 static uint8_t tesla_legacy_compute_crc(uint32_t MLB, uint32_t MHB, int msg_len) {
-  static const int crc_lookup[256] = { 0x00, 0x1D, 0x3A, 0x27, 0x74, 0x69, 0x4E, 0x53, 0xE8, 0xF5, 0xD2, 0xCF, 0x9C, 0x81, 0xA6, 0xBB, 
-    0xCD, 0xD0, 0xF7, 0xEA, 0xB9, 0xA4, 0x83, 0x9E, 0x25, 0x38, 0x1F, 0x02, 0x51, 0x4C, 0x6B, 0x76, 
-    0x87, 0x9A, 0xBD, 0xA0, 0xF3, 0xEE, 0xC9, 0xD4, 0x6F, 0x72, 0x55, 0x48, 0x1B, 0x06, 0x21, 0x3C, 
-    0x4A, 0x57, 0x70, 0x6D, 0x3E, 0x23, 0x04, 0x19, 0xA2, 0xBF, 0x98, 0x85, 0xD6, 0xCB, 0xEC, 0xF1, 
-    0x13, 0x0E, 0x29, 0x34, 0x67, 0x7A, 0x5D, 0x40, 0xFB, 0xE6, 0xC1, 0xDC, 0x8F, 0x92, 0xB5, 0xA8, 
-    0xDE, 0xC3, 0xE4, 0xF9, 0xAA, 0xB7, 0x90, 0x8D, 0x36, 0x2B, 0x0C, 0x11, 0x42, 0x5F, 0x78, 0x65, 
-    0x94, 0x89, 0xAE, 0xB3, 0xE0, 0xFD, 0xDA, 0xC7, 0x7C, 0x61, 0x46, 0x5B, 0x08, 0x15, 0x32, 0x2F, 
-    0x59, 0x44, 0x63, 0x7E, 0x2D, 0x30, 0x17, 0x0A, 0xB1, 0xAC, 0x8B, 0x96, 0xC5, 0xD8, 0xFF, 0xE2, 
-    0x26, 0x3B, 0x1C, 0x01, 0x52, 0x4F, 0x68, 0x75, 0xCE, 0xD3, 0xF4, 0xE9, 0xBA, 0xA7, 0x80, 0x9D, 
-    0xEB, 0xF6, 0xD1, 0xCC, 0x9F, 0x82, 0xA5, 0xB8, 0x03, 0x1E, 0x39, 0x24, 0x77, 0x6A, 0x4D, 0x50, 
-    0xA1, 0xBC, 0x9B, 0x86, 0xD5, 0xC8, 0xEF, 0xF2, 0x49, 0x54, 0x73, 0x6E, 0x3D, 0x20, 0x07, 0x1A, 
-    0x6C, 0x71, 0x56, 0x4B, 0x18, 0x05, 0x22, 0x3F, 0x84, 0x99, 0xBE, 0xA3, 0xF0, 0xED, 0xCA, 0xD7, 
-    0x35, 0x28, 0x0F, 0x12, 0x41, 0x5C, 0x7B, 0x66, 0xDD, 0xC0, 0xE7, 0xFA, 0xA9, 0xB4, 0x93, 0x8E, 
-    0xF8, 0xE5, 0xC2, 0xDF, 0x8C, 0x91, 0xB6, 0xAB, 0x10, 0x0D, 0x2A, 0x37, 0x64, 0x79, 0x5E, 0x43, 
-    0xB2, 0xAF, 0x88, 0x95, 0xC6, 0xDB, 0xFC, 0xE1, 0x5A, 0x47, 0x60, 0x7D, 0x2E, 0x33, 0x14, 0x09, 
+  static const int crc_lookup[256] = { 0x00, 0x1D, 0x3A, 0x27, 0x74, 0x69, 0x4E, 0x53, 0xE8, 0xF5, 0xD2, 0xCF, 0x9C, 0x81, 0xA6, 0xBB,
+    0xCD, 0xD0, 0xF7, 0xEA, 0xB9, 0xA4, 0x83, 0x9E, 0x25, 0x38, 0x1F, 0x02, 0x51, 0x4C, 0x6B, 0x76,
+    0x87, 0x9A, 0xBD, 0xA0, 0xF3, 0xEE, 0xC9, 0xD4, 0x6F, 0x72, 0x55, 0x48, 0x1B, 0x06, 0x21, 0x3C,
+    0x4A, 0x57, 0x70, 0x6D, 0x3E, 0x23, 0x04, 0x19, 0xA2, 0xBF, 0x98, 0x85, 0xD6, 0xCB, 0xEC, 0xF1,
+    0x13, 0x0E, 0x29, 0x34, 0x67, 0x7A, 0x5D, 0x40, 0xFB, 0xE6, 0xC1, 0xDC, 0x8F, 0x92, 0xB5, 0xA8,
+    0xDE, 0xC3, 0xE4, 0xF9, 0xAA, 0xB7, 0x90, 0x8D, 0x36, 0x2B, 0x0C, 0x11, 0x42, 0x5F, 0x78, 0x65,
+    0x94, 0x89, 0xAE, 0xB3, 0xE0, 0xFD, 0xDA, 0xC7, 0x7C, 0x61, 0x46, 0x5B, 0x08, 0x15, 0x32, 0x2F,
+    0x59, 0x44, 0x63, 0x7E, 0x2D, 0x30, 0x17, 0x0A, 0xB1, 0xAC, 0x8B, 0x96, 0xC5, 0xD8, 0xFF, 0xE2,
+    0x26, 0x3B, 0x1C, 0x01, 0x52, 0x4F, 0x68, 0x75, 0xCE, 0xD3, 0xF4, 0xE9, 0xBA, 0xA7, 0x80, 0x9D,
+    0xEB, 0xF6, 0xD1, 0xCC, 0x9F, 0x82, 0xA5, 0xB8, 0x03, 0x1E, 0x39, 0x24, 0x77, 0x6A, 0x4D, 0x50,
+    0xA1, 0xBC, 0x9B, 0x86, 0xD5, 0xC8, 0xEF, 0xF2, 0x49, 0x54, 0x73, 0x6E, 0x3D, 0x20, 0x07, 0x1A,
+    0x6C, 0x71, 0x56, 0x4B, 0x18, 0x05, 0x22, 0x3F, 0x84, 0x99, 0xBE, 0xA3, 0xF0, 0xED, 0xCA, 0xD7,
+    0x35, 0x28, 0x0F, 0x12, 0x41, 0x5C, 0x7B, 0x66, 0xDD, 0xC0, 0xE7, 0xFA, 0xA9, 0xB4, 0x93, 0x8E,
+    0xF8, 0xE5, 0xC2, 0xDF, 0x8C, 0x91, 0xB6, 0xAB, 0x10, 0x0D, 0x2A, 0x37, 0x64, 0x79, 0x5E, 0x43,
+    0xB2, 0xAF, 0x88, 0x95, 0xC6, 0xDB, 0xFC, 0xE1, 0x5A, 0x47, 0x60, 0x7D, 0x2E, 0x33, 0x14, 0x09,
     0x7F, 0x62, 0x45, 0x58, 0x0B, 0x16, 0x31, 0x2C, 0x97, 0x8A, 0xAD, 0xB0, 0xE3, 0xFE, 0xD9, 0xC4 };
   int crc = 0xFF;
   for (int x = 0; x < msg_len; x++) {
@@ -82,54 +87,254 @@ static uint8_t tesla_legacy_compute_crc(uint32_t MLB, uint32_t MHB, int msg_len)
   crc = crc ^ 0xFF;
   return crc;
 }
-*/
 
 // Handles manual forwarding modification since safety hooks don't allow modification
 static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
   int bus_num = GET_BUS(to_fwd);
   int addr = GET_ADDR(to_fwd);
 
-  if (bus_num == 0 && tesla_preap) {
-    // Radar forwarding 0 -> 1
-    if (addr == 0x398) { // GTW_carConfig
-        CANPacket_t to_send;
-        to_send.returned = 0U;
-        to_send.rejected = 0U;
-        to_send.extended = to_fwd->extended;
-        to_send.bus = 1; // Radar
-        to_send.data_len_code = to_fwd->data_len_code;
-        uint32_t RDLR = GET_BYTES_04(to_fwd);
-        uint32_t RDHR = GET_BYTES_48(to_fwd);
-        
-        RDLR = (RDLR & 0xFFFFF33F) | 0x100 | 0x440;
-        RDHR = (RDHR & 0xCFFF0F0F) | 0x10000000 | (radar_position << 4) | (radar_epas_type << 12);
-        
-        to_send.addr = 0x2A9;
-        WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
-        WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
-        to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+  // Full radar emulation: translate bus 0 messages to bus 1 for Bosch radar
+  // Ported from tinkla safety_tesla.h teslaPreAp_fwd_to_radar_modded()
+  if (bus_num == 0 && tesla_preap && tesla_radar_emulation) {
+    CANPacket_t to_send;
+    to_send.returned = 0U;
+    to_send.rejected = 0U;
+    to_send.extended = to_fwd->extended;
+    to_send.bus = 1;
+    to_send.data_len_code = to_fwd->data_len_code;
+    uint32_t RDLR = GET_BYTES_04(to_fwd);
+    uint32_t RDHR = GET_BYTES_48(to_fwd);
+
+    // 0x405 -> 0x2B9 (VIP_405HS): direct copy with address remap
+    if (addr == 0x405) {
+      to_send.addr = 0x2B9;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
 #if defined(STM32H7) || defined(STM32F4)
-        can_send(&to_send, 1, true);
+      can_send(&to_send, 1, true);
 #endif
     }
-    
-    if (addr == 0x118) { // DI_torque2
-       // Forward as 0x169 to radar
-       CANPacket_t to_send;
-        to_send.returned = 0U;
-        to_send.rejected = 0U;
-        to_send.extended = to_fwd->extended;
-        to_send.bus = 1;
-        to_send.data_len_code = to_fwd->data_len_code;
-        uint32_t RDLR = GET_BYTES_04(to_fwd);
-        uint32_t RDHR = GET_BYTES_48(to_fwd);
-        
-        to_send.addr = 0x169;
-        WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
-        WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
-        to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+
+    // 0x398 -> 0x2A9 (GTW_carConfig): set radar HW/DAS/autopilot bits
+    if (addr == 0x398) {
+      RDLR = RDLR & 0xFFFFF33F;
+      RDLR = RDLR | 0x100;   // Park Assist
+      RDLR = RDLR | 0x440;   // forwardRadarHw, dasHw
+      RDHR = RDHR & 0xCFFF0F0F;  // clear autopilot, radarPosition, epasType
+      RDHR = RDHR | 0x10000000 | (radar_position << 4) | (radar_epas_type << 12);
+      to_send.addr = 0x2A9;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
 #if defined(STM32H7) || defined(STM32F4)
-        can_send(&to_send, 1, true);
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x00E -> 0x199 (STW_ANGLHP_STAT): fix SNA angular speed, force Delphi sensor, CRC8
+    if (addr == 0x00E) {
+      to_send.addr = 0x199;
+      // Check if angular speed sends SNA (0x3FFF)
+      if (((RDLR >> 16) & 0xFF3F) == 0xFF3F) {
+        // Replace 0x3FFF with 0x2000 (zero angular change)
+        RDLR = (RDLR & 0x00C0FFFF) | (0x0020 << 16);
+        // Remove CRC and StW_AnglHP_Sens_Id
+        RDHR = RDHR & 0x00FFFFF0;
+        // Force StW_AnglHP_Sens_Id to DELPHI (0x04)
+        RDHR = RDHR | 0x00000004;
+        // Compute new CRC8
+        int crc = tesla_legacy_compute_crc(RDLR, RDHR, 7);
+        RDHR = RDHR | (crc << 24);
+      }
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x20A -> 0x159 (ESP_C / BrakeMessage): direct remap
+    if (addr == 0x20A) {
+      to_send.addr = 0x159;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x145 -> 0x149 (ESP_145h): direct remap
+    if (addr == 0x145) {
+      to_send.addr = 0x149;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x115 -> 0x129 (ESP_115h): direct remap
+    // PLUS synthesize 0x1A9 (DI_espControl) for non-iBooster cars
+    if (addr == 0x115) {
+      to_send.addr = 0x129;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[5] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+
+      // Synthesize 0x1A9 (DI_espControl) - Pre-AP doesn't have iBooster
+      {
+        CANPacket_t esp_ctl;
+        esp_ctl.returned = 0U;
+        esp_ctl.rejected = 0U;
+        esp_ctl.extended = to_fwd->extended;
+        esp_ctl.bus = 1;
+        esp_ctl.data_len_code = 5;
+        int counter = ((RDHR & 0xF0) >> 4) & 0x0F;
+        uint32_t espL = 0x000C0000 | (counter << 28);
+        int cksm = (0x38 + 0x0C + (counter << 4)) & 0xFF;
+        uint32_t espH = cksm;
+        WORD_TO_BYTE_ARRAY(&esp_ctl.data[0], espL);
+        WORD_TO_BYTE_ARRAY(&esp_ctl.data[4], espH);
+        esp_ctl.addr = 0x1A9;
+#if defined(STM32H7) || defined(STM32F4)
+        can_send(&esp_ctl, 1, true);
+#endif
+      }
+    }
+
+    // 0x118 -> 0x119 (DI_torque2): direct remap
+    // PLUS synthesize 0x169 (ESP_wheelSpeed) from vehicle speed
+    if (addr == 0x118) {
+      to_send.addr = 0x119;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[5] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+
+      // Synthesize 0x169 (ESP_wheelSpeed) - convert vehicle speed to 4-wheel format
+      {
+        CANPacket_t ws;
+        ws.returned = 0U;
+        ws.rejected = 0U;
+        ws.extended = to_fwd->extended;
+        ws.bus = 1;
+        ws.data_len_code = 8;
+        ws.addr = 0x169;
+        int counter = GET_BYTES_48(to_fwd) & 0x0F;
+        int32_t speed_kph = (((0xFFF0000 & RDLR) >> 16) * 0.05 - 25) * 1.609;
+        if (speed_kph < 0) {
+          speed_kph = 0;
+        }
+        if (((0xFFF0000 & RDLR) >> 16) == 0xFFF) {
+          speed_kph = 0x1FFF;  // SNA
+        } else {
+          speed_kph = (int)(speed_kph / 0.04) & 0x1FFF;
+        }
+        uint32_t wsL = (speed_kph | (speed_kph << 13) | (speed_kph << 26)) & 0xFFFFFFFF;
+        uint32_t wsH = ((speed_kph >> 6) | (speed_kph << 7) | (counter << 20)) & 0x00FFFFFF;
+        int cksm = 0x76;  // Tinkla checksum seed for 0x169 wheel speed message
+        cksm = (cksm + (wsL & 0xFF) + ((wsL >> 8) & 0xFF) + ((wsL >> 16) & 0xFF) + ((wsL >> 24) & 0xFF)) & 0xFF;
+        cksm = (cksm + (wsH & 0xFF) + ((wsH >> 8) & 0xFF) + ((wsH >> 16) & 0xFF) + ((wsH >> 24) & 0xFF)) & 0xFF;
+        wsH = wsH | (cksm << 24);
+        WORD_TO_BYTE_ARRAY(&ws.data[0], wsL);
+        WORD_TO_BYTE_ARRAY(&ws.data[4], wsH);
+#if defined(STM32H7) || defined(STM32F4)
+        can_send(&ws, 1, true);
+#endif
+      }
+    }
+
+    // 0x108 -> 0x109 (DI_torque1): direct remap
+    if (addr == 0x108) {
+      to_send.addr = 0x109;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x308 -> 0x209 (GTW_odo): direct remap
+    if (addr == 0x308) {
+      to_send.addr = 0x209;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x45 -> 0x219 (STW_ACTN_RQ): direct remap
+    if (addr == 0x45) {
+      to_send.addr = 0x219;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // 0x30A -> 0x2D9 (BC_status): direct remap
+    if (addr == 0x30A) {
+      to_send.addr = 0x2D9;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+      to_send.data[7] = tesla_legacy_compute_checksum(&to_send);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+
+    // UDS forwarding: 0x671 (bus 0) -> 0x641 (bus 1)
+    if (addr == 0x671) {
+      to_send.addr = 0x641;
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+
+      // Also pass through as-is to match tinkla diagnostic behavior
+      to_send.addr = 0x671;
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 1, true);
+#endif
+    }
+  }
+
+  // UDS forwarding: 0x651 (bus 1) -> 0x681 (bus 0)
+  if (bus_num == 1 && tesla_preap && tesla_radar_emulation) {
+    if (addr == 0x651) {
+      CANPacket_t to_send;
+      to_send.returned = 0U;
+      to_send.rejected = 0U;
+      to_send.extended = to_fwd->extended;
+      to_send.bus = 0;
+      to_send.data_len_code = to_fwd->data_len_code;
+      to_send.addr = 0x681;
+      uint32_t RDLR = GET_BYTES_04(to_fwd);
+      uint32_t RDHR = GET_BYTES_48(to_fwd);
+      WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
+      WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 0, true);
+#endif
+
+      // Also pass through as-is to match tinkla diagnostic behavior
+      to_send.addr = 0x651;
+#if defined(STM32H7) || defined(STM32F4)
+      can_send(&to_send, 0, true);
 #endif
     }
   }
@@ -168,6 +373,48 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   // Handle forwarding (Manual injection)
   tesla_legacy_handle_forwarding(msg);
+
+  // Track radar initialization/timeout state for Pre-AP emulation diagnostics.
+  if (tesla_preap && tesla_radar_emulation) {
+    const int bus = GET_BUS(msg);
+    const int addr = GET_ADDR(msg);
+
+    if ((addr == 0x300) && (bus == 1)) {
+      uint32_t ts = microsecond_timer_get();
+      uint32_t ts_elapsed = safety_get_ts_elapsed(ts, tesla_last_radar_signal);
+      if (tesla_radar_status == 1) {
+        tesla_radar_status = 2;
+        tesla_last_radar_signal = ts;
+      } else if ((ts_elapsed > TESLA_RADAR_TIMEOUT) && (tesla_radar_status > 0)) {
+        tesla_radar_status = 0;
+      } else if ((ts_elapsed <= TESLA_RADAR_TIMEOUT) && (tesla_radar_status == 2)) {
+        tesla_last_radar_signal = ts;
+      }
+    }
+
+    // 0x631 is sent by radar during initialization/sync
+    if ((addr == 0x631) && (bus == 1)) {
+      uint32_t ts = microsecond_timer_get();
+      uint32_t ts_elapsed = safety_get_ts_elapsed(ts, tesla_last_radar_signal);
+      if (tesla_radar_status == 0) {
+        tesla_radar_status = 1;
+        tesla_last_radar_signal = ts;
+      } else if ((ts_elapsed > TESLA_RADAR_TIMEOUT) && (tesla_radar_status > 0)) {
+        tesla_radar_status = 0;
+      } else if ((ts_elapsed <= TESLA_RADAR_TIMEOUT) && (tesla_radar_status > 0)) {
+        tesla_last_radar_signal = ts;
+      }
+    }
+
+    // Use always-present chassis traffic to detect stale radar heartbeat.
+    if ((addr == 0x318) && (bus == 0) && (tesla_radar_status > 0)) {
+      uint32_t ts = microsecond_timer_get();
+      uint32_t ts_elapsed = safety_get_ts_elapsed(ts, tesla_last_radar_signal);
+      if (ts_elapsed > TESLA_RADAR_TIMEOUT) {
+        tesla_radar_status = 0;
+      }
+    }
+  }
 
   // Steering angle: (0.1 * val) - 819.2 in deg.
   if (!tesla_external_panda && (msg->bus == 0U) && (msg->addr == 0x370U)) {
@@ -427,6 +674,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   const int TESLA_FLAG_PREAP = 32;
   const int TESLA_FLAG_ENABLE_PEDAL = 64;
   const int TESLA_FLAG_RADAR_BEHIND_NOSECONE = 128;
+  const int TESLA_FLAG_RADAR_EMULATION = 256;
 
   // Extract flags
   tesla_external_panda = GET_FLAG(param, TESLA_FLAG_EXTERNAL_PANDA);
@@ -436,6 +684,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_preap = GET_FLAG(param, TESLA_FLAG_PREAP);
   tesla_enable_pedal = GET_FLAG(param, TESLA_FLAG_ENABLE_PEDAL);
   tesla_radar_behind_nosecone = GET_FLAG(param, TESLA_FLAG_RADAR_BEHIND_NOSECONE);
+  tesla_radar_emulation = GET_FLAG(param, TESLA_FLAG_RADAR_EMULATION);
 
   if (tesla_radar_behind_nosecone) {
     radar_position = 1;
@@ -454,6 +703,8 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_doors_open = false;
   pedal_can = -1;
   pedal_pressed = 0;
+  tesla_radar_status = 0;
+  tesla_last_radar_signal = 0U;
 
   // Set DAS control message address
   das_control_msg = tesla_external_panda ? 0x2bfU : 0x2b9U;
@@ -494,6 +745,27 @@ static safety_config tesla_legacy_init(uint16_t param) {
     
     // IC Integration / Communication with panda (internal message)
     {0x659, 0, 8, .check_relay = false, .disable_static_blocking = true},  // Fake DAS message for pedal state
+
+    // Radar emulation messages (bus 1) - forwarded from bus 0 with address remapping
+    {0x109, 1, 8, .check_relay = false, .disable_static_blocking = true},  // DI_torque1
+    {0x119, 1, 6, .check_relay = false, .disable_static_blocking = true},  // DI_torque2
+    {0x129, 1, 6, .check_relay = false, .disable_static_blocking = true},  // ESP_115h
+    {0x149, 1, 8, .check_relay = false, .disable_static_blocking = true},  // ESP_145h
+    {0x159, 1, 8, .check_relay = false, .disable_static_blocking = true},  // ESP_C (BrakeMessage)
+    {0x169, 1, 8, .check_relay = false, .disable_static_blocking = true},  // ESP_wheelSpeed
+    {0x199, 1, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ANGLHP_STAT
+    {0x1A9, 1, 5, .check_relay = false, .disable_static_blocking = true},  // DI_espControl
+    {0x209, 1, 8, .check_relay = false, .disable_static_blocking = true},  // GTW_odo
+    {0x219, 1, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ
+    {0x2A9, 1, 8, .check_relay = false, .disable_static_blocking = true},  // GTW_carConfig
+    {0x2B9, 1, 8, .check_relay = false, .disable_static_blocking = true},  // VIP_405HS
+    {0x2D9, 1, 8, .check_relay = false, .disable_static_blocking = true},  // BC_status
+    // UDS for radar diagnostics
+    {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // UDS req to radar (remapped from 0x671)
+    {0x671, 1, 8, .check_relay = false, .disable_static_blocking = true},  // UDS req to radar (as-is passthrough)
+    {0x681, 0, 8, .check_relay = false, .disable_static_blocking = true},  // UDS resp from radar (remapped from 0x651)
+    {0x651, 0, 8, .check_relay = false, .disable_static_blocking = true},  // UDS resp from radar (as-is passthrough)
+    {0x560, 1, 8, .check_relay = false, .disable_static_blocking = true},  // Radar VIN fake message
   };
 
   // Define RX check arrays (keeping them as is)
@@ -538,6 +810,16 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state (10Hz)
     {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState (10Hz)
     {.msg = {{0x45, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // STW_ACTN_RQ - Stalk (10Hz)
+    // Radar emulation source messages (frequency 0 = no timeout check, passthrough only)
+    {.msg = {{0x115, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // ESP_115h -> 0x129 + synth 0x1A9
+    {.msg = {{0x145, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // ESP_145h -> 0x149
+    {.msg = {{0x00E, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // STW_ANGLHP_STAT -> 0x199
+    {.msg = {{0x308, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // GTW_odo -> 0x209
+    {.msg = {{0x30A, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // BC_status -> 0x2D9
+    {.msg = {{0x398, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // GTW_carConfig -> 0x2A9
+    {.msg = {{0x405, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // VIP_405HS -> 0x2B9
+    {.msg = {{0x671, 0, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // UDS req -> 0x641
+    {.msg = {{0x651, 1, 8, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},    // UDS resp (bus 1) -> 0x681
   };
 
   // Determine configuration based on hardware type

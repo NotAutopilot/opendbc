@@ -97,6 +97,8 @@ class CarInterface(CarInterfaceBase):
         flags |= TeslaSafetyFlags.FLAG_ENABLE_PEDAL
       if radar_behind_nosecone:
         flags |= TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE
+      if radar_enabled:
+        flags |= TeslaSafetyFlags.FLAG_RADAR_EMULATION
 
       ret.safetyConfigs = [
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(flags)),
@@ -146,7 +148,9 @@ class CarInterface(CarInterfaceBase):
     ret.steerAtStandstill = True
 
     ret.steerControlType = structs.CarParams.SteerControlType.angle
-    ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
+    # PreAP sets radarUnavailable in its own block based on tinkla_conf; don't overwrite
+    if candidate != CAR.TESLA_MODEL_S_PREAP:
+      ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
 
     # Legacy Tesla ports in this tree run openpilot longitudinal by default
     # (not as an optional alpha toggle), so mark alpha availability false.
