@@ -207,7 +207,6 @@ class TeslaSafetyFlags(IntFlag):
   FLAG_PREAP = 32
   FLAG_ENABLE_PEDAL = 64
   FLAG_RADAR_BEHIND_NOSECONE = 128
-  FLAG_RADAR_EMULATION = 256
 
 
 class TeslaFlags(IntFlag):

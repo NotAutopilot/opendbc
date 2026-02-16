@@ -96,14 +96,14 @@ static void stock_ecu_check(bool stock_ecu_detected);
 static bool is_msg_valid(RxCheck addr_list[], int index) {
   bool valid = true;
   if (index != -1) {
-    // frequency=0 marks optional checks that should never gate controls until first seen
-    const bool optional = addr_list[index].msg[addr_list[index].status.index].frequency == 0U;
-    if (optional && !addr_list[index].status.msg_seen) {
-      return true;
-    }
     if (!addr_list[index].status.valid_checksum || !addr_list[index].status.valid_quality_flag || (addr_list[index].status.wrong_counters >= MAX_WRONG_COUNTERS)) {
       valid = false;
-      controls_allowed = false;
+      // frequency=0 entries are optional passthrough messages (e.g. radar emulation sources).
+      // They should not gate controls_allowed -- only required messages (frequency > 0) should.
+      const uint32_t frequency = addr_list[index].msg[addr_list[index].status.index].frequency;
+      if (frequency > 0U) {
+        controls_allowed = false;
+      }
     }
   }
   return valid;
@@ -336,7 +336,8 @@ void safety_tick(const safety_config *cfg) {
         controls_allowed = false;
       }
 
-      if (lagging || !is_msg_valid(cfg->rx_checks, i)) {
+      // frequency=0 entries are optional; don't let them flag the system as invalid
+      if (frequency > 0U && (lagging || !is_msg_valid(cfg->rx_checks, i))) {
         rx_checks_invalid = true;
       }
     }

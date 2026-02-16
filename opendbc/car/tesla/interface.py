@@ -97,8 +97,6 @@ class CarInterface(CarInterfaceBase):
         flags |= TeslaSafetyFlags.FLAG_ENABLE_PEDAL
       if radar_behind_nosecone:
         flags |= TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE
-      if radar_enabled:
-        flags |= TeslaSafetyFlags.FLAG_RADAR_EMULATION
 
       ret.safetyConfigs = [
         get_safety_config(structs.CarParams.SafetyModel.teslaLegacy, int(flags)),

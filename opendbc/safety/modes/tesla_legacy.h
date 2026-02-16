@@ -19,7 +19,6 @@ static bool tesla_hw3 = false;
 static bool tesla_preap = false;
 static bool tesla_enable_pedal = false;
 static bool tesla_radar_behind_nosecone = false;
-static bool tesla_radar_emulation = false;
 
 static int chassis_bus = 0U;
 static int das_control_msg = 0x2bfU;
@@ -95,7 +94,7 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
 
   // Full radar emulation: translate bus 0 messages to bus 1 for Bosch radar
   // Ported from tinkla safety_tesla.h teslaPreAp_fwd_to_radar_modded()
-  if (bus_num == 0 && tesla_preap && tesla_radar_emulation) {
+  if (bus_num == 0 && tesla_preap) {
     CANPacket_t to_send;
     to_send.returned = 0U;
     to_send.rejected = 0U;
@@ -132,7 +131,8 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
 #endif
     }
 
-    // 0x00E -> 0x199 (STW_ANGLHP_STAT): fix SNA angular speed, force Delphi sensor, CRC8
+    // 0x00E -> 0x199 (STW_ANGLHP_STAT): always forward, fix SNA angular speed case
+    // This message uses CRC8 (not additive checksum) so no tesla_legacy_compute_checksum call
     if (addr == 0x00E) {
       to_send.addr = 0x199;
       // Check if angular speed sends SNA (0x3FFF)
@@ -143,7 +143,7 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
         RDHR = RDHR & 0x00FFFFF0;
         // Force StW_AnglHP_Sens_Id to DELPHI (0x04)
         RDHR = RDHR | 0x00000004;
-        // Compute new CRC8
+        // Compute new CRC8 since we modified the data
         int crc = tesla_legacy_compute_crc(RDLR, RDHR, 7);
         RDHR = RDHR | (crc << 24);
       }
@@ -314,7 +314,7 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
   }
 
   // UDS forwarding: 0x651 (bus 1) -> 0x681 (bus 0)
-  if (bus_num == 1 && tesla_preap && tesla_radar_emulation) {
+  if (bus_num == 1 && tesla_preap) {
     if (addr == 0x651) {
       CANPacket_t to_send;
       to_send.returned = 0U;
@@ -375,7 +375,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   tesla_legacy_handle_forwarding(msg);
 
   // Track radar initialization/timeout state for Pre-AP emulation diagnostics.
-  if (tesla_preap && tesla_radar_emulation) {
+  if (tesla_preap) {
     const int bus = GET_BUS(msg);
     const int addr = GET_ADDR(msg);
 
@@ -674,7 +674,6 @@ static safety_config tesla_legacy_init(uint16_t param) {
   const int TESLA_FLAG_PREAP = 32;
   const int TESLA_FLAG_ENABLE_PEDAL = 64;
   const int TESLA_FLAG_RADAR_BEHIND_NOSECONE = 128;
-  const int TESLA_FLAG_RADAR_EMULATION = 256;
 
   // Extract flags
   tesla_external_panda = GET_FLAG(param, TESLA_FLAG_EXTERNAL_PANDA);
@@ -684,7 +683,6 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_preap = GET_FLAG(param, TESLA_FLAG_PREAP);
   tesla_enable_pedal = GET_FLAG(param, TESLA_FLAG_ENABLE_PEDAL);
   tesla_radar_behind_nosecone = GET_FLAG(param, TESLA_FLAG_RADAR_BEHIND_NOSECONE);
-  tesla_radar_emulation = GET_FLAG(param, TESLA_FLAG_RADAR_EMULATION);
 
   if (tesla_radar_behind_nosecone) {
     radar_position = 1;
