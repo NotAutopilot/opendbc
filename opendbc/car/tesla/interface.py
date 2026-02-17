@@ -149,7 +149,9 @@ class CarInterface(CarInterfaceBase):
     ret.steerAtStandstill = True
 
     ret.steerControlType = structs.CarParams.SteerControlType.angle
-    ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
+    # PREAP sets radarUnavailable from the toggle above; don't overwrite it here.
+    if candidate != CAR.TESLA_MODEL_S_PREAP:
+      ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
 
     # Legacy Tesla ports in this tree run openpilot longitudinal by default
     # (not as an optional alpha toggle), so mark alpha availability false.
