@@ -2,13 +2,22 @@
 Tesla Pre-AP Configuration Helper
 Ported from Tinkla's CFG_module.py pattern
 
-Storage Backend: JSON file at /data/tinkla_params.json
-This avoids OpenPilot's Params whitelist restrictions.
+Storage Backend: openpilot Params system for NAP-prefixed keys (shared with UI),
+JSON file at /data/tinkla_params.json for legacy/non-UI params.
 """
 
 import json
 import os
 import tempfile
+
+from opendbc.car.tesla.nap_params import NAPParamKeys
+
+try:
+  from openpilot.common.params import Params
+  _params = Params()
+  _PARAMS_AVAILABLE = True
+except ImportError:
+  _PARAMS_AVAILABLE = False
 
 
 # ============================================
@@ -88,6 +97,11 @@ ACCEL_MAX_PROFILES = {
   'MadMax': [0.3, 1.6, 1.9, 1.5, 1.2, 1.0],
 }
 ACCEL_MAX_DEFAULT = ACCEL_MAX_PROFILES['Chill']
+
+# Pedal profile index mapping (Params stores 1-4, tinkla_conf uses name strings)
+_PROFILE_NAMES = list(PEDAL_PROFILES.keys())  # S60, S85, P85, P85+, Generic
+_PROFILE_INDEX_TO_NAME = {i + 1: name for i, name in enumerate(_PROFILE_NAMES[:4])}
+_PROFILE_NAME_TO_INDEX = {name: i for i, name in _PROFILE_INDEX_TO_NAME.items()}
 
 
 def transform_di_to_pedal(val: float, pedal_zero: float, pedal_factor: float) -> float:
@@ -204,52 +218,80 @@ class TinklaConf:
     self._save()
   
   # ============================================
-  # Boolean Parameters
+  # Params-backed Properties
+  # Reads/writes openpilot Params when available,
+  # falls back to JSON for standalone testing.
   # ============================================
-  
+
+  def _get_param_bool(self, param_key: str, json_key: str, default: bool = False) -> bool:
+    if _PARAMS_AVAILABLE:
+      return _params.get_bool(param_key)
+    return self._get(json_key, default)
+
+  def _put_param_bool(self, param_key: str, json_key: str, value: bool) -> None:
+    if _PARAMS_AVAILABLE:
+      _params.put_bool_nonblocking(param_key, bool(value))
+    self._put(json_key, bool(value))
+
+  def _get_param_float(self, param_key: str, json_key: str, default: float) -> float:
+    if _PARAMS_AVAILABLE:
+      val = _params.get(param_key, return_default=True)
+      return float(val) if val is not None else default
+    return float(self._get(json_key, default))
+
+  def _put_param_float(self, param_key: str, json_key: str, value: float) -> None:
+    if _PARAMS_AVAILABLE:
+      _params.put(param_key, float(value))
+    self._put(json_key, float(value))
+
   @property
   def use_pedal(self) -> bool:
     """True if Comma Pedal hardware is present and enabled."""
-    return self._get('use_pedal', False)
-  
+    return self._get_param_bool(NAPParamKeys.PEDAL_ENABLED, 'use_pedal')
+
   @use_pedal.setter
   def use_pedal(self, value: bool) -> None:
-    self._put('use_pedal', bool(value))
-  
+    self._put_param_bool(NAPParamKeys.PEDAL_ENABLED, 'use_pedal', value)
+
   @property
   def radar_enabled(self) -> bool:
     """True if using stock Bosch radar."""
-    return self._get('radar_enabled', False)
-  
+    return self._get_param_bool(NAPParamKeys.RADAR_ENABLED, 'radar_enabled')
+
   @radar_enabled.setter
   def radar_enabled(self, value: bool) -> None:
-    self._put('radar_enabled', bool(value))
-  
+    self._put_param_bool(NAPParamKeys.RADAR_ENABLED, 'radar_enabled', value)
+
   @property
   def radar_behind_nosecone(self) -> bool:
     """True if radar is behind the nosecone (signal attenuation adjustment)."""
-    return self._get('radar_behind_nosecone', False)
-  
+    return self._get_param_bool(NAPParamKeys.RADAR_BEHIND_NOSECONE, 'radar_behind_nosecone')
+
   @radar_behind_nosecone.setter
   def radar_behind_nosecone(self, value: bool) -> None:
-    self._put('radar_behind_nosecone', bool(value))
-  
+    self._put_param_bool(NAPParamKeys.RADAR_BEHIND_NOSECONE, 'radar_behind_nosecone', value)
+
   @property
   def pedal_calibrated(self) -> bool:
     """True if pedal has been calibrated."""
-    return self._get('pedal_calibrated', False)
-  
+    return self._get_param_bool(NAPParamKeys.PEDAL_CALIB_DONE, 'pedal_calibrated')
+
   @pedal_calibrated.setter
   def pedal_calibrated(self, value: bool) -> None:
-    self._put('pedal_calibrated', bool(value))
-  
+    self._put_param_bool(NAPParamKeys.PEDAL_CALIB_DONE, 'pedal_calibrated', value)
+
   @property
   def pedal_can_zero(self) -> bool:
     """True if pedal is on CAN bus 0 instead of bus 2."""
+    if _PARAMS_AVAILABLE:
+      bus = _params.get(NAPParamKeys.PEDAL_CAN_BUS, return_default=True)
+      return bus == 0
     return self._get('pedal_can_zero', False)
-  
+
   @pedal_can_zero.setter
   def pedal_can_zero(self, value: bool) -> None:
+    if _PARAMS_AVAILABLE:
+      _params.put(NAPParamKeys.PEDAL_CAN_BUS, 0 if value else 2)
     self._put('pedal_can_zero', bool(value))
   
   # ============================================
@@ -396,58 +438,69 @@ class TinklaConf:
   @property
   def pedal_calib_min(self) -> float:
     """Calibrated minimum pedal value (from calibration tool)."""
-    return float(self._get('pedal_calib_min', -3.0))
-  
+    return self._get_param_float(NAPParamKeys.PEDAL_CALIB_MIN, 'pedal_calib_min', -3.0)
+
   @pedal_calib_min.setter
   def pedal_calib_min(self, value: float) -> None:
-    self._put('pedal_calib_min', float(value))
-  
+    self._put_param_float(NAPParamKeys.PEDAL_CALIB_MIN, 'pedal_calib_min', value)
+
   @property
   def pedal_calib_max(self) -> float:
     """Calibrated maximum pedal value (from calibration tool)."""
-    return float(self._get('pedal_calib_max', 99.6))
-  
+    return self._get_param_float(NAPParamKeys.PEDAL_CALIB_MAX, 'pedal_calib_max', 99.6)
+
   @pedal_calib_max.setter
   def pedal_calib_max(self, value: float) -> None:
-    self._put('pedal_calib_max', float(value))
-  
+    self._put_param_float(NAPParamKeys.PEDAL_CALIB_MAX, 'pedal_calib_max', value)
+
   @property
   def pedal_zero(self) -> float:
     """
     Calibrated pedal zero point (coast position).
     From Tinkla: PEDAL_ZERO = TeslaPedalCalibZero - 1 / PEDAL_FACTOR
     """
-    calib_zero = float(self._get('pedal_calib_zero', 0.0))
+    if _PARAMS_AVAILABLE:
+      calib_zero_val = _params.get(NAPParamKeys.PEDAL_CALIB_ZERO, return_default=True)
+      calib_zero = float(calib_zero_val) if calib_zero_val is not None else 0.0
+    else:
+      calib_zero = float(self._get('pedal_calib_zero', 0.0))
     factor = self.pedal_factor
     if factor == 0:
       factor = 1.0
     return calib_zero - 1.0 / factor
-  
+
   @pedal_zero.setter
   def pedal_zero(self, value: float) -> None:
+    if _PARAMS_AVAILABLE:
+      _params.put(NAPParamKeys.PEDAL_CALIB_ZERO, float(value))
     self._put('pedal_calib_zero', float(value))
-  
+
   @property
   def pedal_factor(self) -> float:
     """
     Calibration factor: 100.0 / (pedal_max - pedal_pressed)
     Used to scale DI units to actual pedal voltage.
     """
-    return float(self._get('pedal_calib_factor', 1.0))
-  
+    return self._get_param_float(NAPParamKeys.PEDAL_CALIB_FACTOR, 'pedal_calib_factor', 1.0)
+
   @pedal_factor.setter
   def pedal_factor(self, value: float) -> None:
-    self._put('pedal_calib_factor', float(value))
-  
+    self._put_param_float(NAPParamKeys.PEDAL_CALIB_FACTOR, 'pedal_calib_factor', value)
+
   @property
   def pedal_profile(self) -> str:
     """Pedal profile name (S60, S85, P85, P85+, Generic)."""
+    if _PARAMS_AVAILABLE:
+      idx = _params.get(NAPParamKeys.PEDAL_PROFILE, return_default=True)
+      return _PROFILE_INDEX_TO_NAME.get(idx, 'P85+')
     val = self._get('pedal_profile', 'P85+')
     return val if val in PEDAL_PROFILES else 'P85+'
-  
+
   @pedal_profile.setter
   def pedal_profile(self, value: str) -> None:
     if value in PEDAL_PROFILES:
+      if _PARAMS_AVAILABLE and value in _PROFILE_NAME_TO_INDEX:
+        _params.put(NAPParamKeys.PEDAL_PROFILE, _PROFILE_NAME_TO_INDEX[value])
       self._put('pedal_profile', value)
   
   # ============================================
@@ -478,7 +531,8 @@ class TinklaConf:
   def print_config(self) -> None:
     """Print current configuration to console."""
     print("=== Tesla Pre-AP Configuration ===")
-    print(f"    Storage: {CONFIG_FILE}")
+    storage = "openpilot Params" if _PARAMS_AVAILABLE else CONFIG_FILE
+    print(f"    Storage: {storage}")
     print("")
     print("  [CONTROL MODES]")
     print(f"    Double-Pull Mode:     ON (always enabled)")
