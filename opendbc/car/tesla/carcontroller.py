@@ -228,6 +228,16 @@ class CarController(CarControllerBase):
                 self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
                 pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
+
+                # Max regen warning: alert driver when pedal is at/near max regen
+                # (they need to use the brake pedal for more deceleration).
+                # Tinkla PCC_module.py line 353: trigger at 95% of PEDAL_DI_MIN, suppress for 2s after engage.
+                pedal_di_min = PEDAL_DI_MIN if TINKLA_AVAILABLE else PEDAL_DI_MIN_DEFAULT
+                engage_elapsed = (self.frame - self.preap_long_engage_frame) * 0.01  # frames to seconds at 100Hz
+                if self.prev_pedal_di <= 0.95 * pedal_di_min and engage_elapsed > 2.0:
+                  CS.pccEvent = "pedalMaxRegen"
+                else:
+                  CS.pccEvent = None
             except Exception:
               # Fail-safe: on any unexpected pedal path exception, send disabled pedal.
               carlog.exception("Pre-AP pedal command path failed; sending disabled pedal command")

@@ -672,6 +672,10 @@ class CarState(CarStateBase):
       self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
 
     self.cruise_enabled_prev = ret.cruiseState.enabled
+
+    # Propagate max regen flag from carcontroller (set in previous frame)
+    ret.pedalMaxRegen = self.pccEvent == "pedalMaxRegen"
+
     return ret
 
   @staticmethod
