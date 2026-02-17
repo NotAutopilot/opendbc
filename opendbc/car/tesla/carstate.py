@@ -545,27 +545,29 @@ class CarState(CarStateBase):
           be.type = ButtonType.accelCruise
           if be.pressed:
             self.last_stalk_non_cancel_ms = curr_time_ms
-          if self.enableLongControl:
-            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
-            actual_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-            if state == CruiseButtons.RES_ACCEL:
-              self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + speed_uom_kph
-            else:  # RES_ACCEL_2ND
-              self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + 5 * speed_uom_kph
-            self.pedal_speed_kph = min(self.pedal_speed_kph, 270.0)
+            # Only adjust speed on press edge (not release) to avoid double-increment
+            if self.enableLongControl:
+              speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+              actual_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
+              if state == CruiseButtons.RES_ACCEL:
+                self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + speed_uom_kph
+              else:  # RES_ACCEL_2ND
+                self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + 5 * speed_uom_kph
+              self.pedal_speed_kph = min(self.pedal_speed_kph, 270.0)
 
         elif CruiseButtons.is_decel(state):
           # Down - decelerate (Tinkla PCC_module.py lines 204-207)
           be.type = ButtonType.decelCruise
           if be.pressed:
             self.last_stalk_non_cancel_ms = curr_time_ms
-          if self.enableLongControl:
-            speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
-            if state == CruiseButtons.DECEL_SET:
-              self.pedal_speed_kph = self.pedal_speed_kph - speed_uom_kph
-            else:  # DECEL_2ND
-              self.pedal_speed_kph = self.pedal_speed_kph - 5 * speed_uom_kph
-            self.pedal_speed_kph = max(self.pedal_speed_kph, 0.0)
+            # Only adjust speed on press edge (not release) to avoid double-decrement
+            if self.enableLongControl:
+              speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
+              if state == CruiseButtons.DECEL_SET:
+                self.pedal_speed_kph = self.pedal_speed_kph - speed_uom_kph
+              else:  # DECEL_2ND
+                self.pedal_speed_kph = self.pedal_speed_kph - 5 * speed_uom_kph
+              self.pedal_speed_kph = max(self.pedal_speed_kph, 0.0)
           
         else:
           be.type = ButtonType.unknown
