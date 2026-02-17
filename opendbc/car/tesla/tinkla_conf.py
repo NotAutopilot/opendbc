@@ -19,6 +19,8 @@ try:
 except ImportError:
   _PARAMS_AVAILABLE = False
 
+print(f"[NAP] tinkla_conf: _PARAMS_AVAILABLE={_PARAMS_AVAILABLE}")
+
 
 # ============================================
 # Storage Configuration

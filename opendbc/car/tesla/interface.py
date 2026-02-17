@@ -92,6 +92,9 @@ class CarInterface(CarInterfaceBase):
       use_pedal = tinkla_conf.use_pedal if tinkla_conf else False
       radar_enabled = tinkla_conf.radar_enabled if tinkla_conf else False
       radar_behind_nosecone = tinkla_conf.radar_behind_nosecone if tinkla_conf else False
+      print(f"[NAP] interface.py fingerprint: tinkla_conf={'present' if tinkla_conf else 'None'}, "
+            f"use_pedal={use_pedal}, radar_enabled={radar_enabled}, "
+            f"radar_behind_nosecone={radar_behind_nosecone}, radarUnavailable={not radar_enabled}")
       
       if use_pedal:
         flags |= TeslaSafetyFlags.FLAG_ENABLE_PEDAL

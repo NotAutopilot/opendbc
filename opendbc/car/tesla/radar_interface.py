@@ -43,6 +43,7 @@ class RadarInterface(RadarInterfaceBase):
       self.rcp = CANParser(DBC[CP.carFingerprint][Bus.radar], messages, CANBUS.radar)
     else:
       self.rcp = None
+    print(f"[NAP] RadarInterface: radarUnavailable={CP.radarUnavailable}, radar_off_can={self.radar_off_can}, rcp={'active' if self.rcp else 'None'}")
 
     self.updated_messages = set()
     self.track_id = 0
