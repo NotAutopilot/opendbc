@@ -229,11 +229,13 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   }
 
   // Pre-AP Brake Check
+  // Keep controls_allowed active during brake for ALL Pre-AP modes (pedal and
+  // non-pedal).  Selfdrive drops longitudinal only on brake; lateral stays
+  // active.  Without this, generic_rx_checks() drops controls_allowed every
+  // frame while vehicle_moving && brake_pressed, causing controlsMismatch when
+  // engaging at low speed with foot near brake.
   if (tesla_preap && (msg->bus == 0U) && (msg->addr == 0x20aU)) {
-    const bool preap_brake_pressed = (((msg->data[0] & 0x0CU) >> 2) != 1U);
-    // Match Tinkla Pre-AP pedal behavior: keep controls allowed on brake so
-    // selfdrive can drop longitudinal only (override) while lateral remains active.
-    brake_pressed = tesla_enable_pedal ? false : preap_brake_pressed;
+    brake_pressed = false;
   }
 
   // Cruise
