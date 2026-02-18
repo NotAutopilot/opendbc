@@ -74,6 +74,9 @@ class CarState(CarStateBase):
     self.enableJustCC = False
     self.prev_steering_disengage = False
     self.preap_brake_pressed_prev = False
+    self.preap_cc_cancel_needed = False   # carcontroller sends 0x45 CANCEL
+    self.preap_cc_engage_needed = False   # carcontroller sends 0x45 RES_ACCEL
+    self.preap_last_cc_spoof_ms = 0       # echo filter timestamp
 
     # Software-managed target speed (Tinkla PCC_module port)
     # Pre-AP has no stock cruise, so we manage the target speed ourselves.
@@ -432,6 +435,9 @@ class CarState(CarStateBase):
               self.pedal_speed_kph = max(current_speed_kph, 0.0)
             else:
               self.pedal_speed_kph = 0.0
+              if not use_pedal:
+                self.preap_cc_engage_needed = True
+                self.preap_last_cc_spoof_ms = curr_time_ms
           else:
             # First pull - engage lateral immediately, wait for possible double
             was_long_active = self.enableLongControl
@@ -442,6 +448,9 @@ class CarState(CarStateBase):
             self.pending_enable = True
             if was_long_active:
               self.longCtrlEvent = "pccDisabled"
+            if not use_pedal:
+              self.preap_cc_cancel_needed = True
+              self.preap_last_cc_spoof_ms = curr_time_ms
         else:
           # Double-pull disabled: single pull = full control (pedal or stock cruise).
           self.cruiseEnabled = True
@@ -456,7 +465,10 @@ class CarState(CarStateBase):
             self.pedal_speed_kph = max(current_speed_kph, 0.0)
           else:
             self.pedal_speed_kph = 0.0
-      
+            if not use_pedal:
+              self.preap_cc_engage_needed = True
+              self.preap_last_cc_spoof_ms = curr_time_ms
+
       # General button event handling (for UI/buttonEvents)
       if self.cruise_buttons != self.prev_cruise_buttons:
         be = structs.CarState.ButtonEvent()
@@ -476,8 +488,8 @@ class CarState(CarStateBase):
           # immediately after MAIN/RES/DECEL press edges.
           # This prevents self-cancel when spoofing stock-CC cancellation.
           is_possible_auto_cancel = (
-            self.enableLongControl
-            and (curr_time_ms - self.last_stalk_non_cancel_ms) < 600
+            (self.enableLongControl and (curr_time_ms - self.last_stalk_non_cancel_ms) < 600)
+            or ((curr_time_ms - self.preap_last_cc_spoof_ms) < 300)
           )
           if not is_possible_auto_cancel:
             be.type = ButtonType.cancel
@@ -500,6 +512,9 @@ class CarState(CarStateBase):
           be.type = ButtonType.accelCruise
           if be.pressed:
             self.last_stalk_non_cancel_ms = curr_time_ms
+            if not use_pedal and self.cruiseEnabled and not self.enableLongControl:
+              self.enableLongControl = True
+              self.pending_enable = False
             # Only adjust speed on press edge (not release) to avoid double-increment
             if self.enableLongControl:
               speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
@@ -515,6 +530,9 @@ class CarState(CarStateBase):
           be.type = ButtonType.decelCruise
           if be.pressed:
             self.last_stalk_non_cancel_ms = curr_time_ms
+            if not use_pedal and self.cruiseEnabled and not self.enableLongControl:
+              self.enableLongControl = True
+              self.pending_enable = False
             # Only adjust speed on press edge (not release) to avoid double-decrement
             if self.enableLongControl:
               speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0

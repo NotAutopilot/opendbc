@@ -80,6 +80,7 @@ class CarController(CarControllerBase):
     self.prev_enable_long_control = False
     self.prev_requested_long = False
     self.preap_cancel_pending = False
+    self.preap_engage_pending = False
     self.prev_preap_long_active = False
     self.preap_long_engage_frame = -1000000
 
@@ -182,16 +183,31 @@ class CarController(CarControllerBase):
               if pedal_over_cc_button and requested_long and CS.out.cruiseState.enabled:
                 self.preap_cancel_pending = True
 
-        pcm_cancel_cmd = self.preap_cancel_pending
-        if pcm_cancel_cmd and self.frame % 10 == 0:
+        if self.preap_cancel_pending and self.frame % 10 == 0:
           msg_stw = getattr(CS, 'msg_stw_actn_req', None)
           if msg_stw is not None:
             stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
             can_sends.insert(0, self.tesla_can.create_action_request(
               CruiseButtons.CANCEL, CANBUS.party, stlk_counter, msg_stw))
             self.preap_cancel_pending = False
+        elif self.preap_engage_pending and self.frame % 10 == 0:
+          msg_stw = getattr(CS, 'msg_stw_actn_req', None)
+          if msg_stw is not None:
+            stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
+            can_sends.insert(0, self.tesla_can.create_action_request(
+              CruiseButtons.RES_ACCEL, CANBUS.party, stlk_counter, msg_stw))
+            self.preap_engage_pending = False
 
         self.prev_requested_long = requested_long
+
+        # Non-pedal CC commands: consume flags set by carstate stalk handler
+        if not pedal_long_allowed:
+          if getattr(CS, 'preap_cc_cancel_needed', False):
+            self.preap_cancel_pending = True
+            CS.preap_cc_cancel_needed = False
+          if getattr(CS, 'preap_cc_engage_needed', False):
+            self.preap_engage_pending = True
+            CS.preap_cc_engage_needed = False
 
         if self.frame % 2 == 0:
            self.prev_enable_long_control = cs_enable_long
