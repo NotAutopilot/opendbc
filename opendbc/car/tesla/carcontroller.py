@@ -182,12 +182,6 @@ class CarController(CarControllerBase):
               if pedal_over_cc_button and requested_long and CS.out.cruiseState.enabled:
                 self.preap_cancel_pending = True
 
-        # Non-pedal stock cruise fallback: carstate sets this flag on single-pull
-        # timeout to suppress stock CC from latching on a lateral-only engage.
-        if getattr(CS, 'preap_need_cc_cancel', False):
-          self.preap_cancel_pending = True
-          CS.preap_need_cc_cancel = False
-
         pcm_cancel_cmd = self.preap_cancel_pending
         if pcm_cancel_cmd and self.frame % 10 == 0:
           msg_stw = getattr(CS, 'msg_stw_actn_req', None)

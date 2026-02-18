@@ -104,11 +104,6 @@ class CarState(CarStateBase):
       self.enableDoublePull = True            # Default ON for Pre-AP
       self.double_pull_window_ms = STALK_DOUBLE_PULL_MS  # Default 750ms (Tinkla)
 
-    # Stock cruise cancel flag (non-pedal mode):
-    # Set True on single-pull timeout when !use_pedal so carcontroller
-    # sends a one-shot CC cancel to prevent stock cruise from latching.
-    self.preap_need_cc_cancel = False
-
     # ============================================
     # Alert Event (Tinkla-style)
     # Set this to an event name string when state changes
@@ -298,11 +293,12 @@ class CarState(CarStateBase):
       self.speed_units = speed_units
 
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-      if self.enableLongControl:
+      _use_pedal = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
+      if self.enableLongControl and _use_pedal:
         # Pedal mode active: use software-managed target speed (Tinkla PCC_module)
         ret.cruiseState.speed = self.pedal_speed_kph * CV.KPH_TO_MS
       else:
-        # Lateral-only or stock cruise fallback: read dashboard speed.
+        # Lateral-only, stock cruise fallback, or not engaged: read dashboard speed.
         # When stock CC is active DI_digitalSpeed shows the set speed;
         # when CC is off it shows current speed (harmless placeholder).
         if speed_units == "KPH":
@@ -369,9 +365,13 @@ class CarState(CarStateBase):
       curr_time_ms = _current_time_millis()
       use_pedal = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
       pedal_factor = float(tinkla_conf.pedal_factor) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else 1.0
-      # Allow pedal long only when pedal hardware is enabled and transform is valid.
       pedal_transform_valid = math.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
+      # Tinkla-style mutual exclusion (LONG_module.py lines 114-119):
+      #   pedal_long_allowed = pedal hardware specifically can control longitudinal
+      #   long_control_allowed = ANY longitudinal source is available (pedal OR stock cruise)
+      # When !use_pedal, stock cruise is the longitudinal source (like Tinkla ACC_module).
       pedal_long_allowed = use_pedal and pedal_transform_valid
+      long_control_allowed = (not use_pedal) or pedal_transform_valid
       
       buttonEvents = []
       
@@ -384,7 +384,7 @@ class CarState(CarStateBase):
       # With pedal (use_pedal=True):
       #   Double pull → pedal longitudinal (openpilot controls accel/decel)
       # Without pedal (use_pedal=False):
-      #   Single pull → lateral only + CC cancel (prevents stock cruise)
+      #   Single pull → lateral only (stock cruise stays off naturally)
       #   Double pull → lateral + stock cruise engages normally
       #
       # CANCEL always disables everything.
@@ -417,21 +417,20 @@ class CarState(CarStateBase):
           )
           
           if double_pull:
-            # Double pull detected.
+            # Double pull detected — enable lateral + longitudinal.
+            # long_control_allowed is True for both pedal and non-pedal modes
+            # (Tinkla LONG_module pattern: PCC or ACC, mutually exclusive).
             self.cruiseEnabled = True
             self.pending_enable = False
-            self.enableLongControl = pedal_long_allowed
-            self.enableJustCC = not pedal_long_allowed
+            self.enableLongControl = long_control_allowed
+            self.enableJustCC = not long_control_allowed
             if pedal_long_allowed:
               self.longCtrlEvent = "pccEnabled"
               # Capture target speed (Tinkla PCC_module.py line 172-178)
               speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
               current_speed_kph = int(ret.vEgo * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-              # Match Tinkla: latch to current rounded speed (or speed-limit target),
-              # do not force a minimum speed on engagement.
               self.pedal_speed_kph = max(current_speed_kph, 0.0)
             else:
-              # Safety gate: pedal long requires completed calibration.
               self.pedal_speed_kph = 0.0
           else:
             # First pull - engage lateral immediately, wait for possible double
@@ -443,15 +442,12 @@ class CarState(CarStateBase):
             self.pending_enable = True
             if was_long_active:
               self.longCtrlEvent = "pccDisabled"
-            # Non-pedal mode: cancel stock CC immediately so it doesn't latch
-            if not use_pedal:
-              self.preap_need_cc_cancel = True
         else:
-          # Double-pull disabled: single pull = full control unless pedal calibration gate blocks long.
+          # Double-pull disabled: single pull = full control (pedal or stock cruise).
           self.cruiseEnabled = True
           self.pending_enable = False
-          self.enableLongControl = pedal_long_allowed
-          self.enableJustCC = not pedal_long_allowed
+          self.enableLongControl = long_control_allowed
+          self.enableJustCC = not long_control_allowed
           if pedal_long_allowed:
             # Capture target speed
             speed_uom_kph = CV.MPH_TO_KPH if self.speed_units == "MPH" else 1.0
@@ -634,6 +630,11 @@ class CarState(CarStateBase):
 
     # Propagate max regen flag from carcontroller (set in previous frame)
     ret.pedalMaxRegen = self.pccEvent == "pedalMaxRegen"
+
+    # Expose pedal-specific long control status for selfdrived alerts.
+    # True only when pedal hardware is the longitudinal source (not stock cruise).
+    _use_pedal_flag = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
+    ret.pedalLongActive = self.enableLongControl and _use_pedal_flag
 
     return ret
 

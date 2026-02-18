@@ -206,6 +206,7 @@ struct CarState {
   lowSpeedAlert @56 :Bool;  # lost steering control due to a dynamic min steering speed
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
   pedalMaxRegen @61 :Bool;  # pedal at max regen, driver should use brake for more decel
+  pedalLongActive @62 :Bool;  # Pre-AP pedal longitudinal mode is active (enableLongControl)
 
   # cruise state
   cruiseState @10 :CruiseState;
