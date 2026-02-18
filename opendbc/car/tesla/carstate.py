@@ -434,8 +434,18 @@ class CarState(CarStateBase):
               # Safety gate: pedal long requires completed calibration.
               self.pedal_speed_kph = 0.0
           else:
-            # First pull - mark as pending, wait for possible second pull
+            # First pull - engage lateral immediately, wait for possible double
+            was_long_active = self.enableLongControl
+            self.cruiseEnabled = True
+            self.enableLongControl = False
+            self.enableJustCC = True
+            self.pedal_speed_kph = 0.0
             self.pending_enable = True
+            if was_long_active:
+              self.longCtrlEvent = "pccDisabled"
+            # Non-pedal mode: cancel stock CC immediately so it doesn't latch
+            if not use_pedal:
+              self.preap_need_cc_cancel = True
         else:
           # Double-pull disabled: single pull = full control unless pedal calibration gate blocks long.
           self.cruiseEnabled = True
@@ -523,19 +533,12 @@ class CarState(CarStateBase):
         
         buttonEvents.append(be)
       
-      # Check for single-pull timeout (window passed without second pull)
+      # Double-pull window expired — lateral is already engaged from the first
+      # pull, so just clear the pending flag.
       if self.pending_enable:
         time_since_pull = curr_time_ms - self.stalk_pull_time_ms
         if time_since_pull > self.double_pull_window_ms:
-          # Single pull confirmed - enable steering only (no longitudinal)
-          self.cruiseEnabled = True
-          self.enableLongControl = False
-          self.enableJustCC = True
-          self.pedal_speed_kph = 0.0
           self.pending_enable = False
-          # Non-pedal mode: send one-shot CC cancel so stock cruise doesn't latch
-          if not use_pedal:
-            self.preap_need_cc_cancel = True
 
       # Brake press drops longitudinal persistently while keeping lateral engaged.
       # In pedal mode: software drops long and emits pccDisabled event.
