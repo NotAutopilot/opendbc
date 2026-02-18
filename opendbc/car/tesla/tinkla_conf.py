@@ -30,14 +30,10 @@ CONFIG_FILE = "/data/tinkla_params.json"
 # Default values for all parameters
 DEFAULT_CONFIG = {
   # Control Modes
-  'hso_enabled': True,
-  'hso_numb_period': 1.5,
   'double_pull_window_ms': 750,  # 750ms - matches Tinkla's STALK_DOUBLE_PULL_MS
   # Longitudinal
   'use_pedal': False,
   'pedal_calibrated': False,
-  'acc_spam_enabled': True,
-  'acc_spam_cooldown_ms': 400,
   'accel_profile': 'Chill',
   # Pedal Hardware
   'pedal_can_zero': False,
@@ -297,40 +293,6 @@ class TinklaConf:
     self._put('pedal_can_zero', bool(value))
   
   # ============================================
-  # HSO (Human Steering Override) Parameters
-  # ============================================
-  
-  @property
-  def hso_enabled(self) -> bool:
-    """
-    True if Human Steering Override is enabled.
-    
-    When enabled, driver can take over steering wheel without
-    disengaging OpenPilot. After release + delay, steering resumes.
-    """
-    return self._get('hso_enabled', True)
-  
-  @hso_enabled.setter
-  def hso_enabled(self, value: bool) -> None:
-    self._put('hso_enabled', bool(value))
-  
-  @property
-  def hso_numb_period(self) -> float:
-    """
-    HSO resume delay in seconds.
-    
-    After driver releases steering wheel, wait this long before
-    resuming lateral control. Prevents jerky re-engagement.
-    Default: 1.5 seconds
-    """
-    return float(self._get('hso_numb_period', 1.5))
-  
-  @hso_numb_period.setter
-  def hso_numb_period(self, value: float) -> None:
-    # Clamp to 0.5 - 5.0 seconds
-    self._put('hso_numb_period', max(0.5, min(5.0, float(value))))
-  
-  # ============================================
   # Double-Pull Engagement Parameters
   # ============================================
   
@@ -358,38 +320,6 @@ class TinklaConf:
     # Clamp to 300 - 1500 ms
     self._put('double_pull_window_ms', max(300, min(1500, int(value))))
   
-  # ============================================
-  # ACC Emulation (Cruise Stalk Spamming)
-  # ============================================
-  
-  @property
-  def acc_spam_enabled(self) -> bool:
-    """
-    True if ACC stalk spamming is enabled for longitudinal control.
-    
-    This is the fallback mode when Comma Pedal is not available.
-    Only used when use_pedal is False.
-    """
-    return self._get('acc_spam_enabled', True)
-  
-  @acc_spam_enabled.setter
-  def acc_spam_enabled(self, value: bool) -> None:
-    self._put('acc_spam_enabled', bool(value))
-  
-  @property
-  def acc_spam_cooldown_ms(self) -> int:
-    """
-    Minimum time between ACC stalk messages in milliseconds.
-    Prevents flooding the CAN bus.
-    Default: 400ms
-    """
-    return int(self._get('acc_spam_cooldown_ms', 400))
-  
-  @acc_spam_cooldown_ms.setter
-  def acc_spam_cooldown_ms(self, value: int) -> None:
-    # Clamp to 200 - 1000 ms
-    self._put('acc_spam_cooldown_ms', max(200, min(1000, int(value))))
-
   @property
   def accel_profile(self) -> str:
     """
@@ -538,14 +468,10 @@ class TinklaConf:
     print("")
     print("  [CONTROL MODES]")
     print(f"    Double-Pull Mode:     ON (always enabled)")
-    print(f"    HSO Enabled:          {'ON' if self.hso_enabled else 'OFF'}")
-    print(f"    HSO Resume Delay:     {self.hso_numb_period}s")
     print("")
     print("  [LONGITUDINAL]")
     print(f"    Pedal Enabled:        {'ON' if self.use_pedal else 'OFF'}")
     print(f"    Pedal Calibrated:     {'YES' if self.pedal_calibrated else 'NO'}")
-    print(f"    ACC Spam Enabled:     {'ON' if self.acc_spam_enabled else 'OFF'}")
-    print(f"    ACC Spam Cooldown:    {self.acc_spam_cooldown_ms}ms")
     print(f"    Accel Profile:        {self.accel_profile}")
     print("")
     print("  [PEDAL CALIBRATION]")
@@ -570,13 +496,9 @@ class TinklaConf:
     return {
       # Control Modes (double_pull is always ON, not configurable)
       'double_pull_window_ms': self.double_pull_window_ms,
-      'hso_enabled': self.hso_enabled,
-      'hso_numb_period': self.hso_numb_period,
       # Longitudinal
       'use_pedal': self.use_pedal,
       'pedal_calibrated': self.pedal_calibrated,
-      'acc_spam_enabled': self.acc_spam_enabled,
-      'acc_spam_cooldown_ms': self.acc_spam_cooldown_ms,
       'accel_profile': self.accel_profile,
       # Pedal Calibration
       'pedal_min': self.pedal_min,

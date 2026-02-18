@@ -9,14 +9,8 @@ Storage: openpilot Params system (params_keys.h)
 
 
 class NAPParamKeys:
-  # Control Overrides
-  HSO_ENABLED = "NAPHSOEnabled"
-  HSO_NUMB_PERIOD = "NAPHSONumbPeriod"
-  HAO_ENABLED = "NAPHAOEnabled"
-
   # Longitudinal Control
   PEDAL_ENABLED = "NAPPedalEnabled"
-  DISABLE_CRUISE_CONTROL = "NAPDisableCruiseControl"
   FOLLOW_DISTANCE = "NAPFollowDistance"
 
   # Pedal Hardware
@@ -42,11 +36,7 @@ class NAPParamKeys:
 
 # Default values matching params_keys.h declarations
 DEFAULTS = {
-  NAPParamKeys.HSO_ENABLED: True,
-  NAPParamKeys.HSO_NUMB_PERIOD: 1.5,
-  NAPParamKeys.HAO_ENABLED: False,
   NAPParamKeys.PEDAL_ENABLED: False,
-  NAPParamKeys.DISABLE_CRUISE_CONTROL: False,
   NAPParamKeys.FOLLOW_DISTANCE: 2,
   NAPParamKeys.PEDAL_PROFILE: 4,
   NAPParamKeys.PEDAL_CAN_BUS: 2,

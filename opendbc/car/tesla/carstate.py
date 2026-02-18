@@ -18,10 +18,6 @@ except ImportError:
 
 PEDAL_TIMEOUT_MS = 500
 
-# HSO (Human Steering Override) default constants (fallback if tinkla_conf unavailable)
-HSO_HANDS_ON_LIMIT = 2.0    # hands_on_level threshold to trigger HSO
-HSO_NUMB_PERIOD_S = 1.5     # Seconds to delay steering reengagement after HSO
-
 ButtonType = structs.CarState.ButtonEvent.Type
 
 
@@ -100,34 +96,19 @@ class CarState(CarStateBase):
     # Torque level tracking (for pedal zero learning)
     self.torqueLevel = 0.0
     
-    # ============================================
-    # HSO (Human Steering Override) State
-    # Ported from Tinkla's HSO_module.py
-    # ============================================
-    # When driver takes control of steering wheel above threshold,
-    # we pause lateral control (zero torque) WITHOUT disengaging.
-    # After release + delay, steering automatically resumes.
-    self.human_control = False              # True when HSO is active
-    self.frame_human_steered = 0            # Frame when HSO was triggered
-    self.hso_steering_pressed = False       # True if hands_on_level >= threshold
-    
-    # Read HSO settings from persistent config (or use defaults)
+    # Read engagement settings from persistent config (or use defaults)
     if TINKLA_CONF_AVAILABLE and tinkla_conf is not None:
-      self.enableHSO = tinkla_conf.hso_enabled
-      self.hso_numb_period = tinkla_conf.hso_numb_period
       self.enableDoublePull = tinkla_conf.double_pull_enabled
       self.double_pull_window_ms = tinkla_conf.double_pull_window_ms
     else:
-      self.enableHSO = True                   # Default ON for safety
-      self.hso_numb_period = HSO_NUMB_PERIOD_S  # Default 1.5s
       self.enableDoublePull = True            # Default ON for Pre-AP
       self.double_pull_window_ms = STALK_DOUBLE_PULL_MS  # Default 750ms (Tinkla)
-    
-    self.hands_on_limit = HSO_HANDS_ON_LIMIT  # hands_on_level threshold (always 2.0)
-    
-    # Turn signal state (needed for HSO logic)
-    self.turn_signal_stalk_state = 0
-    
+
+    # Stock cruise cancel flag (non-pedal mode):
+    # Set True on single-pull timeout when !use_pedal so carcontroller
+    # sends a one-shot CC cancel to prevent stock cruise from latching.
+    self.preap_need_cc_cancel = False
+
     # ============================================
     # Alert Event (Tinkla-style)
     # Set this to an event name string when state changes
@@ -317,9 +298,17 @@ class CarState(CarStateBase):
       self.speed_units = speed_units
 
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-      # Pre-AP: use software-managed target speed (like Tinkla PCC_module)
-      # DI_digitalSpeed shows CURRENT speed, not a target. Pre-AP has no stock cruise.
-      ret.cruiseState.speed = self.pedal_speed_kph * CV.KPH_TO_MS
+      if self.enableLongControl:
+        # Pedal mode active: use software-managed target speed (Tinkla PCC_module)
+        ret.cruiseState.speed = self.pedal_speed_kph * CV.KPH_TO_MS
+      else:
+        # Lateral-only or stock cruise fallback: read dashboard speed.
+        # When stock CC is active DI_digitalSpeed shows the set speed;
+        # when CC is off it shows current speed (harmless placeholder).
+        if speed_units == "KPH":
+          ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
+        elif speed_units == "MPH":
+          ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
     else:
       if speed_units == "KPH":
         ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
@@ -371,43 +360,6 @@ class CarState(CarStateBase):
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
 
-    # ============================================
-    # HSO (Human Steering Override) Logic - Pre-AP
-    # Ported from Tinkla's HSO_module.py
-    # ============================================
-    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-      # Read turn signal stalk position
-      try:
-        stalk_stat = cp_chassis.vl["STW_ACTN_RQ"].get("TurnIndLvr_Stat", 0)
-        self.turn_signal_stalk_state = 0 if stalk_stat == 3 else int(stalk_stat)
-      except Exception:
-        self.turn_signal_stalk_state = 0
-      
-      # Check if driver is overriding steering
-      self.hso_steering_pressed = self.hands_on_level >= self.hands_on_limit
-      
-      # HSO state machine (from Tinkla HSO_module.py)
-      # This runs at 100Hz, so hso_numb_period * 100 = frames to wait
-      frame = int(_current_time_millis() / 10)  # Approximate frame count
-      
-      if self.enableHSO and self.cruiseEnabled:
-        if self.hso_steering_pressed:
-          # Driver taking control - record frame
-          self.frame_human_steered = frame
-        elif (frame - self.frame_human_steered < (self.hso_numb_period * 100)) and (self.turn_signal_stalk_state > 0):
-          # Turn signal stalk is held - extend HSO period
-          self.frame_human_steered = frame
-        elif (frame - self.frame_human_steered < (self.hso_numb_period * 100)):
-          # Within numb period - check if steering angle differs significantly from requested
-          # If so, driver is still steering, extend the period
-          # (Simplified: we just stay in HSO mode during numb period)
-          pass
-        
-        # Set human_control if within numb period
-        self.human_control = (frame - self.frame_human_steered) < (self.hso_numb_period * 100)
-      else:
-        self.human_control = False
-    
     # Buttons # ToDo: add Gap adjust button
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
       self.prev_cruise_buttons = self.cruise_buttons
@@ -417,28 +369,25 @@ class CarState(CarStateBase):
       curr_time_ms = _current_time_millis()
       use_pedal = bool(tinkla_conf.use_pedal) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else False
       pedal_factor = float(tinkla_conf.pedal_factor) if (TINKLA_CONF_AVAILABLE and tinkla_conf is not None) else 1.0
-      # Allow long if pedal transform is numerically valid; only block when transform is broken.
+      # Allow pedal long only when pedal hardware is enabled and transform is valid.
       pedal_transform_valid = math.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
-      pedal_long_allowed = (not use_pedal) or pedal_transform_valid
+      pedal_long_allowed = use_pedal and pedal_transform_valid
       
       buttonEvents = []
       
       # ==============================================
       # Double-Pull State Machine (Tinkla-style)
       # ==============================================
-      # When enableDoublePull is True:
-      #   Single pull = Lateral only (steering)
-      #   Double pull within window = Full control (steering + longitudinal)
-      # When enableDoublePull is False:
-      #   Single pull = Full control (like stock OpenPilot)
+      # Single pull = Lateral only (steering)
+      # Double pull = Lateral + longitudinal
       #
-      # Logic flow:
-      # 1. On MAIN press: record time, wait to see if double-pull
-      # 2. If second MAIN within window: enable full control
-      # 3. If window passes without second pull: enable steering only
-      # 4. CANCEL always disables everything
+      # With pedal (use_pedal=True):
+      #   Double pull → pedal longitudinal (openpilot controls accel/decel)
+      # Without pedal (use_pedal=False):
+      #   Single pull → lateral only + CC cancel (prevents stock cruise)
+      #   Double pull → lateral + stock cruise engages normally
       #
-      # CRITICAL: Use 2000ms window (relaxed timing for testing)
+      # CANCEL always disables everything.
       # ==============================================
       
       # ==============================================
@@ -584,9 +533,15 @@ class CarState(CarStateBase):
           self.enableJustCC = True
           self.pedal_speed_kph = 0.0
           self.pending_enable = False
+          # Non-pedal mode: send one-shot CC cancel so stock cruise doesn't latch
+          if not use_pedal:
+            self.preap_need_cc_cancel = True
 
-      # In pedal mode, brake press should drop longitudinal persistently while
-      # keeping lateral engaged (Tinkla-style steering-only transition).
+      # Brake press drops longitudinal persistently while keeping lateral engaged.
+      # In pedal mode: software drops long and emits pccDisabled event.
+      # In non-pedal mode: stock CC handles its own brake disengage.
+      # Either way, suppress brakePressed so openpilot's generic brake-disengage
+      # path doesn't kill lateral.
       brake_rising_edge = real_brake_pressed and not self.preap_brake_pressed_prev
       if use_pedal:
         if brake_rising_edge and self.cruiseEnabled and self.enableLongControl:
@@ -595,8 +550,7 @@ class CarState(CarStateBase):
           self.pending_enable = False
           self.pedal_speed_kph = 0.0
           self.longCtrlEvent = "pccDisabled"
-        # Prevent generic openpilot brake-disengage path from toggling state.
-        ret.brakePressed = False
+      ret.brakePressed = False
       
       ret.buttonEvents = buttonEvents
       
