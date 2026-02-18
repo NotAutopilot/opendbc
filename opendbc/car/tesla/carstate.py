@@ -5,6 +5,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
+from opendbc.car.carlog import carlog
 from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS, CruiseButtons, STALK_DOUBLE_PULL_MS
 
 # Import Tinkla configuration (dynamic params)
@@ -403,12 +404,20 @@ class CarState(CarStateBase):
       # ==============================================
       
       # MAIN button: Rising edge detection (Tinkla pattern)
-      if (self.cruise_buttons == CruiseButtons.MAIN 
+      if (self.cruise_buttons == CruiseButtons.MAIN
           and self.prev_cruise_buttons != CruiseButtons.MAIN):
+        carlog.warning("STALK MAIN pull detected | steerFault=%s doorOpen=%s gear=%s seatbelt=%s "
+                       "cruiseEnabled=%s enableLong=%s enableJustCC=%s pending=%s "
+                       "use_pedal=%s long_allowed=%s doublePull=%s",
+                       ret.steerFaultTemporary, ret.doorOpen, ret.gearShifter,
+                       ret.seatbeltUnlatched, self.cruiseEnabled, self.enableLongControl,
+                       self.enableJustCC, self.pending_enable,
+                       use_pedal, long_control_allowed, self.enableDoublePull)
         # Ignore engage pulls while EPS reports a temporary steering fault.
         # Otherwise cruiseEnabled can become True while entry is blocked, leaving
         # no fresh False->True edge for pcmEnable once the fault clears.
         if ret.steerFaultTemporary:
+          carlog.warning("STALK MAIN pull DROPPED — steerFaultTemporary active")
           self.pending_enable = False
         elif self.enableDoublePull:
           # Update timing FIRST, then check (order matches Tinkla)
@@ -420,6 +429,9 @@ class CarState(CarStateBase):
           )
           
           if double_pull:
+            carlog.warning("STALK double-pull detected (dt=%dms, window=%dms)",
+                           self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms,
+                           self.double_pull_window_ms)
             # Double pull detected — enable lateral + longitudinal.
             # long_control_allowed is True for both pedal and non-pedal modes
             # (Tinkla LONG_module pattern: PCC or ACC, mutually exclusive).
@@ -439,6 +451,8 @@ class CarState(CarStateBase):
                 self.preap_cc_engage_needed = True
                 self.preap_last_cc_spoof_ms = curr_time_ms
           else:
+            carlog.warning("STALK first pull — lateral only, waiting for double (window=%dms)",
+                           self.double_pull_window_ms)
             # First pull - engage lateral immediately, wait for possible double
             was_long_active = self.enableLongControl
             self.cruiseEnabled = True
@@ -453,6 +467,7 @@ class CarState(CarStateBase):
               self.preap_last_cc_spoof_ms = curr_time_ms
         else:
           # Double-pull disabled: single pull = full control (pedal or stock cruise).
+          carlog.warning("STALK single-pull engage (doublePull disabled) — full control")
           self.cruiseEnabled = True
           self.pending_enable = False
           self.enableLongControl = long_control_allowed
@@ -471,6 +486,7 @@ class CarState(CarStateBase):
 
       # General button event handling (for UI/buttonEvents)
       if self.cruise_buttons != self.prev_cruise_buttons:
+        carlog.warning("STALK button change: %d -> %d", self.prev_cruise_buttons, self.cruise_buttons)
         be = structs.CarState.ButtonEvent()
         be.pressed = self.cruise_buttons != CruiseButtons.IDLE
         
@@ -492,6 +508,7 @@ class CarState(CarStateBase):
             or ((curr_time_ms - self.preap_last_cc_spoof_ms) < 300)
           )
           if not is_possible_auto_cancel:
+            carlog.warning("STALK CANCEL — disabling all control")
             be.type = ButtonType.cancel
             was_long_active = self.enableLongControl
             self.cruiseEnabled = False
@@ -562,6 +579,7 @@ class CarState(CarStateBase):
       brake_rising_edge = real_brake_pressed and not self.preap_brake_pressed_prev
       if use_pedal:
         if brake_rising_edge and self.cruiseEnabled and self.enableLongControl:
+          carlog.warning("BRAKE rising edge — dropping longitudinal, keeping lateral")
           self.enableLongControl = False
           self.enableJustCC = True
           self.pending_enable = False
@@ -577,6 +595,8 @@ class CarState(CarStateBase):
 
       # If we can't engage, reset our state
       if not can_engage and self.cruiseEnabled:
+        carlog.warning("ENGAGE BLOCKED — can_engage=False: doorOpen=%s gear=%s seatbelt=%s | resetting cruiseEnabled",
+                       ret.doorOpen, ret.gearShifter, ret.seatbeltUnlatched)
         self.cruiseEnabled = False
         self.enableLongControl = False
         self.enableJustCC = False
