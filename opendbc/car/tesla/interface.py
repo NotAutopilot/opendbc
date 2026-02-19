@@ -34,18 +34,18 @@ class CarInterface(CarInterfaceBase):
 
   @staticmethod
   def get_pid_accel_limits(CP, current_speed, cruise_speed):
-    # Match Tinkla behavior on Pre-AP pedal cars using profile-selectable
-    # accel envelopes (Chill / Standard / MadMax).
+    # Pre-AP pedal: ALWAYS return pedal-safe limits, never fall through to
+    # base class (-3.5, 2.0) which causes WOT.  Use profile-selectable
+    # envelopes (Chill / Standard / MadMax) when tinkla_conf is available,
+    # otherwise fall back to the conservative Chill envelope.
     if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-      use_pedal = bool(tinkla_conf.use_pedal) if tinkla_conf is not None else False
-      if use_pedal:
-        accel_bp = ACCEL_LOOKUP_BP_FALLBACK
-        accel_profile_values = ACCEL_MAX_LOOKUP_V_FALLBACK
-        if tinkla_conf is not None:
-          accel_bp = ACCEL_LOOKUP_BP
-          accel_profile_values = tinkla_conf.get_accel_profile_values()
-        a_max = float(np.interp(current_speed, accel_bp, accel_profile_values))
-        return -1.5, a_max
+      accel_bp = ACCEL_LOOKUP_BP_FALLBACK
+      accel_profile_values = ACCEL_MAX_LOOKUP_V_FALLBACK
+      if tinkla_conf is not None:
+        accel_bp = ACCEL_LOOKUP_BP
+        accel_profile_values = tinkla_conf.get_accel_profile_values()
+      a_max = float(np.interp(current_speed, accel_bp, accel_profile_values))
+      return -1.5, a_max
 
     return CarInterfaceBase.get_pid_accel_limits(CP, current_speed, cruise_speed)
 
@@ -118,6 +118,10 @@ class CarInterface(CarInterfaceBase):
         ret.longitudinalTuning.kpV = PEDAL_LONG_KP_V
         ret.longitudinalTuning.kiBP = PEDAL_LONG_K_BP
         ret.longitudinalTuning.kiV = PEDAL_LONG_KI_V
+        # Attenuate feedforward to 25% of a_target to prevent WOT spike at engagement.
+        # Matches OPGM Bolt pedal tune — the integral ramps up smoothly over ~1-2s instead
+        # of stepping to full target on frame 1.
+        ret.longitudinalTuning.kf = 0.25
       else:
         ret.longitudinalTuning.kpBP = [0.0]
         ret.longitudinalTuning.kpV = [0.0]
