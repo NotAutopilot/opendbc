@@ -121,7 +121,10 @@ class CarInterface(CarInterfaceBase):
         # Attenuate feedforward to 25% of a_target to prevent WOT spike at engagement.
         # Matches OPGM Bolt pedal tune — the integral ramps up smoothly over ~1-2s instead
         # of stepping to full target on frame 1.
-        ret.longitudinalTuning.kf = 0.25
+        try:
+          ret.longitudinalTuning.kf = 0.25
+        except AttributeError:
+          pass  # kf field not available in device capnp schema
       else:
         ret.longitudinalTuning.kpBP = [0.0]
         ret.longitudinalTuning.kpV = [0.0]
