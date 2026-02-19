@@ -1,7 +1,6 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus
-from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.carlog import carlog
@@ -31,10 +30,6 @@ try:
   CRUISE_BUTTONS_AVAILABLE = True
 except ImportError:
   CRUISE_BUTTONS_AVAILABLE = False
-
-# Zero-torque learning thresholds (from Tinkla PCC_module.py)
-TORQUE_LEVEL_ACC = 0.0
-TORQUE_LEVEL_DECEL = -30.0
 
 # Fallback pedal constants (used when tinkla_conf unavailable)
 # From Tinkla tunes.py
@@ -70,10 +65,6 @@ class CarController(CarControllerBase):
     # Pedal Control State (Tinkla PCC_module port)
     # ============================================
     self.prev_pedal_di = 0.0      # Previous pedal value in DI units
-    self.pedal_for_zero_torque = 0.0  # Learned zero-torque pedal position
-    self.last_torque_for_zero = TORQUE_LEVEL_DECEL
-    self.last_apid_for_zero = 0.0
-    self.prev_a_pid = 0.0
     self.prev_v_ego = 0.0         # Previous vehicle speed
     
     # State tracking
@@ -227,7 +218,6 @@ class CarController(CarControllerBase):
               else:
                 accel_request = float(actuators.accel)
                 target_speed_kph = float(getattr(CS, "pedal_speed_kph", 0.0))
-                self._update_zero_torque_learning(CS, CS.out.vEgo, accel_request)
                 pedal_cmd = self._calc_pedal_command(accel_request, CS.out.vEgo, target_speed_kph)
                 can_sends.append(self.tesla_can.create_pedal_command(pedal_cmd, enable=1))
 
@@ -301,8 +291,7 @@ class CarController(CarControllerBase):
 
     Simple linear mapping from accel (m/s^2) to DI pedal units, then through the
     Tinkla calibration transform to pedal voltage. Trim profiles (P85+/P85/S85/S60)
-    are applied as a speed-dependent max-pedal clamp. Zero-torque learning provides
-    the coast point at speed.
+    are applied as a speed-dependent max-pedal clamp.
 
     With the modern accel-error PI (kp=0, ki=speed-dep, implicit kf=1.0),
     actuators.accel already contains a_target + integral correction. This mapping
@@ -323,8 +312,13 @@ class CarController(CarControllerBase):
     # Speed-dependent regen limit (less regen at low speed)
     regen_decel = float(interp(v_ego, [10., 20.], [-0.8, -1.45]))
 
-    # Zero-torque pedal position (learned at speed, default at low speed)
-    zero_accel = self.pedal_for_zero_torque if v_ego >= 5.0 * 0.44704 else 0.0
+    # Zero-torque pedal position: always 0.0.  The PI integral in longcontrol
+    # handles steady-state offset (hills, wind) naturally.  The previous
+    # zero-torque *learning* created a runaway positive-feedback cascade on
+    # first engage after gas override — each learn step shifted the interp
+    # midpoint upward, producing more gas, which raised torque closer to zero,
+    # triggering another learn step (6 steps in 120 ms, GAS_CMD 10→40).
+    zero_accel = 0.0
 
     # Linear mapping: accel (m/s^2) -> DI pedal units
     accel_bp = [regen_decel, 0.0, ACCEL_MAX]
@@ -337,27 +331,12 @@ class CarController(CarControllerBase):
     # Transform DI -> pedal voltage via calibration
     pedal_cmd = tinkla_conf.di_to_pedal(pedal_di)
 
-    # Save state for zero-torque learning
     self.prev_pedal_di = pedal_di
     self.prev_v_ego = v_ego
 
     return pedal_cmd
 
-  def _update_zero_torque_learning(self, CS, v_ego: float, accel_request: float) -> None:
-    """
-    Learn pedal value that corresponds to near-zero drive torque at speed.
-    Matches Tinkla PCC zero-torque learning behavior.
-    """
-    torque_level = float(getattr(CS, "torqueLevel", 0.0))
-    if (
-      torque_level < TORQUE_LEVEL_ACC
-      and torque_level > TORQUE_LEVEL_DECEL
-      and v_ego >= 10.0 * CV.MPH_TO_MS
-      and abs(torque_level) < abs(self.last_torque_for_zero)
-    ):
-      self.pedal_for_zero_torque = self.prev_pedal_di
-      self.last_torque_for_zero = torque_level
-      self.last_apid_for_zero = self.prev_a_pid
-
-    self.prev_a_pid = accel_request
+  # Zero-torque learning removed: caused runaway positive-feedback cascade on
+  # first engage (see _calc_pedal_command comment).  The PI integral handles
+  # steady-state offset instead.
 
