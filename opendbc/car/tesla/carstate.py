@@ -413,13 +413,12 @@ class CarState(CarStateBase):
                        ret.seatbeltUnlatched, self.cruiseEnabled, self.enableLongControl,
                        self.enableJustCC, self.pending_enable,
                        use_pedal, long_control_allowed, self.enableDoublePull)
-        # Ignore engage pulls while EPS reports a temporary steering fault.
-        # Otherwise cruiseEnabled can become True while entry is blocked, leaving
-        # no fresh False->True edge for pcmEnable once the fault clears.
-        if ret.steerFaultTemporary:
-          carlog.warning("STALK MAIN pull DROPPED — steerFaultTemporary active")
-          self.pending_enable = False
-        elif self.enableDoublePull:
+        # On Pre-AP, EAC_INHIBITED is the normal EPS idle state (no AP ECU present).
+        # The EPS transitions INHIBITED -> AVAILABLE -> ACTIVE once it sees valid
+        # EPAS steer commands from the carcontroller.  Tinkla never gated engagement
+        # on steerFaultTemporary — it let the system engage and suppressed lateral
+        # torque (latActive=False) until the EPS cleared.  We match that behavior.
+        if self.enableDoublePull:
           # Update timing FIRST, then check (order matches Tinkla)
           self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
           self.stalk_pull_time_ms = curr_time_ms
