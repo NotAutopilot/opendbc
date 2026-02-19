@@ -255,7 +255,15 @@ class CarState(CarStateBase):
     
     eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+    # On Pre-AP, EAC_INHIBITED is the normal EPS idle state (no AP ECU present),
+    # not a real fault.  Mapping it to steerFaultTemporary creates a deadlock:
+    # latActive stays False, so DAS_steeringControlType=0 is sent, so the EPS
+    # never transitions to AVAILABLE/ACTIVE.  Only treat it as a temp fault on
+    # AP1+ cars where INHIBITED indicates an actual problem.
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      ret.steerFaultTemporary = False
+    else:
+      ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
   
     # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
     eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
