@@ -410,15 +410,22 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
-// Revert to standard bool signature for blocking only
 static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
   (void)bus_num;
   (void)addr;
-  // We handle forwarding manually in rx_hook.
-  // Here we just block everything we don't want forwarded by DEFAULT mechanism (if any).
-  // OpenPilot usually doesn't forward by default unless configured?
-  // Assuming default is NO forwarding.
-  return false; 
+
+  // Pre-AP has a single panda with nothing on bus 2.  Returning false (allow)
+  // caused safety_fwd_hook to forward EVERY bus-0 message to bus 2, flooding
+  // the dead TX queue (~1 300 overflows/s) and starving bus-0 TX interrupts
+  // so openpilot's 0x488 / 0x214 never reached the wire.
+  if (tesla_preap) {
+    return true;   // block automatic forwarding
+  }
+
+  // HW1/HW2/HW3: allow default bus 0↔2 forwarding for chassis↔party CAN
+  // bridging.  Selective relay-echo blocking is handled by check_relay in
+  // the TX whitelist.
+  return false;
 }
 
 static safety_config tesla_legacy_init(uint16_t param) {
