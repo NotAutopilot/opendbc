@@ -113,6 +113,8 @@ class CarInterface(CarInterfaceBase):
 
       if use_pedal:
         flags |= TeslaSafetyFlags.FLAG_ENABLE_PEDAL
+      if radar_enabled:
+        flags |= TeslaSafetyFlags.FLAG_RADAR_EMULATION
       if radar_behind_nosecone:
         flags |= TeslaSafetyFlags.FLAG_RADAR_BEHIND_NOSECONE
 

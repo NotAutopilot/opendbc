@@ -19,6 +19,7 @@ static bool tesla_hw3 = false;
 static bool tesla_preap = false;
 static bool tesla_enable_pedal = false;
 static bool tesla_radar_behind_nosecone = false;
+static bool tesla_radar_emulation = false;
 
 static int chassis_bus = 0U;
 static int das_control_msg = 0x2bfU;
@@ -89,8 +90,11 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
   int bus_num = GET_BUS(to_fwd);
   int addr = GET_ADDR(to_fwd);
 
-  if (bus_num == 0 && tesla_preap) {
-    // Radar forwarding 0 -> 1
+  if (bus_num == 0 && tesla_preap && tesla_radar_emulation) {
+    // Radar forwarding 0 -> 1 (only when radar emulation is enabled).
+    // Without this gate, ~102 msg/s are sent to dead bus 1 with no ACK device,
+    // causing txBufferOverflow that starves ALL bus TX via can_tx_check_min_slots_free.
+    // Matches tinkla's do_radar_emulation gating.
     if (addr == 0x398) { // GTW_carConfig
         CANPacket_t to_send;
         to_send.returned = 0U;
@@ -410,15 +414,22 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
-// Revert to standard bool signature for blocking only
 static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
   (void)bus_num;
   (void)addr;
-  // We handle forwarding manually in rx_hook.
-  // Here we just block everything we don't want forwarded by DEFAULT mechanism (if any).
-  // OpenPilot usually doesn't forward by default unless configured?
-  // Assuming default is NO forwarding.
-  return false; 
+
+  // Pre-AP has a single panda with nothing on bus 2.  Returning false (allow)
+  // caused safety_fwd_hook to forward EVERY bus-0 message to bus 2, flooding
+  // the dead TX queue (~1 300 overflows/s) and starving bus-0 TX interrupts
+  // so openpilot's 0x488 / 0x214 never reached the wire.
+  if (tesla_preap) {
+    return true;   // block automatic forwarding
+  }
+
+  // HW1/HW2/HW3: allow default bus 0↔2 forwarding for chassis↔party CAN
+  // bridging.  Selective relay-echo blocking is handled by check_relay in
+  // the TX whitelist.
+  return false;
 }
 
 static safety_config tesla_legacy_init(uint16_t param) {
@@ -429,6 +440,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   const int TESLA_FLAG_PREAP = 32;
   const int TESLA_FLAG_ENABLE_PEDAL = 64;
   const int TESLA_FLAG_RADAR_BEHIND_NOSECONE = 128;
+  const int TESLA_FLAG_RADAR_EMULATION = 256;
 
   // Extract flags
   tesla_external_panda = GET_FLAG(param, TESLA_FLAG_EXTERNAL_PANDA);
@@ -438,6 +450,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_preap = GET_FLAG(param, TESLA_FLAG_PREAP);
   tesla_enable_pedal = GET_FLAG(param, TESLA_FLAG_ENABLE_PEDAL);
   tesla_radar_behind_nosecone = GET_FLAG(param, TESLA_FLAG_RADAR_BEHIND_NOSECONE);
+  tesla_radar_emulation = GET_FLAG(param, TESLA_FLAG_RADAR_EMULATION);
 
   if (tesla_radar_behind_nosecone) {
     radar_position = 1;

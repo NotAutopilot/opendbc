@@ -200,10 +200,17 @@ class CarController(CarControllerBase):
             self.preap_engage_pending = True
             CS.preap_cc_engage_needed = False
 
+        # Gate ALL pedal sends on pedal availability.
+        # When pedal is not responding (unplugged or absent), sending 0x551 to a dead
+        # bus fills its TX queue.  can_tx_check_min_slots_free() checks ALL bus queues,
+        # so one full queue blocks USB sendcan for ALL buses — including bus 0 steering.
+        # Matches tinkla: PCC_module._update_pedal_state() gates on pedal_idx changes.
+        pedal_responding = not getattr(CS, 'pedal_timeout', True)
+
         if self.frame % 2 == 0:
            self.prev_enable_long_control = cs_enable_long
 
-           if long_active and pedal_long_allowed:
+           if long_active and pedal_long_allowed and pedal_responding:
              # ============================================
              # Mode 1: Comma Pedal Control
              # Matches Tinkla Pre-AP behavior: always send commands when
@@ -237,7 +244,7 @@ class CarController(CarControllerBase):
               can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
               self.prev_pedal_di = 0.0
 
-           elif use_pedal and not pedal_transform_valid:
+           elif use_pedal and not pedal_transform_valid and pedal_responding:
              # Safety gate: block pedal actuation when pedal transform is invalid.
              idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
              can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
@@ -249,7 +256,7 @@ class CarController(CarControllerBase):
              # Send idle pedal keepalive to prevent firmware fault
              # Tinkla PCC_module.py line 132: sends reset at frame % 50 (2Hz)
              # ============================================
-             if use_pedal:
+             if use_pedal and pedal_responding:
                idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if tinkla_conf else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
                can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
              # Reset state when not active
@@ -268,8 +275,9 @@ class CarController(CarControllerBase):
       # Not openpilotLongitudinalControl - handle cancel
       if CC.cruiseControl.cancel:
         if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-           idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if (TINKLA_AVAILABLE and tinkla_conf) else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
-           can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
+           if not getattr(CS, 'pedal_timeout', True):
+             idle_pedal = tinkla_conf.di_to_pedal(PEDAL_DI_ZERO) if (TINKLA_AVAILABLE and tinkla_conf) else _transform_di_to_pedal(PEDAL_DI_ZERO_DEFAULT)
+             can_sends.append(self.tesla_can.create_pedal_command(idle_pedal, enable=0))
         else:
            cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
            can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
