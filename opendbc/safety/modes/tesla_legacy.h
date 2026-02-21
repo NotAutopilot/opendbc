@@ -19,6 +19,7 @@ static bool tesla_hw3 = false;
 static bool tesla_preap = false;
 static bool tesla_enable_pedal = false;
 static bool tesla_radar_behind_nosecone = false;
+static bool tesla_radar_emulation = false;
 
 static int chassis_bus = 0U;
 static int das_control_msg = 0x2bfU;
@@ -89,11 +90,11 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
   int bus_num = GET_BUS(to_fwd);
   int addr = GET_ADDR(to_fwd);
 
-  if (bus_num == 0 && tesla_preap && tesla_radar_behind_nosecone) {
-    // Radar forwarding 0 -> 1 (only when radar is actually present behind nosecone).
+  if (bus_num == 0 && tesla_preap && tesla_radar_emulation) {
+    // Radar forwarding 0 -> 1 (only when radar emulation is enabled).
     // Without this gate, ~102 msg/s are sent to dead bus 1 with no ACK device,
-    // causing txBufferOverflow that starves bus 0 TX (same mechanism as the
-    // bus 0→2 forwarding bug).  Matches tinkla's do_radar_emulation gating.
+    // causing txBufferOverflow that starves ALL bus TX via can_tx_check_min_slots_free.
+    // Matches tinkla's do_radar_emulation gating.
     if (addr == 0x398) { // GTW_carConfig
         CANPacket_t to_send;
         to_send.returned = 0U;
@@ -439,6 +440,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   const int TESLA_FLAG_PREAP = 32;
   const int TESLA_FLAG_ENABLE_PEDAL = 64;
   const int TESLA_FLAG_RADAR_BEHIND_NOSECONE = 128;
+  const int TESLA_FLAG_RADAR_EMULATION = 256;
 
   // Extract flags
   tesla_external_panda = GET_FLAG(param, TESLA_FLAG_EXTERNAL_PANDA);
@@ -448,6 +450,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_preap = GET_FLAG(param, TESLA_FLAG_PREAP);
   tesla_enable_pedal = GET_FLAG(param, TESLA_FLAG_ENABLE_PEDAL);
   tesla_radar_behind_nosecone = GET_FLAG(param, TESLA_FLAG_RADAR_BEHIND_NOSECONE);
+  tesla_radar_emulation = GET_FLAG(param, TESLA_FLAG_RADAR_EMULATION);
 
   if (tesla_radar_behind_nosecone) {
     radar_position = 1;
