@@ -27,9 +27,9 @@ except ImportError:
 #   relaxed(2)    → smooth and gentle, still usable (old "Chill" was too weak)
 ACCEL_PREAP_BP = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]  # m/s
 ACCEL_PREAP_PROFILES = {
-  0: [0.3, 1.6, 1.9, 1.5, 1.2, 1.0],   # aggressive
-  1: [0.3, 0.9, 1.2, 1.0, 0.8, 0.6],   # standard
-  2: [0.3, 0.85, 1.1, 0.9, 0.75, 0.55], # relaxed
+  0: [1.2, 1.8, 2.0, 1.5, 1.2, 1.0],   # aggressive: strong smooth launch
+  1: [0.8, 1.2, 1.5, 1.2, 0.9, 0.7],   # standard: balanced
+  2: [0.4, 0.9, 1.1, 0.9, 0.75, 0.55], # relaxed: gentle (winter driving)
 }
 
 # Pedal longitudinal tune for modern accel-error PI (see PEDAL_ANALYSIS.md).
@@ -38,7 +38,7 @@ ACCEL_PREAP_PROFILES = {
 # Values derived from OPGM Bolt pedal tune adapted for Tesla DI pedal range.
 PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
 PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
-PEDAL_LONG_KI_V = [0.125, 0.175, 0.225, 0.33]
+PEDAL_LONG_KI_V = [0.20, 0.25, 0.30, 0.40]
 
 
 class CarInterface(CarInterfaceBase):

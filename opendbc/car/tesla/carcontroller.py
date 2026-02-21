@@ -31,6 +31,24 @@ try:
 except ImportError:
   CRUISE_BUTTONS_AVAILABLE = False
 
+# Read openpilot Params for personality toggle (may fail outside device)
+try:
+  from openpilot.common.params import Params as _Params
+  _params = _Params()
+except ImportError:
+  _params = None
+
+# Bolt-style hard regen cutoff thresholds per driving personality.
+# When actuators.accel falls below this threshold, _calc_pedal_command
+# sends max regen (PEDAL_DI_MIN) immediately, bypassing the slow PI ramp.
+# Aggressive: triggers sooner (more responsive braking)
+# Relaxed: triggers later (gentler, safer on slippery surfaces)
+REGEN_CUTOFF_PREAP = {
+  0: -0.3,   # aggressive
+  1: -0.5,   # standard
+  2: -0.7,   # relaxed (winter driving)
+}
+
 # Fallback pedal constants (used when tinkla_conf unavailable)
 # From Tinkla tunes.py
 PEDAL_DI_MIN_DEFAULT = -5
@@ -67,6 +85,10 @@ class CarController(CarControllerBase):
     self.prev_pedal_di = 0.0      # Previous pedal value in DI units
     self.prev_v_ego = 0.0         # Previous vehicle speed
     
+    # Driving personality for regen cutoff thresholds
+    self.personality = 1  # default standard
+    self.personality_refresh_frame = 0
+
     # State tracking
     self.prev_enable_long_control = False
     self.prev_requested_long = False
@@ -134,6 +156,15 @@ class CarController(CarControllerBase):
         # Pre-AP Longitudinal Control (Tinkla port)
         # Pedal at 50Hz (frame % 2) to match Tinkla LONG_module.py line 213
         # ==============================================
+        # Refresh driving personality from Params every ~10s (1000 frames at 100Hz)
+        if self.frame - self.personality_refresh_frame >= 1000:
+          self.personality_refresh_frame = self.frame
+          if _params is not None:
+            try:
+              self.personality = int(_params.get("LongitudinalPersonality", return_default=True))
+            except (TypeError, ValueError):
+              pass
+
         # Get engagement state (used for both pedal and pedal-over-CC)
         cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
         cs_enable_long = getattr(CS, 'enableLongControl', False)
@@ -322,12 +353,22 @@ class CarController(CarControllerBase):
       pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 100.]), -5, 100))
       return _transform_di_to_pedal(pedal_di)
 
+    # Bolt-style hard regen cutoff: when the PI output requests deceleration
+    # beyond the personality threshold, bypass the linear mapping and send
+    # max regen immediately. This gives instant decel response without
+    # waiting for the PI integral to ramp up through kf=0.25 attenuation.
+    regen_cutoff = REGEN_CUTOFF_PREAP.get(self.personality, -0.5)
+    if accel_request < regen_cutoff:
+      self.prev_pedal_di = PEDAL_DI_MIN
+      self.prev_v_ego = v_ego
+      return tinkla_conf.di_to_pedal(PEDAL_DI_MIN)
+
     # Trim-specific max pedal (P85+, P85, S85, S60, Generic)
     pedal_profile = tinkla_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
 
-    # Speed-dependent regen limit (less regen at low speed)
-    regen_decel = float(interp(v_ego, [10., 20.], [-0.8, -1.45]))
+    # Speed-dependent regen limit (more regen available at low city speeds)
+    regen_decel = float(interp(v_ego, [5., 15.], [-1.2, -1.45]))
 
     # Zero-torque pedal position: always 0.0.  The PI integral in longcontrol
     # handles steady-state offset (hills, wind) naturally.  The previous
