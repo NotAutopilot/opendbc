@@ -89,8 +89,11 @@ static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
   int bus_num = GET_BUS(to_fwd);
   int addr = GET_ADDR(to_fwd);
 
-  if (bus_num == 0 && tesla_preap) {
-    // Radar forwarding 0 -> 1
+  if (bus_num == 0 && tesla_preap && tesla_radar_behind_nosecone) {
+    // Radar forwarding 0 -> 1 (only when radar is actually present behind nosecone).
+    // Without this gate, ~102 msg/s are sent to dead bus 1 with no ACK device,
+    // causing txBufferOverflow that starves bus 0 TX (same mechanism as the
+    // bus 0→2 forwarding bug).  Matches tinkla's do_radar_emulation gating.
     if (addr == 0x398) { // GTW_carConfig
         CANPacket_t to_send;
         to_send.returned = 0U;
