@@ -27,9 +27,9 @@ except ImportError:
 #   relaxed(2)    → smooth and gentle, still usable (old "Chill" was too weak)
 ACCEL_PREAP_BP = [0.0, 1.3, 7.5, 15.0, 25.0, 40.0]  # m/s
 ACCEL_PREAP_PROFILES = {
-  0: [1.2, 1.8, 2.0, 1.5, 1.2, 1.0],   # aggressive: strong smooth launch
-  1: [0.8, 1.2, 1.5, 1.2, 0.9, 0.7],   # standard: balanced
-  2: [0.4, 0.9, 1.1, 0.9, 0.75, 0.55], # relaxed: gentle (winter driving)
+  0: [2.5, 2.3, 2.0, 1.5, 1.2, 1.0],   # aggressive: Tinkla AP MadMax low-speed
+  1: [2.2, 2.0, 1.5, 1.2, 0.9, 0.7],   # standard: Tinkla AP Standard low-speed
+  2: [2.0, 1.8, 1.2, 0.9, 0.75, 0.55], # relaxed: Tinkla AP Chill low-speed
 }
 
 # Pedal longitudinal tune for modern accel-error PI (see PEDAL_ANALYSIS.md).

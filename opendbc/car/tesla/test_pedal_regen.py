@@ -44,23 +44,23 @@ class TestAccelProfiles(unittest.TestCase):
   """Verify ACCEL_PREAP_PROFILES standstill values per personality."""
 
   def test_aggressive_standstill(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0], 1.2)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0], 2.5)
 
   def test_standard_standstill(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0], 0.8)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0], 2.2)
 
   def test_relaxed_standstill(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0], 0.4)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0], 2.0)
 
   def test_effective_feedforward_aggressive(self):
-    """With kf=0.25, effective feedforward at standstill should be 0.30."""
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0] * 0.25, 0.30)
+    """With kf=0.25, effective feedforward at standstill should be 0.625."""
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0] * 0.25, 0.625)
 
   def test_effective_feedforward_standard(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0] * 0.25, 0.20)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0] * 0.25, 0.55)
 
   def test_effective_feedforward_relaxed(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0] * 0.25, 0.10)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0] * 0.25, 0.50)
 
   def test_profiles_have_correct_length(self):
     for p in (0, 1, 2):
