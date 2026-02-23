@@ -32,14 +32,15 @@ ACCEL_PREAP_PROFILES = {
   2: [2.0, 1.8, 1.2, 0.9, 0.75, 0.55], # relaxed: Tinkla AP Chill low-speed
 }
 
-# Pedal longitudinal tune for modern accel-error PI (see PEDAL_ANALYSIS.md).
-# kp speed-dependent: modest proportional gain for immediate response to accel error,
-#   kept low at creep to limit jitter from noisy aEgo, higher at highway where noise is small.
-# ki speed-dependent: gentle at creep, stronger at highway for steady-state tracking.
-# Values derived from OPGM Bolt pedal tune adapted for Tesla DI pedal range.
+# Feedforward-dominant longitudinal tune (FrogPilot/OPGM Bolt-inspired).
+# kp=0: no proportional term — eliminates aEgo sensor noise amplification.
+# kf=1.0: full a_target passthrough — the MPC plan (jerk-constrained, smooth)
+#   is the dominant control signal.
+# ki low: slow integral trim handles steady-state offset (hills, wind, regen).
+#   Lower than FP Bolt (0.125-0.33) because our kf=1.0 vs their kf=0.25.
 PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
-PEDAL_LONG_KP_V = [0.1, 0.15, 0.2, 0.25]
-PEDAL_LONG_KI_V = [0.20, 0.25, 0.30, 0.40]
+PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
+PEDAL_LONG_KI_V = [0.05, 0.08, 0.10, 0.15]
 
 
 class CarInterface(CarInterfaceBase):
@@ -136,14 +137,16 @@ class CarInterface(CarInterfaceBase):
         ret.longitudinalTuning.kpV = PEDAL_LONG_KP_V
         ret.longitudinalTuning.kiBP = PEDAL_LONG_K_BP
         ret.longitudinalTuning.kiV = PEDAL_LONG_KI_V
-        # Feedforward at 35% of a_target balances engagement smoothness with braking
-        # responsiveness when closing on a lead vehicle. Proportional gain (kpV)
-        # adds immediate response to speed error so the integral doesn't have to
-        # do all the work.
+        # Full feedforward: a_target passes through 1:1.  The MPC plan is already
+        # jerk-constrained and smooth; the integrator handles residual offset.
+        # Pedal rate limiter in carcontroller prevents WOT-on-engage.
         try:
-          ret.longitudinalTuning.kf = 0.35
+          ret.longitudinalTuning.kf = 1.0
         except AttributeError:
           pass  # kf field not available in device capnp schema
+        # Actuator delay: comma pedal CAN + drivetrain response.  Matches tinkla
+        # (0.5s) and FrogPilot GM pedal (0.5s).  Planner looks 0.55s ahead.
+        ret.longitudinalActuatorDelay = 0.5
       else:
         ret.longitudinalTuning.kpBP = [0.0]
         ret.longitudinalTuning.kpV = [0.0]

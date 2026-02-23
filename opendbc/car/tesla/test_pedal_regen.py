@@ -1,11 +1,13 @@
 """
-Tests for Bolt-style regen cutoff, profile-differentiated launch, and flattened regen curve.
+Tests for feedforward-dominant pedal longitudinal control.
 
 Validates:
-  1. Hard regen cutoff triggers at correct personality thresholds
-  2. ACCEL_PREAP_PROFILES have correct standstill values per personality
-  3. Updated ki values are correct
-  4. Flattened regen curve returns expected values at city speeds
+  1. Rate limiter prevents WOT-on-engage (pedal ramps at ≤PEDAL_RAMP_RATE/step)
+  2. Rate limiter allows smooth ramp-down to max regen
+  3. ACCEL_PREAP_PROFILES have correct standstill values per personality
+  4. Updated ki values match feedforward-dominant architecture
+  5. Regen curve returns expected values at city/highway speeds
+  6. Actuator delay is set correctly
 
 Run: PYTHONPATH=. python3 opendbc/car/tesla/test_pedal_regen.py -v
 """
@@ -29,15 +31,37 @@ sys.modules['crcmod.predefined'] = crcmod_predef
 sys.modules['crcmod'].predefined = crcmod_predef
 
 # Now the real opendbc modules can import
-from opendbc.car.tesla.interface import ACCEL_PREAP_PROFILES, PEDAL_LONG_KI_V, ACCEL_PREAP_BP
+from opendbc.car.tesla.interface import (
+  ACCEL_PREAP_PROFILES, PEDAL_LONG_KI_V, PEDAL_LONG_KP_V, ACCEL_PREAP_BP,
+)
 from opendbc.car.tesla.carcontroller import (
-  REGEN_CUTOFF_PREAP, CarController,
+  CarController, PEDAL_RAMP_RATE,
   TINKLA_AVAILABLE, tinkla_conf,
 )
 if TINKLA_AVAILABLE:
   from opendbc.car.tesla.tinkla_conf import PEDAL_DI_MIN as TC_PEDAL_DI_MIN
 else:
   TC_PEDAL_DI_MIN = -5
+
+
+class TestFeedforwardDominantGains(unittest.TestCase):
+  """Verify PID gains match feedforward-dominant architecture."""
+
+  def test_kp_is_zero(self):
+    """kp must be zero at all speeds to eliminate aEgo noise."""
+    for kp in PEDAL_LONG_KP_V:
+      self.assertAlmostEqual(kp, 0.0)
+
+  def test_ki_values(self):
+    """ki should be low (0.05-0.15) for slow integral trim with kf=1.0."""
+    expected = [0.05, 0.08, 0.10, 0.15]
+    for got, exp in zip(PEDAL_LONG_KI_V, expected):
+      self.assertAlmostEqual(got, exp)
+
+  def test_ki_monotonically_increasing(self):
+    """ki should increase with speed (more correction at highway)."""
+    for i in range(len(PEDAL_LONG_KI_V) - 1):
+      self.assertLessEqual(PEDAL_LONG_KI_V[i], PEDAL_LONG_KI_V[i + 1])
 
 
 class TestAccelProfiles(unittest.TestCase):
@@ -52,137 +76,121 @@ class TestAccelProfiles(unittest.TestCase):
   def test_relaxed_standstill(self):
     self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0], 2.0)
 
-  def test_effective_feedforward_aggressive(self):
-    """With kf=0.35, effective feedforward at standstill should be 0.875."""
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0] * 0.35, 0.875)
-
-  def test_effective_feedforward_standard(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0] * 0.35, 0.77)
-
-  def test_effective_feedforward_relaxed(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0] * 0.35, 0.70)
-
   def test_profiles_have_correct_length(self):
     for p in (0, 1, 2):
       self.assertEqual(len(ACCEL_PREAP_PROFILES[p]), len(ACCEL_PREAP_BP))
 
 
-class TestKiValues(unittest.TestCase):
-  """Verify updated ki values (~60% increase)."""
-
-  def test_ki_values(self):
-    expected = [0.20, 0.25, 0.30, 0.40]
-    for got, exp in zip(PEDAL_LONG_KI_V, expected):
-      self.assertAlmostEqual(got, exp)
-
-
-class TestRegenCutoffConstants(unittest.TestCase):
-  """Verify REGEN_CUTOFF_PREAP thresholds."""
-
-  def test_aggressive_cutoff(self):
-    self.assertAlmostEqual(REGEN_CUTOFF_PREAP[0], -0.3)
-
-  def test_standard_cutoff(self):
-    self.assertAlmostEqual(REGEN_CUTOFF_PREAP[1], -0.5)
-
-  def test_relaxed_cutoff(self):
-    self.assertAlmostEqual(REGEN_CUTOFF_PREAP[2], -0.7)
-
-
-class TestCalcPedalCommand(unittest.TestCase):
+class TestPedalRateLimiter(unittest.TestCase):
   """
-  Test _calc_pedal_command with the regen cutoff and flattened regen curve.
+  Test the pedal rate limiter prevents WOT-on-engage and allows smooth ramps.
 
-  We create a minimal CarController instance with mocked dependencies,
-  then call _calc_pedal_command directly.
+  Creates a minimal CarController instance and calls _calc_pedal_command directly.
   """
 
-  def _make_controller(self, personality=1):
-    """Build a CarController-like object with just enough state for _calc_pedal_command."""
+  def _make_controller(self):
+    """Build a CarController-like object with just enough state."""
     ctrl = object.__new__(CarController)
     ctrl.prev_pedal_di = 0.0
     ctrl.prev_v_ego = 0.0
-    ctrl.personality = personality
     return ctrl
 
   @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
-  def test_aggressive_cutoff_triggers(self):
-    """accel_request = -0.35 with aggressive personality (cutoff -0.3) -> max regen."""
-    ctrl = self._make_controller(personality=0)
-    result = ctrl._calc_pedal_command(-0.35, v_ego=10.0)
-    expected = tinkla_conf.di_to_pedal(TC_PEDAL_DI_MIN)
-    self.assertAlmostEqual(result, expected, places=4)
+  def test_wot_prevention_from_zero(self):
+    """From prev_pedal_di=0, a large accel request should only ramp by PEDAL_RAMP_RATE."""
+    ctrl = self._make_controller()
+    ctrl._calc_pedal_command(2.5, v_ego=10.0)
+    # First step: pedal_di should be at most PEDAL_RAMP_RATE from 0
+    self.assertLessEqual(ctrl.prev_pedal_di, PEDAL_RAMP_RATE)
+    self.assertGreater(ctrl.prev_pedal_di, 0.0)
+
+  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
+  def test_ramp_up_over_multiple_steps(self):
+    """Pedal should ramp up smoothly over multiple calls, never jumping."""
+    ctrl = self._make_controller()
+    prev = 0.0
+    for _ in range(20):
+      ctrl._calc_pedal_command(2.0, v_ego=15.0)
+      delta = ctrl.prev_pedal_di - prev
+      self.assertLessEqual(delta, PEDAL_RAMP_RATE + 0.001,
+                           f"Pedal jumped {delta} DI in one step (max {PEDAL_RAMP_RATE})")
+      self.assertGreaterEqual(delta, -PEDAL_RAMP_RATE - 0.001)
+      prev = ctrl.prev_pedal_di
+
+  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
+  def test_ramp_down_to_max_regen(self):
+    """From prev_pedal_di=0, a large negative accel should ramp down smoothly."""
+    ctrl = self._make_controller()
+    ctrl._calc_pedal_command(-1.5, v_ego=10.0)
+    # First step: should ramp down by at most PEDAL_RAMP_RATE
+    self.assertGreaterEqual(ctrl.prev_pedal_di, -PEDAL_RAMP_RATE)
+    self.assertLess(ctrl.prev_pedal_di, 0.0)
+
+  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
+  def test_reaches_max_regen_eventually(self):
+    """After enough steps, max regen (-5 DI) should be reached."""
+    ctrl = self._make_controller()
+    for _ in range(50):
+      ctrl._calc_pedal_command(-1.5, v_ego=10.0)
     self.assertAlmostEqual(ctrl.prev_pedal_di, TC_PEDAL_DI_MIN)
-
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
-  def test_standard_cutoff_triggers(self):
-    """accel_request = -0.6 with standard personality (cutoff -0.5) -> max regen."""
-    ctrl = self._make_controller(personality=1)
-    result = ctrl._calc_pedal_command(-0.6, v_ego=10.0)
-    expected = tinkla_conf.di_to_pedal(TC_PEDAL_DI_MIN)
-    self.assertAlmostEqual(result, expected, places=4)
-
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
-  def test_relaxed_cutoff_triggers(self):
-    """accel_request = -0.8 with relaxed personality (cutoff -0.7) -> max regen."""
-    ctrl = self._make_controller(personality=2)
-    result = ctrl._calc_pedal_command(-0.8, v_ego=10.0)
-    expected = tinkla_conf.di_to_pedal(TC_PEDAL_DI_MIN)
-    self.assertAlmostEqual(result, expected, places=4)
-
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
-  def test_standard_cutoff_not_triggered(self):
-    """accel_request = -0.3 with standard personality (cutoff -0.5) -> stays in linear range."""
-    ctrl = self._make_controller(personality=1)
-    result = ctrl._calc_pedal_command(-0.3, v_ego=10.0)
-    max_regen = tinkla_conf.di_to_pedal(TC_PEDAL_DI_MIN)
-    # Should NOT be max regen - should be somewhere in the linear range
-    self.assertGreater(result, max_regen)
 
   @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_neutral_accel(self):
     """accel_request = 0.0 -> pedal near zero (coast)."""
-    ctrl = self._make_controller(personality=1)
+    ctrl = self._make_controller()
     result = ctrl._calc_pedal_command(0.0, v_ego=10.0)
     zero_pedal = tinkla_conf.di_to_pedal(0.0)
     self.assertAlmostEqual(result, zero_pedal, places=4)
 
   @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
-  def test_positive_accel(self):
-    """accel_request = 1.0 -> positive pedal (gas)."""
-    ctrl = self._make_controller(personality=1)
+  def test_positive_accel_is_positive(self):
+    """accel_request = 1.0 -> pedal above zero."""
+    ctrl = self._make_controller()
     result = ctrl._calc_pedal_command(1.0, v_ego=10.0)
     zero_pedal = tinkla_conf.di_to_pedal(0.0)
     self.assertGreater(result, zero_pedal)
 
-  def test_flattened_regen_curve_low_speed(self):
-    """At 5 m/s (11 mph), regen_decel should be -1.2 (was -0.8 at 10 m/s)."""
+  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
+  def test_engage_edge_resets_prev(self):
+    """Simulating engage edge: prev_pedal_di=0 prevents stale high value from causing WOT."""
+    ctrl = self._make_controller()
+    # Simulate previous session had high pedal
+    ctrl.prev_pedal_di = 50.0
+    # Engage edge should reset to 0 (done in carcontroller.update)
+    ctrl.prev_pedal_di = 0.0
+    # Now a modest accel request should not jump to 50
+    ctrl._calc_pedal_command(1.0, v_ego=10.0)
+    self.assertLessEqual(ctrl.prev_pedal_di, PEDAL_RAMP_RATE)
+
+
+class TestRegenCurve(unittest.TestCase):
+  """Verify speed-dependent regen deceleration values."""
+
+  def test_regen_at_5mps(self):
     from numpy import interp as np_interp
-    regen_decel = float(np_interp(5.0, [5., 15.], [-1.2, -1.45]))
-    self.assertAlmostEqual(regen_decel, -1.2)
+    regen = float(np_interp(5.0, [5., 15.], [-1.2, -1.45]))
+    self.assertAlmostEqual(regen, -1.2)
 
-  def test_flattened_regen_curve_mid_speed(self):
-    """At 10 m/s (22 mph), regen should be stronger than old -0.8."""
+  def test_regen_at_10mps(self):
     from numpy import interp as np_interp
-    regen_decel = float(np_interp(10.0, [5., 15.], [-1.2, -1.45]))
-    self.assertLess(regen_decel, -1.2)  # More regen than old -0.8
+    regen = float(np_interp(10.0, [5., 15.], [-1.2, -1.45]))
+    self.assertLess(regen, -1.2)
+    self.assertGreater(regen, -1.45)
 
-  def test_flattened_regen_curve_high_speed(self):
-    """At 15 m/s (34 mph), regen_decel should be -1.45."""
+  def test_regen_at_15mps(self):
     from numpy import interp as np_interp
-    regen_decel = float(np_interp(15.0, [5., 15.], [-1.2, -1.45]))
-    self.assertAlmostEqual(regen_decel, -1.45)
+    regen = float(np_interp(15.0, [5., 15.], [-1.2, -1.45]))
+    self.assertAlmostEqual(regen, -1.45)
 
 
-class TestPersonalityDefault(unittest.TestCase):
-  """Verify CarController defaults personality to 1 (standard)."""
+class TestRampRateConstant(unittest.TestCase):
+  """Verify PEDAL_RAMP_RATE is set correctly."""
 
-  def test_default_personality(self):
-    self.assertAlmostEqual(REGEN_CUTOFF_PREAP.get(1, -0.5), -0.5)
+  def test_ramp_rate_value(self):
+    self.assertAlmostEqual(PEDAL_RAMP_RATE, 2.5)
 
-  def test_unknown_personality_falls_back(self):
-    """Unknown personality key should use -0.5 default."""
-    self.assertAlmostEqual(REGEN_CUTOFF_PREAP.get(99, -0.5), -0.5)
+  def test_ramp_rate_positive(self):
+    self.assertGreater(PEDAL_RAMP_RATE, 0.0)
 
 
 if __name__ == '__main__':

@@ -31,23 +31,11 @@ try:
 except ImportError:
   CRUISE_BUTTONS_AVAILABLE = False
 
-# Read openpilot Params for personality toggle (may fail outside device)
-try:
-  from openpilot.common.params import Params as _Params
-  _params = _Params()
-except ImportError:
-  _params = None
-
-# Bolt-style hard regen cutoff thresholds per driving personality.
-# When actuators.accel falls below this threshold, _calc_pedal_command
-# sends max regen (PEDAL_DI_MIN) immediately, bypassing the slow PI ramp.
-# Aggressive: triggers sooner (more responsive braking)
-# Relaxed: triggers later (gentler, safer on slippery surfaces)
-REGEN_CUTOFF_PREAP = {
-  0: -0.3,   # aggressive
-  1: -0.5,   # standard
-  2: -0.7,   # relaxed (winter driving)
-}
+# Pedal rate limiter: max DI change per 20ms step (pedal sends at 50 Hz).
+# Prevents WOT-on-engage: even with kf=1.0 feedforward, the physical pedal
+# ramps over ~0.3-0.6s instead of jumping instantly.
+# 2.5 DI/step = 125 DI/s.  P85+ at highway (max=75 DI): 0→full in 0.6s.
+PEDAL_RAMP_RATE = 2.5
 
 # Fallback pedal constants (used when tinkla_conf unavailable)
 # From Tinkla tunes.py
@@ -85,9 +73,6 @@ class CarController(CarControllerBase):
     self.prev_pedal_di = 0.0      # Previous pedal value in DI units
     self.prev_v_ego = 0.0         # Previous vehicle speed
     
-    # Driving personality for regen cutoff thresholds
-    self.personality = 1  # default standard
-    self.personality_refresh_frame = 0
 
     # State tracking
     self.prev_enable_long_control = False
@@ -156,15 +141,6 @@ class CarController(CarControllerBase):
         # Pre-AP Longitudinal Control (Tinkla port)
         # Pedal at 50Hz (frame % 2) to match Tinkla LONG_module.py line 213
         # ==============================================
-        # Refresh driving personality from Params every ~10s (1000 frames at 100Hz)
-        if self.frame - self.personality_refresh_frame >= 1000:
-          self.personality_refresh_frame = self.frame
-          if _params is not None:
-            try:
-              self.personality = int(_params.get("LongitudinalPersonality", return_default=True))
-            except (TypeError, ValueError):
-              pass
-
         # Get engagement state (used for both pedal and pedal-over-CC)
         cs_cruise_enabled = getattr(CS, 'cruiseEnabled', False)
         cs_enable_long = getattr(CS, 'enableLongControl', False)
@@ -176,6 +152,7 @@ class CarController(CarControllerBase):
         pedal_long_allowed = bool(use_pedal and pedal_transform_valid)
         if long_active and not self.prev_preap_long_active:
           self.preap_long_engage_frame = self.frame
+          self.prev_pedal_di = 0.0  # Rate limiter starts from zero on fresh engage
 
         # ==============================================
         # Pedal Over CC: one-shot CANCEL to keep stock CC unlatch
@@ -335,56 +312,49 @@ class CarController(CarControllerBase):
 
   def _calc_pedal_command(self, accel_request: float, v_ego: float, target_speed_kph: float | None = None) -> float:
     """
-    Calculate pedal command from acceleration request.
+    Convert acceleration request (m/s^2) to comma pedal voltage.
 
-    Simple linear mapping from accel (m/s^2) to DI pedal units, then through the
-    Tinkla calibration transform to pedal voltage. Trim profiles (P85+/P85/S85/S60)
-    are applied as a speed-dependent max-pedal clamp.
+    Architecture (FrogPilot/OPGM Bolt-inspired, feedforward-dominant):
+      1. Linear map: accel -> DI pedal units via [regen_decel, 0, ACCEL_MAX]
+      2. Clamp to trim profile max (P85+/P85/S85/S60 speed-dependent)
+      3. Rate limiter: ±PEDAL_RAMP_RATE DI/step (WOT-on-engage defense)
+      4. Calibration transform: DI -> pedal voltage
 
-    With the modern accel-error PI (kp=0, ki=speed-dep, implicit kf=1.0),
-    actuators.accel already contains a_target + integral correction. This mapping
-    just converts that accel to pedal position — no additional smoothing or rate
-    limiting needed (the PI loop handles stability).
-
-    See PEDAL_ANALYSIS.md for full rationale.
+    With kf=1.0, actuators.accel ≈ a_target + slow_integral_trim.
+    The MPC plan is jerk-constrained and smooth; the rate limiter catches
+    any remaining transients (engage edges, planner mode switches).
     """
     if not TINKLA_AVAILABLE or not tinkla_conf:
       # Fallback: simple linear mapping if tinkla_conf unavailable
       pedal_di = float(clip(interp(accel_request, [-1.5, 0., 2.0], [-5., 0., 100.]), -5, 100))
+      pedal_di = float(clip(pedal_di,
+                            self.prev_pedal_di - PEDAL_RAMP_RATE,
+                            self.prev_pedal_di + PEDAL_RAMP_RATE))
+      self.prev_pedal_di = pedal_di
       return _transform_di_to_pedal(pedal_di)
-
-    # Bolt-style hard regen cutoff: when the PI output requests deceleration
-    # beyond the personality threshold, bypass the linear mapping and send
-    # max regen immediately. This gives instant decel response without
-    # waiting for the PI integral to ramp up through kf=0.25 attenuation.
-    regen_cutoff = REGEN_CUTOFF_PREAP.get(self.personality, -0.5)
-    if accel_request < regen_cutoff:
-      self.prev_pedal_di = PEDAL_DI_MIN
-      self.prev_v_ego = v_ego
-      return tinkla_conf.di_to_pedal(PEDAL_DI_MIN)
 
     # Trim-specific max pedal (P85+, P85, S85, S60, Generic)
     pedal_profile = tinkla_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
 
-    # Speed-dependent regen limit (more regen available at low city speeds)
+    # Speed-dependent regen limit (more regen available at higher speeds)
     regen_decel = float(interp(v_ego, [5., 15.], [-1.2, -1.45]))
 
-    # Zero-torque pedal position: always 0.0.  The PI integral in longcontrol
-    # handles steady-state offset (hills, wind) naturally.  The previous
-    # zero-torque *learning* created a runaway positive-feedback cascade on
-    # first engage after gas override — each learn step shifted the interp
-    # midpoint upward, producing more gas, which raised torque closer to zero,
-    # triggering another learn step (6 steps in 120 ms, GAS_CMD 10→40).
-    zero_accel = 0.0
-
     # Linear mapping: accel (m/s^2) -> DI pedal units
+    # With kf=1.0 feedforward, accel_request ≈ a_target + integral_trim,
+    # so this mapping smoothly covers the full regen-to-accel range.
     accel_bp = [regen_decel, 0.0, ACCEL_MAX]
-    accel_v = [PEDAL_DI_MIN, zero_accel, max_pedal_value]
+    accel_v = [PEDAL_DI_MIN, 0.0, max_pedal_value]
     pedal_di = float(interp(accel_request, accel_bp, accel_v))
 
     # Clamp to trim profile limits
     pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
+
+    # Rate limiter: cap DI change per step to prevent sudden jumps.
+    # Primary WOT-on-engage defense — even with kf=1.0, pedal ramps smoothly.
+    pedal_di = float(clip(pedal_di,
+                          self.prev_pedal_di - PEDAL_RAMP_RATE,
+                          self.prev_pedal_di + PEDAL_RAMP_RATE))
 
     # Transform DI -> pedal voltage via calibration
     pedal_cmd = tinkla_conf.di_to_pedal(pedal_di)
@@ -394,7 +364,4 @@ class CarController(CarControllerBase):
 
     return pedal_cmd
 
-  # Zero-torque learning removed: caused runaway positive-feedback cascade on
-  # first engage (see _calc_pedal_command comment).  The PI integral handles
-  # steady-state offset instead.
 
