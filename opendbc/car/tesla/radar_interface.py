@@ -102,7 +102,7 @@ class RadarInterface(RadarInterfaceBase):
         continue
 
       # Check if it's a valid point
-      if self.bosch_radar and (msg_a["LongDist"] > 250.0 or msg_a["LongDist"] <= 0 or msg_a["ProbExist"] < 70.0):
+      if self.bosch_radar and (msg_a["LongDist"] > 250.0 or msg_a["LongDist"] <= 0 or msg_a["ProbExist"] < 50.0):
         if i in self.pts:
           del self.pts[i]
         continue
