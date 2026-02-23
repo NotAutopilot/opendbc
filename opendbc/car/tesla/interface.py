@@ -33,11 +33,12 @@ ACCEL_PREAP_PROFILES = {
 }
 
 # Pedal longitudinal tune for modern accel-error PI (see PEDAL_ANALYSIS.md).
-# kp=0: eliminates jitter from proportional gain on noisy aEgo.
+# kp speed-dependent: modest proportional gain for immediate response to accel error,
+#   kept low at creep to limit jitter from noisy aEgo, higher at highway where noise is small.
 # ki speed-dependent: gentle at creep, stronger at highway for steady-state tracking.
 # Values derived from OPGM Bolt pedal tune adapted for Tesla DI pedal range.
 PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
-PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
+PEDAL_LONG_KP_V = [0.1, 0.15, 0.2, 0.25]
 PEDAL_LONG_KI_V = [0.20, 0.25, 0.30, 0.40]
 
 
@@ -135,11 +136,12 @@ class CarInterface(CarInterfaceBase):
         ret.longitudinalTuning.kpV = PEDAL_LONG_KP_V
         ret.longitudinalTuning.kiBP = PEDAL_LONG_K_BP
         ret.longitudinalTuning.kiV = PEDAL_LONG_KI_V
-        # Attenuate feedforward to 25% of a_target to prevent WOT spike at engagement.
-        # Matches OPGM Bolt pedal tune — the integral ramps up smoothly over ~1-2s instead
-        # of stepping to full target on frame 1.
+        # Feedforward at 35% of a_target balances engagement smoothness with braking
+        # responsiveness when closing on a lead vehicle. Proportional gain (kpV)
+        # adds immediate response to speed error so the integral doesn't have to
+        # do all the work.
         try:
-          ret.longitudinalTuning.kf = 0.25
+          ret.longitudinalTuning.kf = 0.35
         except AttributeError:
           pass  # kf field not available in device capnp schema
       else:

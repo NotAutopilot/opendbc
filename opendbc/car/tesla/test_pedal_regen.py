@@ -53,14 +53,14 @@ class TestAccelProfiles(unittest.TestCase):
     self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0], 2.0)
 
   def test_effective_feedforward_aggressive(self):
-    """With kf=0.25, effective feedforward at standstill should be 0.625."""
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0] * 0.25, 0.625)
+    """With kf=0.35, effective feedforward at standstill should be 0.875."""
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0] * 0.35, 0.875)
 
   def test_effective_feedforward_standard(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0] * 0.25, 0.55)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0] * 0.35, 0.77)
 
   def test_effective_feedforward_relaxed(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0] * 0.25, 0.50)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0] * 0.35, 0.70)
 
   def test_profiles_have_correct_length(self):
     for p in (0, 1, 2):
