@@ -11,11 +11,13 @@
 #include "opendbc/safety/modes/honda.h"
 #include "opendbc/safety/modes/toyota.h"
 #include "opendbc/safety/modes/tesla.h"
+#include "opendbc/safety/modes/tesla_legacy.h"
 #include "opendbc/safety/modes/gm.h"
 #include "opendbc/safety/modes/ford.h"
 #include "opendbc/safety/modes/hyundai.h"
 #include "opendbc/safety/modes/chrysler.h"
 #include "opendbc/safety/modes/rivian.h"
+#include "opendbc/safety/modes/mg.h"
 #include "opendbc/safety/modes/subaru.h"
 #include "opendbc/safety/modes/subaru_preglobal.h"
 #include "opendbc/safety/modes/mazda.h"
@@ -27,6 +29,7 @@
 #include "opendbc/safety/modes/body.h"
 #include "opendbc/safety/modes/psa.h"
 #include "opendbc/safety/modes/hyundai_canfd.h"
+#include "opendbc/safety/modes/tesla_preap.h"
 
 uint32_t GET_BYTES(const CANPacket_t *msg, int start, int len) {
   uint32_t ret = 0U;
@@ -185,6 +188,12 @@ static bool rx_msg_safety_check(const CANPacket_t *msg,
 
 bool safety_rx_hook(const CANPacket_t *msg) {
   bool controls_allowed_prev = controls_allowed;
+
+  // rx_all hook: called for every message, before whitelist check.
+  // Used for CAN forwarding that needs to see all bus traffic.
+  if (current_hooks->rx_all != NULL) {
+    current_hooks->rx_all(msg);
+  }
 
   bool valid = rx_msg_safety_check(msg, &current_safety_config, current_hooks);
   bool whitelisted = get_addr_check_index(msg, current_safety_config.rx_checks, current_safety_config.rx_checks_len) != -1;
@@ -402,6 +411,9 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
     {SAFETY_FORD, &ford_hooks},
     {SAFETY_RIVIAN, &rivian_hooks},
     {SAFETY_TESLA, &tesla_hooks},
+    {SAFETY_MG, &mg_hooks},
+    {SAFETY_TESLA_LEGACY, &tesla_legacy_hooks},
+    {SAFETY_TESLA_PREAP, &tesla_preap_hooks},
     {SAFETY_HYUNDAI_CANFD, &hyundai_canfd_hooks},
 #ifdef ALLOW_DEBUG
     {SAFETY_PSA, &psa_hooks},
