@@ -12,6 +12,7 @@ class NAPParamKeys:
   # Longitudinal Control
   PEDAL_ENABLED = "NAPPedalEnabled"
   FOLLOW_DISTANCE = "NAPFollowDistance"
+  PEDAL_PASSTHROUGH = "NAPPedalPassthrough"
 
   # Pedal Hardware
   PEDAL_PROFILE = "NAPPedalProfile"
@@ -37,6 +38,7 @@ class NAPParamKeys:
 # Default values matching params_keys.h declarations
 DEFAULTS = {
   NAPParamKeys.PEDAL_ENABLED: False,
+  NAPParamKeys.PEDAL_PASSTHROUGH: False,
   NAPParamKeys.FOLLOW_DISTANCE: 4,
   NAPParamKeys.PEDAL_PROFILE: 4,
   NAPParamKeys.PEDAL_CAN_BUS: 2,

@@ -161,6 +161,14 @@ class NAPConf:
     self._put_param_bool(NAPParamKeys.PEDAL_ENABLED, 'use_pedal', value)
 
   @property
+  def pedal_passthrough(self):
+    return self._get_param_bool(NAPParamKeys.PEDAL_PASSTHROUGH, 'pedal_passthrough')
+
+  @pedal_passthrough.setter
+  def pedal_passthrough(self, value):
+    self._put_param_bool(NAPParamKeys.PEDAL_PASSTHROUGH, 'pedal_passthrough', value)
+
+  @property
   def radar_enabled(self):
     return self._get_param_bool(NAPParamKeys.RADAR_ENABLED, 'radar_enabled')
 
