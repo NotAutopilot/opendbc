@@ -123,12 +123,11 @@ class PreAPLongController:
           # Gas override handling
           if CS.out.gasPressed and not in_engage_grace:
             if pedal_passthrough:
-              # Passthrough mode: keep enable=1, let driver's foot control.
-              # Track the interceptor position so we resume smoothly when
-              # the driver lifts off.
+              # Passthrough mode: disable pedal interceptor so the driver's
+              # foot physically controls the gas wire (no CAN round-trip).
+              # Track their position so we resume smoothly when they lift off.
               self.prev_pedal_di = max(CS.pedal_interceptor_value, PEDAL_DI_ZERO)
-              pedal_cmd = nap_conf.di_to_pedal(CS.pedal_interceptor_value)
-              can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
+              can_sends.append(tesla_can.create_pedal_command(0, enable=0))
             else:
               can_sends.append(tesla_can.create_pedal_command(0, enable=0))
           else:
