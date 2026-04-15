@@ -10,6 +10,7 @@ Storage: openpilot Params system (params_keys.h)
 
 class NAPParamKeys:
   # Longitudinal Control
+  ADAPTIVE_ACCEL = "NAPAdaptiveAccel"
   PEDAL_ENABLED = "NAPPedalEnabled"
   FOLLOW_DISTANCE = "NAPFollowDistance"
   PEDAL_PASSTHROUGH = "NAPPedalPassthrough"
@@ -37,6 +38,7 @@ class NAPParamKeys:
 
 # Default values matching params_keys.h declarations
 DEFAULTS = {
+  NAPParamKeys.ADAPTIVE_ACCEL: True,
   NAPParamKeys.PEDAL_ENABLED: False,
   NAPParamKeys.PEDAL_PASSTHROUGH: False,
   NAPParamKeys.FOLLOW_DISTANCE: 4,

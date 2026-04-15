@@ -15,6 +15,11 @@ ACCEL_PREAP_PROFILES = {
   2: [0.3, 0.6, 0.9, 0.8, 0.7, 0.55],    # relaxed (former standard values)
 }
 
+# When following a lead car, cap positive accel to these values regardless
+# of personality. Prevents overshoot → regen → overshoot oscillation.
+# Open road uses the full profile above; this only limits follow mode.
+ACCEL_PREAP_FOLLOW = [0.3, 0.6, 0.9, 0.8, 0.7, 0.55]
+
 # Feedforward-dominant longitudinal tune (FrogPilot/OPGM Bolt-inspired).
 # kp=0: no proportional term — eliminates aEgo sensor noise amplification.
 # kf=1.0: full a_target passthrough — the MPC plan (jerk-constrained, smooth)
