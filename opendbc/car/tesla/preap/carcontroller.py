@@ -16,14 +16,10 @@ def init_preap_can(dbc_names, packers):
   return tesla_can
 
 
-# Grace period after requested_long rising edge. During this window:
-# - accel_request clamped >= 0 (prevent PID reset regen spike)
-# - pedal starts from zero-torque position for smooth takeover
+# Grace period after engage: clamp accel >= 0 to prevent PID reset regen spike
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 
-# Delay before sending stock CC cancel after engage. The pedal must
-# be actively commanding before we kill stock CC, otherwise the DI
-# defaults to full regen in the gap between CC drop and pedal takeover.
+# Delay before sending stock CC cancel so pedal establishes control first
 CANCEL_DELAY_FRAMES = 10  # 100ms at 100Hz
 
 
@@ -51,17 +47,18 @@ class PreAPLongController:
     pedal_long_allowed = use_pedal and pedal_transform_valid
     pedal_passthrough = nap_conf.pedal_passthrough
 
+    # For Pre-AP pedal, we use requested_long as our primary gate instead
+    # of long_active. long_active is False during gas press (gasOverride
+    # sets OVERRIDE_LONGITUDINAL), but we still need to track state and
+    # send pedal commands for smooth transitions.
+    pedal_engaged = requested_long and pedal_long_allowed
+
     # --- Engage transition ---
     requested_long_rising = (not self.prev_requested_long) and requested_long
     if requested_long_rising:
       self.preap_long_engage_frame = frame
-      # Start from zero-torque position so the car holds speed on takeover
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
-
-    if long_active and not self.prev_preap_long_active:
-      zero_torque_di = get_zero_torque().get(CS.out.vEgo)
-      self.prev_pedal_di = max(self.prev_pedal_di, zero_torque_di)
 
     engage_elapsed_frames = frame - self.preap_long_engage_frame
     in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
@@ -74,7 +71,6 @@ class PreAPLongController:
       if self.prev_requested_long and (not requested_long):
         self.preap_cancel_pending = True
         self.preap_cancel_frame = frame
-
       if CS.cruise_buttons != CS.prev_cruise_buttons and CS.cruise_buttons != CruiseButtons.IDLE:
         self.preap_cancel_pending = True
         self.preap_cancel_frame = frame
@@ -97,7 +93,7 @@ class PreAPLongController:
 
     self.prev_requested_long = requested_long
 
-    # Non-pedal CC commands: consume flags set by engagement FSM
+    # Non-pedal CC commands
     if not pedal_long_allowed:
       if CS.preap_cc_cancel_needed:
         self.preap_cancel_pending = True
@@ -111,28 +107,23 @@ class PreAPLongController:
 
     if frame % 2 == 0:
       self.prev_enable_long_control = CS.enableLongControl
-
       CS.pccEvent = None
 
-      # Update zero-torque learning from motor torque feedback
+      # Update zero-torque learning
       if use_pedal:
         get_zero_torque().update(CS.pedal.torque_level, self.prev_pedal_di, CS.out.vEgo)
 
-      if long_active and pedal_long_allowed:
+      if pedal_engaged:
         try:
-          # Gas override handling
-          if CS.out.gasPressed and not in_engage_grace:
-            if pedal_passthrough:
-              # Passthrough mode: disable pedal interceptor so the driver's
-              # foot physically controls the gas wire (no CAN round-trip).
-              # Track their position so we resume smoothly when they lift off.
-              self.prev_pedal_di = max(CS.pedal_interceptor_value, PEDAL_DI_ZERO)
-              can_sends.append(tesla_can.create_pedal_command(0, enable=0))
-            else:
-              can_sends.append(tesla_can.create_pedal_command(0, enable=0))
-          else:
-            accel_request = float(actuators.accel)
+          if CS.out.gasPressed:
+            # Gas pressed: driver is controlling. Pass through their foot
+            # directly (enable=0) but track their position for smooth resume.
+            self.prev_pedal_di = max(CS.pedal_interceptor_value, PEDAL_DI_ZERO)
+            can_sends.append(tesla_can.create_pedal_command(0, enable=0))
 
+          elif long_active:
+            # Normal operation: planner is active, send computed pedal
+            accel_request = float(actuators.accel)
             if in_engage_grace:
               accel_request = max(accel_request, 0.0)
 
@@ -141,23 +132,22 @@ class PreAPLongController:
               accel_request, CS.out.vEgo, self.prev_pedal_di, target_speed_kph)
             can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
 
-            # Max regen warning (suppress during grace period)
             if self.prev_pedal_di <= 0.95 * PEDAL_DI_MIN and not in_engage_grace:
               CS.pccEvent = "pedalMaxRegen"
-            else:
-              CS.pccEvent = None
+
+          else:
+            # pedal_engaged but not long_active and not gasPressed:
+            # IPC lag or transitioning. Hold at zero-torque.
+            zero_torque_di = get_zero_torque().get(CS.out.vEgo)
+            hold_pedal = nap_conf.di_to_pedal(zero_torque_di)
+            can_sends.append(tesla_can.create_pedal_command(hold_pedal, enable=1))
+            self.prev_pedal_di = zero_torque_di
+
         except Exception:
           carlog.exception("Pre-AP pedal command failed; sending disabled")
           idle_pedal = nap_conf.di_to_pedal(PEDAL_DI_ZERO)
           can_sends.append(tesla_can.create_pedal_command(idle_pedal, enable=0))
           self.prev_pedal_di = 0.0
-
-      elif requested_long and pedal_long_allowed and not long_active:
-        # IPC lag window: send pedal at zero-torque position to hold speed
-        zero_torque_di = get_zero_torque().get(CS.out.vEgo)
-        hold_pedal = nap_conf.di_to_pedal(zero_torque_di)
-        can_sends.append(tesla_can.create_pedal_command(hold_pedal, enable=1))
-        self.prev_pedal_di = zero_torque_di
 
       elif use_pedal and not pedal_transform_valid:
         idle_pedal = nap_conf.di_to_pedal(PEDAL_DI_ZERO)
