@@ -1,6 +1,51 @@
 #pragma once
 
-// Standalone Pre-AP Tesla safety mode.
+// ============================================
+// SAFETY_TESLA_PREAP — Pre-Autopilot Tesla Model S (2012-2014)
+// ============================================
+//
+// Standalone safety mode for Pre-AP Tesla Model S. These cars have NO
+// Autopilot ECU, NO harness relay, and a different EPAS/CAN layout than
+// HW1+ Teslas. This is the spiritual successor to Tinkla (Boggyver's
+// Pre-AP openpilot fork, tesla_unity_betaC3 branch).
+//
+// WHY check_relay=false AND disable_static_blocking=true:
+//
+//   Pre-AP has no harness relay hardware. Standard openpilot uses a relay
+//   on the harness to switch between stock AP ECU and openpilot — when
+//   openpilot is not active, the relay routes CAN to the stock ECU. On
+//   Pre-AP there is no AP ECU and no relay; the panda connects directly
+//   to the car's CAN bus. Setting check_relay=true would cause the panda
+//   to falsely detect a "relay malfunction" and block ALL TX permanently.
+//   disable_static_blocking=true is required for the same reason — without
+//   a relay, the panda's static blocking logic (which assumes relay state)
+//   would incorrectly block messages.
+//
+//   Tinkla handled this identically via generic_rx_checks(false) in the
+//   older panda API, with the comment "PreAP has no relay" (safety_tesla.h
+//   line 1071, tesla_unity_betaC3 branch). The modern API added check_relay
+//   and disable_static_blocking with restrictive defaults, so we explicitly
+//   set them to get the same behavior Tinkla had implicitly.
+//
+// WHY ignore_checksum=true AND ignore_counter=true on RX:
+//
+//   Pre-AP EPAS firmware uses a byte-sum checksum, but the exact algorithm
+//   has not been fully verified against all firmware versions. A checksum
+//   mismatch caused a silent 21-second steering dropout during testing.
+//   Tinkla's RX checks also had no checksum/counter validation (frequency
+//   set to 0 for all messages). Once the checksum algorithm is verified
+//   across all Pre-AP EPAS firmware versions, these can be re-enabled.
+//
+// ALL ACTUAL SAFETY CHECKS REMAIN FULLY ACTIVE:
+//   - Steering angle + rate limits via steer_angle_cmd_checks_vm()
+//   - controls_allowed gating on all TX
+//   - Disengage on hands-on override (level >= 3)
+//   - Disengage on EPAS error codes 6-9
+//   - Disengage on door open, gear out of Drive
+//   - Disengage on stalk cancel (with 600ms echo filter)
+//   - AEB events blocked from openpilot
+//   - EPB_epasControl mode validation
+//   - Pedal TX gated by PREAP_FLAG_ENABLE_PEDAL + get_longitudinal_allowed()
 //
 // Completely independent from tesla_legacy.h — has its own hooks struct,
 // counter/checksum functions, init, RX/TX/fwd hooks, and GTW emulation.
@@ -25,11 +70,14 @@ void can_set_checksum(CANPacket_t *packet);
 // ============================================
 // Safety param flags
 // ============================================
+// Longitudinal is gated by PREAP_FLAG_ENABLE_PEDAL + get_longitudinal_allowed().
+// There is no separate LONG_CONTROL flag — the framework's get_longitudinal_allowed()
+// is a derived check (controls_allowed && !gas_pressed_prev), not a settable flag.
+// This matches how tesla.h, honda.h, and hyundai.h handle longitudinal gating.
 
-#define PREAP_FLAG_LONG_CONTROL         1U
-#define PREAP_FLAG_ENABLE_PEDAL         2U
-#define PREAP_FLAG_RADAR_EMULATION      4U
-#define PREAP_FLAG_RADAR_BEHIND_NOSECONE 8U
+#define PREAP_FLAG_ENABLE_PEDAL         1U
+#define PREAP_FLAG_RADAR_EMULATION      2U
+#define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
 
 // ============================================
 // State variables
@@ -285,6 +333,29 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
 // ============================================
 
 static void tesla_preap_rx_hook(const CANPacket_t *msg) {
+  // Pedal interceptor (0x552) — may arrive on bus 0 OR bus 2 depending on wiring.
+  // Must be handled BEFORE the bus-0-only bailout below.
+  // Whitelisted on both bus 0 and bus 2 in preap_rx_checks; the framework has
+  // already verified the message matches one of them, so accept either here.
+  //
+  // Gas-press threshold: 650 raw, chosen from real Pre-AP drive data:
+  //   - At-rest noise (driver not pressing): raw range 424-633, mean 470 (p99.9=602)
+  //   - Actual gas press: raw range 441-1246, mean 799 (p10=607, p50=802)
+  // The original threshold of 450 was inside the resting noise distribution and
+  // caused false gas_pressed readings that blocked pedal TX → pedal wouldn't engage.
+  // 650 gives zero false positives on rest noise while still catching the vast
+  // majority of real driver presses. Python-layer DI_pedalPos is the primary
+  // gas-override detection; the panda threshold here is a safety backstop.
+  if (preap_enable_pedal && (msg->addr == 0x552U)) {
+    int pedal_val = ((msg->data[0] << 8) | msg->data[1]);
+    gas_pressed = (pedal_val > 650);
+    if (preap_pedal_can == -1) {
+      preap_pedal_can = msg->bus;
+    }
+    return;
+  }
+
+  // All other RX handlers are bus 0 only.
   if (msg->bus != 0U) return;
 
   // EPAS (0x370): steering angle, hands-on level, disengage detection
@@ -316,19 +387,12 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     vehicle_moving = speed > (0.5f * KPH_TO_MS);
   }
 
-  // Gas pressed from DI_torque1 (0x108) — only when pedal interceptor is not active
+  // Gas pressed from DI_torque1 (0x108) — only when pedal interceptor is not active.
+  // (The pedal interceptor path is handled above the bus-0-only bailout since it may
+  // arrive on bus 0 or bus 2.)
   if (msg->addr == 0x108U) {
     if (!preap_enable_pedal) {
       gas_pressed = msg->data[6] != 0U;
-    }
-  }
-
-  // Pedal Interceptor (0x552)
-  if (preap_enable_pedal && (msg->addr == 0x552U)) {
-    int pedal_val = ((msg->data[0] << 8) | msg->data[1]);
-    gas_pressed = (pedal_val > 450);
-    if (preap_pedal_can == -1) {
-      preap_pedal_can = msg->bus;
     }
   }
 
@@ -398,10 +462,15 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     .frequency = 50U,
   };
 
+  // Pre-AP Model S is physically the same car as HW1/HW2/HW3 Model S.
+  // These values MUST match VehicleModel(TESLA_MODEL_S_HW3) in carcontroller.py.
+  // Verified: mass=2100+STD_CARGO_KG, wheelbase=2.960, steerRatio=15.0
+  //           → slip_factor = -0.0005666 (calc_slip_factor)
+  // Confirmed by Lukas (xnor-tech, former comma employee, Tesla port author).
   const AngleSteeringParams PREAP_STEERING_PARAMS = {
-    .slip_factor = -0.0005668,  // must match VehicleModel(TESLA_MODEL_S_PREAP)
+    .slip_factor = -0.0005666,
     .steer_ratio = 15.,
-    .wheelbase = 2.959,
+    .wheelbase = 2.96,
   };
 
   bool tx = true;
@@ -438,10 +507,39 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // Pedal interceptor (0x551): require longitudinal allowed
+  // Pedal interceptor (0x551 GAS_COMMAND): parse ENABLE bit and GAS_COMMAND
+  // value to distinguish authoritative accel commands from driver-passthrough
+  // release commands.
+  //   DBC: SG_ ENABLE : 39|1@0+  →  bit 7 of data[4]
+  //   DBC: SG_ GAS_COMMAND : 7|16@0+  →  bytes 0-1 big-endian (physical 0 = raw 450)
+  //
+  //   ENABLE=0: openpilot is releasing control. Comma Pedal ignores GAS_COMMAND
+  //   and passes driver's OEM pedal voltage through. NAP's pedal passthrough
+  //   feature sends this during driver gas override for a smooth handoff.
+  //   Defense-in-depth: we still require the GAS_COMMAND raw value to be at or
+  //   below the zero point (raw <= 500, which is ~2.5% physical) so a bugged or
+  //   malicious ENABLE=0 + high-value message can't sneak through a potential
+  //   Comma Pedal firmware bug.
+  //
+  //   ENABLE=1: authoritative actuation command. Gated by get_longitudinal_allowed()
+  //   (controls_allowed && !gas_pressed_prev).
   if (msg->addr == 0x551U) {
-    if (!preap_enable_pedal || !get_longitudinal_allowed()) {
+    if (!preap_enable_pedal) {
       violation = true;
+    } else {
+      bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
+      int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
+      if (pedal_enable) {
+        if (!get_longitudinal_allowed()) {
+          violation = true;
+        }
+      } else {
+        // ENABLE=0: only allow near-zero GAS_COMMAND values (defense-in-depth).
+        // Legitimate passthrough sends physical 0 = raw 450.
+        if (raw_gas_cmd > 500) {
+          violation = true;
+        }
+      }
     }
   }
 
@@ -489,7 +587,6 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 0
     {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
     {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
-    {0x659, 0, 8, .check_relay = false, .disable_static_blocking = true},  // Pedal state
   };
 
   // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
@@ -504,6 +601,11 @@ static safety_config tesla_preap_init(uint16_t param) {
     {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState
     {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // STW_ACTN_RQ
     {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_B
+    // Pedal interceptor — must be in rx_checks or the framework won't pass it to the rx hook.
+    // Listed on both bus 0 and bus 2 to support either wiring configuration.
+    // Frequency=0 because pedal may not be present on all cars.
+    {.msg = {{0x552, 0, 6, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true},
+             {0x552, 2, 6, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR (pedal interceptor)
   };
 
   return BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);

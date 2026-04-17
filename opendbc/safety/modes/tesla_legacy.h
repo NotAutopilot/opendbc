@@ -213,12 +213,34 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 }
 
 static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
-  (void)bus_num;
-  (void)addr;
-
   // HW1/HW2/HW3: allow default bus 0<->2 forwarding for chassis<->party CAN
-  // bridging.  Selective relay-echo blocking is handled by check_relay in
-  // the TX whitelist.
+  // bridging. Selectively block forwarding of messages that openpilot TXs
+  // (so stock doesn't overwrite OP's commands), unless stock is actively in
+  // LKAS/AEB (which preserves safety-critical passthrough).
+  //
+  // Each hardware variant has different TX whitelist:
+  //   HW1 internal:  0x488 (DAS_steer) + 0x2b9 (DAS_control)
+  //   HW2/3 internal: 0x488 (DAS_steer) + 0x27d (APS_eacMonitor)
+  //   HW2/3 external: 0x2bf (DAS_control only)
+  // Only block forwarding of messages we actually TX.
+  if (bus_num == 2) {
+    // DAS_steeringControl: OP TXs on all non-external variants (HW1, HW2/HW3 internal).
+    // Block unless stock LKAS is active (safety passthrough: yield to stock LKAS).
+    if ((addr == 0x488) && !tesla_external_panda && !tesla_legacy_stock_lkas) {
+      return true;
+    }
+    // APS_eacMonitor: OP TXs on HW2/HW3 internal only (not HW1, not external).
+    // Always block from bus 2 — stock doesn't send this message, OP is authoritative.
+    // Matches Lukas's original tesla_raven_fwd_hook (unconditional block).
+    if ((addr == 0x27d) && !tesla_external_panda && !tesla_hw1) {
+      return true;
+    }
+    // DAS_control: OP TXs on HW1 (0x2b9) or external panda (0x2bf).
+    // Block unless stock AEB is active (safety passthrough: yield to stock AEB).
+    if ((addr == (int)das_control_msg) && (tesla_hw1 || tesla_external_panda) && !tesla_legacy_stock_aeb) {
+      return true;
+    }
+  }
   return false;
 }
 

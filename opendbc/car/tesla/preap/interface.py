@@ -4,11 +4,10 @@ from opendbc.car import get_safety_config, structs, STD_CARGO_KG
 from opendbc.car.carlog import carlog
 from opendbc.car.tesla.preap.nap_conf import nap_conf
 
-# Safety param flags matching tesla_preap.h
-PREAP_FLAG_LONG_CONTROL = 1
-PREAP_FLAG_ENABLE_PEDAL = 2
-PREAP_FLAG_RADAR_EMULATION = 4
-PREAP_FLAG_RADAR_BEHIND_NOSECONE = 8
+# Safety param flags matching tesla_preap.h (renumbered — LONG_CONTROL removed as dead code)
+PREAP_FLAG_ENABLE_PEDAL = 1
+PREAP_FLAG_RADAR_EMULATION = 2
+PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
 from opendbc.car.tesla.preap.constants import (
   ACCEL_PREAP_BP, ACCEL_PREAP_PROFILES,
   PEDAL_LONG_K_BP, PEDAL_LONG_KP_V, PEDAL_LONG_KI_V,
@@ -35,7 +34,7 @@ def get_preap_accel_limits(current_speed):
 
 def get_preap_params(ret, fingerprint):
   # Build safety param flags for the standalone Pre-AP safety mode
-  flags = PREAP_FLAG_LONG_CONTROL
+  flags = 0
   use_pedal = nap_conf.use_pedal
   radar_enabled = nap_conf.radar_enabled
   radar_behind_nosecone = nap_conf.radar_behind_nosecone
@@ -83,9 +82,11 @@ def get_preap_params(ret, fingerprint):
   ret.vEgoStarting = 0.1
   ret.stoppingDecelRate = 1.0
 
-  ret.mass = 2100. + STD_CARGO_KG
-  ret.wheelbase = 2.959
+  # Pre-AP Model S is physically the same platform as HW1/HW2/HW3 Model S.
+  # Vehicle params (mass=2100, wheelbase=2.960, steerRatio=15.0) come from
+  # CarSpecs in values.py — do NOT override them here to avoid double-counting
+  # STD_CARGO_KG (the framework adds it automatically).
+  # Confirmed by Lukas (xnor-tech): identical to HW3.
   ret.centerToFront = ret.wheelbase * 0.5
-  ret.steerRatio = 15.0
 
   return ret

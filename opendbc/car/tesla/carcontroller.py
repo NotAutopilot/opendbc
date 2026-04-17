@@ -40,10 +40,7 @@ class CarController(CarControllerBase):
         self.tesla_can = TeslaCANRaven(self.packers)
 
       from opendbc.car.tesla.interface import CarInterface
-      if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-        self.VM = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_PREAP"))
-      else:
-        self.VM = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
+      self.VM = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
 
   def update(self, CC, CS, now_nanos):
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
