@@ -52,9 +52,13 @@ def get_preap_params(ret, fingerprint):
     get_safety_config(structs.CarParams.SafetyModel.teslaPreap, int(flags)),
   ]
   ret.radarUnavailable = not radar_enabled
-  ret.openpilotLongitudinalControl = True
   ret.steerControlType = structs.CarParams.SteerControlType.angle
-  ret.pcmCruise = False
+  # Only claim longitudinal control when a Comma Pedal is installed. Without
+  # the pedal NAP can't actuate throttle — stock Tesla CC handles speed via
+  # the stalk-spoof engage/cancel in carcontroller.py, so op-long would just
+  # run a planner whose output is silently discarded.
+  ret.openpilotLongitudinalControl = use_pedal
+  ret.pcmCruise = not use_pedal
 
   if use_pedal:
     ret.longitudinalTuning.kpBP = PEDAL_LONG_K_BP
@@ -67,11 +71,6 @@ def get_preap_params(ret, fingerprint):
     except AttributeError:
       pass  # kf not available in all capnp schema versions
     ret.longitudinalActuatorDelay = 0.3
-  else:
-    ret.longitudinalTuning.kpBP = [0.0]
-    ret.longitudinalTuning.kpV = [0.0]
-    ret.longitudinalTuning.kiBP = [0.0]
-    ret.longitudinalTuning.kiV = [0.0]
 
   # Legacy Model S steering and physical params
   ret.steerLimitTimer = 0.4
