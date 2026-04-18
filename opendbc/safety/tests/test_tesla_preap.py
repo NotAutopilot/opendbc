@@ -414,6 +414,23 @@ class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, unittest.TestCase):
     msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 1})
     self.assertFalse(self._tx(msg))
 
+  def test_no_pedal_does_not_invalidate_rx_checks(self):
+    # Regression: route 02ae0a637825acd6|196fda2496 — tester with no Comma Pedal
+    # hit "Controls Mismatch" because the 0x552 rx_check used frequency=0,
+    # which divides by zero in safety_tick (safety.h:330) and marks it lagging.
+    # When ENABLE_PEDAL is unset, 0x552 must not be in rx_checks at all.
+    di_state = self.packer.make_can_msg_safety("DI_state", 0, {"DI_state": 1})
+    for msg in (self._angle_meas_msg(0), self._pcm_status_msg(False), self._speed_msg(0),
+                self._user_brake_msg(False), self._user_gas_msg(0), self._gear_msg(4),
+                self._door_msg(), di_state):
+      self._rx(msg)
+    # Tick 500ms after msgs — under the 1s min lag window for real checks but long
+    # enough that a freq=0 divide-by-zero would have already tripped the pedal row.
+    self.safety.set_timer(int(5e5))
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.safety_config_valid(),
+                    "rx_checks must stay valid without a pedal installed")
+
 
 class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
   """Pre-AP with Comma Pedal enabled."""

@@ -601,14 +601,28 @@ static safety_config tesla_preap_init(uint16_t param) {
     {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState
     {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // STW_ACTN_RQ
     {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_B
-    // Pedal interceptor — must be in rx_checks or the framework won't pass it to the rx hook.
-    // Listed on both bus 0 and bus 2 to support either wiring configuration.
-    // Frequency=0 because pedal may not be present on all cars.
-    {.msg = {{0x552, 0, 6, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true},
-             {0x552, 2, 6, 0U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR (pedal interceptor)
   };
 
-  return BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
+  // Pedal-enabled variant: adds 0x552 (GAS_SENSOR) to rx_checks so the
+  // framework routes it to the rx hook. Split into its own array because
+  // frequency=0 causes divide-by-zero in safety_tick (safety.h:330), which
+  // marks the check as lagging and trips safetyRxChecksInvalid → controls
+  // mismatch on cars without a pedal. 50Hz matches the Comma Pedal firmware.
+  static RxCheck preap_rx_checks_with_pedal[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x552, 0, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true},
+             {0x552, 2, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR
+  };
+
+  return preap_enable_pedal ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS)
+                            : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
 }
 
 // ============================================
