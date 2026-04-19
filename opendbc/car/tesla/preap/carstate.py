@@ -69,6 +69,7 @@ def update_preap(cs, can_parsers):
 
   # Cruise state
   cruise_state = cs.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
+  cs.di_cruise_state = cruise_state or "OFF"
   speed_units = cs.can_defines["DI_state"]["DI_speedUnits"].get(int(cp_chassis.vl["DI_state"]["DI_speedUnits"]), None)
 
   ret.cruiseState.available = True
@@ -129,7 +130,7 @@ def update_preap(cs, can_parsers):
   button_events = cs.engagement.process_buttons(
     cs.cruise_buttons, cs.prev_cruise_buttons, curr_time_ms,
     ret.vEgo, cs.speed_units, use_pedal, pedal_long_allowed,
-    long_control_allowed, real_brake_pressed)
+    long_control_allowed, real_brake_pressed, cs.di_cruise_state)
   # Suppress brakePressed so generic brake-disengage path doesn't kill lateral
   ret.brakePressed = False
   ret.buttonEvents = button_events
@@ -161,6 +162,14 @@ def update_preap(cs, can_parsers):
   cs.cruise_enabled_prev = ret.cruiseState.enabled
 
   ret.pedalMaxRegen = cs.pccEvent == "pedalMaxRegen"
+  ret.teslaCCEngaged = cs.pccEvent == "teslaCCEngaged"
+  ret.teslaCCDisengaged = cs.pccEvent == "teslaCCDisengaged"
+  ret.teslaCCNotArmed = (
+    not nap_conf.use_pedal
+    and cs.cruiseEnabled
+    and cs.enableLongControl
+    and cs.di_cruise_state not in ("STANDBY", "ENABLED")
+  )
   ret.pedalLongActive = cs.enableLongControl and nap_conf.use_pedal
 
   return ret

@@ -31,6 +31,7 @@ class PreAPEngagement:
     self.preap_cc_cancel_needed = False
     self.preap_cc_engage_needed = False
     self.preap_last_cc_spoof_ms = 0
+    self.pending_cancel_at_ms = 0
 
     self.preap_brake_pressed_prev = False
     self.last_stalk_non_cancel_ms = -10000
@@ -47,13 +48,14 @@ class PreAPEngagement:
       self.pedal_speed_kph = 0.0
       self.stalk_pull_time_ms = 0
       self.prev_stalk_pull_time_ms = -1000
+      self.pending_cancel_at_ms = 0
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
     self.prev_steering_disengage = steering_disengage
 
   def process_buttons(self, cruise_buttons, prev_cruise_buttons, curr_time_ms,
                       v_ego, speed_units, use_pedal, pedal_long_allowed,
-                      long_control_allowed, real_brake_pressed):
+                      long_control_allowed, real_brake_pressed, di_cruise_state="OFF"):
     button_events = []
 
     # MAIN button: rising edge only
@@ -63,7 +65,8 @@ class PreAPEngagement:
                    use_pedal, self.enableDoublePull)
       if self.enableDoublePull:
         self._handle_double_pull(curr_time_ms, v_ego, speed_units,
-                                 use_pedal, pedal_long_allowed, long_control_allowed)
+                                 use_pedal, pedal_long_allowed, long_control_allowed,
+                                 di_cruise_state)
       else:
         carlog.debug("STALK single-pull engage — full control")
         self.cruiseEnabled = True
@@ -74,9 +77,14 @@ class PreAPEngagement:
           self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
         else:
           self.pedal_speed_kph = 0.0
-          if not use_pedal:
+          if not use_pedal and di_cruise_state == "STANDBY":
             self.preap_cc_engage_needed = True
             self.preap_last_cc_spoof_ms = curr_time_ms
+
+    if self.pending_cancel_at_ms and curr_time_ms >= self.pending_cancel_at_ms:
+      self.preap_cc_cancel_needed = True
+      self.preap_last_cc_spoof_ms = curr_time_ms
+      self.pending_cancel_at_ms = 0
 
     if cruise_buttons != prev_cruise_buttons:
       be = self._make_button_event(cruise_buttons, prev_cruise_buttons, curr_time_ms,
@@ -115,12 +123,14 @@ class PreAPEngagement:
     return can_engage
 
   def _handle_double_pull(self, curr_time_ms, v_ego, speed_units,
-                          use_pedal, pedal_long_allowed, long_control_allowed):
+                          use_pedal, pedal_long_allowed, long_control_allowed,
+                          di_cruise_state="OFF"):
     self.prev_stalk_pull_time_ms = self.stalk_pull_time_ms
     self.stalk_pull_time_ms = curr_time_ms
     double_pull = (self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms) < self.double_pull_window_ms
 
     if double_pull:
+      self.pending_cancel_at_ms = 0
       carlog.debug("STALK double-pull (dt=%dms)", self.stalk_pull_time_ms - self.prev_stalk_pull_time_ms)
       self.cruiseEnabled = True
       self.pending_enable = False
@@ -131,7 +141,7 @@ class PreAPEngagement:
         self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
       else:
         self.pedal_speed_kph = 0.0
-        if not use_pedal:
+        if not use_pedal and di_cruise_state == "STANDBY":
           self.preap_cc_engage_needed = True
           self.preap_last_cc_spoof_ms = curr_time_ms
     else:
@@ -144,9 +154,8 @@ class PreAPEngagement:
       self.pending_enable = True
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
-      if not use_pedal:
-        self.preap_cc_cancel_needed = True
-        self.preap_last_cc_spoof_ms = curr_time_ms
+      if not use_pedal and di_cruise_state == "ENABLED":
+        self.pending_cancel_at_ms = curr_time_ms + self.double_pull_window_ms
 
   def _make_button_event(self, cruise_buttons, prev_cruise_buttons, curr_time_ms,
                          v_ego, speed_units, use_pedal):
@@ -176,6 +185,7 @@ class PreAPEngagement:
         self.pedal_speed_kph = 0.0
         self.stalk_pull_time_ms = 0
         self.prev_stalk_pull_time_ms = -1000
+        self.pending_cancel_at_ms = 0
         if was_long_active:
           self.longCtrlEvent = "pccDisabled"
       else:

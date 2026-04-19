@@ -106,5 +106,142 @@ class TestPreAPBrakeDisengage(unittest.TestCase):
     self.assertTrue(eng.enableLongControl)
 
 
+class TestNoPedalCCEngage(unittest.TestCase):
+  """Tests for no-pedal stock CC engage: DI state gating, double-pull behavior."""
+
+  def _make_engagement(self):
+    return PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=750)
+
+  def _double_pull(self, eng, t1=1000, t2=1400, di_cruise_state="OFF"):
+    """Simulate a double-pull in no-pedal mode."""
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=t1, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state=di_cruise_state)
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=2,
+      curr_time_ms=t1 + 50, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state=di_cruise_state)
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=t2, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state=di_cruise_state)
+    return eng
+
+  def test_double_pull_di_off_no_engage(self):
+    """Double-pull with DI OFF should NOT set engage_needed — lateral only."""
+    eng = self._make_engagement()
+    self._double_pull(eng, di_cruise_state="OFF")
+    self.assertTrue(eng.cruiseEnabled, "Lateral should be enabled")
+    self.assertFalse(eng.preap_cc_engage_needed, "Should not engage when DI is OFF")
+
+  def test_double_pull_di_standby_sets_engage(self):
+    """Double-pull with DI STANDBY should set engage_needed for SET_ACCEL spoof."""
+    eng = self._make_engagement()
+    self._double_pull(eng, di_cruise_state="STANDBY")
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertTrue(eng.preap_cc_engage_needed, "Should engage when DI is STANDBY")
+
+  def test_single_pull_cc_running_cancels_after_window(self):
+    """Single pull with DI ENABLED: cancel fires after double-pull window expires."""
+    eng = self._make_engagement()
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="ENABLED")
+    self.assertFalse(eng.preap_cc_cancel_needed, "Cancel should not fire immediately")
+    self.assertTrue(eng.pending_cancel_at_ms > 0)
+
+    # Advance past the double-pull window (750ms)
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=0,
+      curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="ENABLED")
+    self.assertTrue(eng.preap_cc_cancel_needed, "Cancel should fire after window expires")
+
+  def test_double_pull_cc_running_suppresses_cancel(self):
+    """Double-pull with DI ENABLED: pending cancel from first pull is suppressed."""
+    eng = self._make_engagement()
+    self._double_pull(eng, t1=1000, t2=1400, di_cruise_state="ENABLED")
+    self.assertEqual(eng.pending_cancel_at_ms, 0, "Double-pull should suppress pending cancel")
+
+    # Advance past where cancel would have fired
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=0,
+      curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="ENABLED")
+    self.assertFalse(eng.preap_cc_cancel_needed, "Cancel must not fire after double-pull")
+
+  def test_single_pull_cc_standby_no_cancel(self):
+    """Single pull with DI STANDBY: no cancel — preserve user's arming."""
+    eng = self._make_engagement()
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="STANDBY")
+    self.assertEqual(eng.pending_cancel_at_ms, 0, "Should not schedule cancel when DI is STANDBY")
+
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=0,
+      curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="STANDBY")
+    self.assertFalse(eng.preap_cc_cancel_needed)
+
+  def test_happy_path_armed_double_pull_engages(self):
+    """Regression: user arms CC (STANDBY), double-pulls → engage fires, no cancel."""
+    eng = self._make_engagement()
+    self._double_pull(eng, di_cruise_state="STANDBY")
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertTrue(eng.preap_cc_engage_needed)
+    self.assertFalse(eng.preap_cc_cancel_needed, "Must not cancel the user's armed CC")
+
+  def test_double_pull_di_off_then_arm_and_repull(self):
+    """User double-pulls with DI OFF (lateral only), arms cruise, then pulls again."""
+    eng = self._make_engagement()
+    self._double_pull(eng, t1=1000, t2=1400, di_cruise_state="OFF")
+    self.assertFalse(eng.preap_cc_engage_needed)
+    self.assertTrue(eng.cruiseEnabled)
+
+    # User presses end-stalk (MAIN) to arm — seen as a first pull (>750ms later)
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=3000, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="STANDBY")
+    self.assertTrue(eng.pending_enable)
+
+    # Second pull within window — double-pull with DI now STANDBY
+    eng.process_buttons(
+      cruise_buttons=0, prev_cruise_buttons=2,
+      curr_time_ms=3050, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="STANDBY")
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=3500, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="STANDBY")
+    self.assertTrue(eng.preap_cc_engage_needed, "Should engage after arming + re-pull")
+
+
 if __name__ == "__main__":
   unittest.main()

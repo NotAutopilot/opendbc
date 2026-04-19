@@ -22,6 +22,11 @@ ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 # Delay before sending stock CC cancel so pedal establishes control first
 CANCEL_DELAY_FRAMES = 10  # 100ms at 100Hz
 
+# Stock CC engage state machine
+_CC_PHASE_IDLE = 0
+_CC_PHASE_ENGAGING = 1     # Sending SET_ACCEL, waiting for DI_cruiseState == ENABLED
+CC_ENGAGE_TIMEOUT_FRAMES = 50  # 500ms at 100Hz
+
 
 class PreAPLongController:
 
@@ -31,7 +36,9 @@ class PreAPLongController:
     self.prev_requested_long = False
     self.preap_cancel_pending = False
     self.preap_cancel_frame = -1000000
-    self.preap_engage_pending = False
+    self.cc_engage_phase = _CC_PHASE_IDLE
+    self.cc_engage_start_frame = 0
+    self.prev_di_cc_engaged = False
     self.prev_preap_long_active = False
     self.preap_long_engage_frame = -1000000
 
@@ -83,13 +90,24 @@ class PreAPLongController:
         can_sends.insert(0, tesla_can.create_action_request(
           CruiseButtons.CANCEL, can_bus_party, stlk_counter, msg_stw))
         self.preap_cancel_pending = False
-    elif self.preap_engage_pending and frame % 10 == 0:
-      msg_stw = CS.msg_stw_actn_req
-      if msg_stw is not None:
-        stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
-        can_sends.insert(0, tesla_can.create_action_request(
-          CruiseButtons.RES_ACCEL, can_bus_party, stlk_counter, msg_stw))
-        self.preap_engage_pending = False
+        if self.cc_engage_phase != _CC_PHASE_IDLE:
+          self.cc_engage_phase = _CC_PHASE_IDLE
+    elif self.cc_engage_phase == _CC_PHASE_ENGAGING and frame % 10 == 0:
+      di_state = getattr(CS, 'di_cruise_state', 'OFF')
+      timed_out = (frame - self.cc_engage_start_frame) >= CC_ENGAGE_TIMEOUT_FRAMES
+
+      if timed_out:
+        carlog.warning("CC engage timeout after %d frames", frame - self.cc_engage_start_frame)
+        self.cc_engage_phase = _CC_PHASE_IDLE
+      elif di_state == "ENABLED":
+        carlog.debug("CC engage: ENABLED — stock CC active")
+        self.cc_engage_phase = _CC_PHASE_IDLE
+      else:
+        msg_stw = CS.msg_stw_actn_req
+        if msg_stw is not None:
+          stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
+          can_sends.insert(0, tesla_can.create_action_request(
+            CruiseButtons.SET_ACCEL, can_bus_party, stlk_counter, msg_stw))
 
     self.prev_requested_long = requested_long
 
@@ -98,16 +116,29 @@ class PreAPLongController:
       if CS.preap_cc_cancel_needed:
         self.preap_cancel_pending = True
         self.preap_cancel_frame = frame
+        self.cc_engage_phase = _CC_PHASE_IDLE
         CS.preap_cc_cancel_needed = False
-      if CS.preap_cc_engage_needed:
-        self.preap_engage_pending = True
+      if CS.preap_cc_engage_needed and self.cc_engage_phase == _CC_PHASE_IDLE:
+        self.cc_engage_phase = _CC_PHASE_ENGAGING
+        self.cc_engage_start_frame = frame
+        carlog.debug("CC engage: entering ENGAGING (DI=%s)", getattr(CS, 'di_cruise_state', 'OFF'))
         CS.preap_cc_engage_needed = False
 
     pedal_responding = not CS.pedal_timeout
 
+    CS.pccEvent = None
+
+    # Stock CC engage/disengage events (no-pedal mode)
+    if not pedal_long_allowed:
+      di_cc_engaged = getattr(CS, 'di_cruise_state', 'OFF') == "ENABLED"
+      if di_cc_engaged and not self.prev_di_cc_engaged:
+        CS.pccEvent = "teslaCCEngaged"
+      elif not di_cc_engaged and self.prev_di_cc_engaged:
+        CS.pccEvent = "teslaCCDisengaged"
+      self.prev_di_cc_engaged = di_cc_engaged
+
     if frame % 2 == 0:
       self.prev_enable_long_control = CS.enableLongControl
-      CS.pccEvent = None
 
       # Update zero-torque learning
       if use_pedal:
