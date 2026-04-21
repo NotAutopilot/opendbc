@@ -17,8 +17,10 @@ def init_preap_can(dbc_names, packers):
   return tesla_can
 
 
-# Grace period after engage: clamp accel >= 0 to prevent PID reset regen spike
+# Grace period after engage: clamp accel to [0, ENGAGE_ACCEL_CAP] to prevent
+# both regen spike (negative) and pedal stab (high positive) from MPC overshoot
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
+ENGAGE_ACCEL_CAP = 0.3    # m/s² — gentle ramp, matches standstill profile floor
 
 # Delay before sending stock CC cancel so pedal establishes control first
 CANCEL_DELAY_FRAMES = 10  # 100ms at 100Hz
@@ -157,7 +159,7 @@ class PreAPLongController:
           elif long_active:
             accel_request = float(actuators.accel)
             if in_engage_grace:
-              accel_request = max(accel_request, 0.0)
+              accel_request = max(0.0, min(accel_request, ENGAGE_ACCEL_CAP))
 
             self.prev_pedal_di = self.vdas.update(
               accel_request, CS.out.vEgo, self.prev_pedal_di,

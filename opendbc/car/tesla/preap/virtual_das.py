@@ -37,6 +37,10 @@ from opendbc.car.tesla.pedal.controller import (
 
 FF_TABLE_PATH = "/data/vdas_ff_table.json"
 
+# Small PID corrections below this threshold are suppressed to prevent
+# hunting between gas and regen when the error is near zero
+PID_CORRECTION_DEADBAND = 0.5  # DI units
+
 
 class JerkLimiter:
   """S-curve rate limiter on acceleration commands.
@@ -166,7 +170,12 @@ class VirtualDAS:
     pid_correction = self.inner_pid.update(
       error, speed=v_ego, freeze_integrator=freeze_integrator)
 
-    pedal_di = ff_di + float(pid_correction)
+    # Suppress small PID corrections that cause hunting near zero-torque
+    correction_di = float(pid_correction)
+    if abs(correction_di) < PID_CORRECTION_DEADBAND:
+      correction_di = 0.0
+
+    pedal_di = ff_di + correction_di
 
     pedal_profile = nap_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
