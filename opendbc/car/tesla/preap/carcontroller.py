@@ -3,6 +3,7 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN, PEDAL_DI_ZERO
+from opendbc.car.tesla.preap.interface import get_preap_accel_limits
 from opendbc.car.tesla.pedal.controller import get_zero_torque
 from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
@@ -44,6 +45,9 @@ class PreAPLongController:
     self.prev_di_cc_engaged = False
     self.prev_preap_long_active = False
     self.preap_long_engage_frame = -1000000
+    # Snapshot of max-accel-at-engage-speed; used as the deterministic
+    # ceiling for the grace-period ramp. Set fresh on each engage rising edge.
+    self.engage_a_max = 0.0
     self.vdas = VirtualDAS(dt=0.02)
 
   def update(self, CC, CS, frame, tesla_can, can_bus_party):
@@ -70,6 +74,12 @@ class PreAPLongController:
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
       self.vdas.reset(a_init=0.0, pedal_di_init=self.prev_pedal_di)
+      # Snapshot the accel ceiling at engage speed. Used to ramp the
+      # grace-period cap below. Caching here avoids reading Params 50x
+      # during the grace window and keeps the cap stable even if
+      # LongitudinalPersonality is toggled mid-engage (driver can't flip
+      # it in 0.5s anyway).
+      _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
     engage_elapsed_frames = frame - self.preap_long_engage_frame
     in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
@@ -159,8 +169,11 @@ class PreAPLongController:
           elif long_active:
             accel_request = float(actuators.accel)
             if in_engage_grace:
+              # Cap at grace_progress * engage_a_max so the ceiling is the
+              # tuned accel-profile envelope, not the live MPC request.
+              # Keeps an MPC outlier on engage from propagating through.
               grace_progress = engage_elapsed_frames / ENGAGE_GRACE_FRAMES
-              accel_cap = grace_progress * max(accel_request, 0.0)
+              accel_cap = grace_progress * self.engage_a_max
               accel_request = max(0.0, min(accel_request, accel_cap))
 
             self.prev_pedal_di = self.vdas.update(
