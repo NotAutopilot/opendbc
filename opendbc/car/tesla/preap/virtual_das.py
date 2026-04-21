@@ -31,15 +31,16 @@ from opendbc.car.tesla.preap.nap_conf import (
 from opendbc.car.tesla.pedal.controller import (
   get_zero_torque,
   PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
-  ACCEL_DEADBAND,
 )
 
 
 FF_TABLE_PATH = "/data/vdas_ff_table.json"
 
-# Small PID corrections below this threshold are suppressed to prevent
-# hunting between gas and regen when the error is near zero
-PID_CORRECTION_DEADBAND = 0.5  # DI units
+# Inner PID error deadband: errors below this threshold are zeroed before
+# entering the PID. Prevents integral accumulation from sensor noise and
+# MPC jitter near steady-state. Applied to the error input, not the output,
+# so there's no discontinuity in the correction signal.
+PID_ERROR_DEADBAND = 0.1  # m/s²
 
 
 class JerkLimiter:
@@ -97,9 +98,6 @@ class FeedforwardModel:
     zero-torque offset shifts the result: fully applied for positive
     accel (gas side), linearly blended to zero at max regen.
     """
-    if abs(a_cmd) < ACCEL_DEADBAND:
-      return zero_torque_di
-
     # Bilinear interpolation: speed (outer), accel (inner)
     si = float(interp(v_ego, self.speed_bp, range(len(self.speed_bp))))
     si_lo = int(si)
@@ -167,15 +165,13 @@ class VirtualDAS:
     a_ego_future = a_ego_filtered + j_ego * future_t
 
     error = a_limited - a_ego_future
-    pid_correction = self.inner_pid.update(
-      error, speed=v_ego, freeze_integrator=freeze_integrator)
+    if abs(error) < PID_ERROR_DEADBAND:
+      error = 0.0
 
-    # Suppress small PID corrections that cause hunting near zero-torque
-    correction_di = float(pid_correction)
-    if abs(correction_di) < PID_CORRECTION_DEADBAND:
-      correction_di = 0.0
+    pid_correction = float(self.inner_pid.update(
+      error, speed=v_ego, freeze_integrator=freeze_integrator))
 
-    pedal_di = ff_di + correction_di
+    pedal_di = ff_di + pid_correction
 
     pedal_profile = nap_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))

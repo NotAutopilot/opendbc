@@ -10,7 +10,7 @@ from opendbc.car.tesla.preap.nap_conf import (
   PEDAL_BP, PEDAL_MAX_VALUES,
 )
 from opendbc.car.tesla.pedal.controller import (
-  PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN, ACCEL_DEADBAND,
+  PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
 )
 
 
@@ -149,13 +149,13 @@ class TestVirtualDAS:
     assert vdas.prev_pedal_di == 5.0
     assert vdas.inner_pid.i == 0.0
 
-  def test_deadband_near_zero(self):
+  def test_small_accel_near_zero(self):
+    """Small accel produces a small positive DI near zero-torque (smooth interp, no cliff)."""
     vdas = VirtualDAS(dt=0.02)
-    small_accel = ACCEL_DEADBAND * 0.5
     for _ in range(200):
-      di = vdas.update(small_accel, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
-    # PID integral may drift slightly with a_ego=0 default; allow small tolerance
-    assert abs(di - PEDAL_DI_ZERO) < 0.5
+      di = vdas.update(0.05, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
+    assert di > PEDAL_DI_ZERO - 1.0
+    assert di < PEDAL_DI_ZERO + 3.0
 
   def test_negative_accel_produces_regen(self):
     vdas = VirtualDAS(dt=0.02)
@@ -358,13 +358,13 @@ class TestFeedforwardModel:
     di_with_zt = ff.get(REGEN_MAX, 15.0, zero_torque_di=2.0)
     assert abs(di_with_zt - di_zero_zt) < 0.1
 
-  def test_deadband_returns_zero_torque(self):
-    """Small accel within deadband returns zero-torque directly."""
+  def test_small_accel_smooth_near_zero_torque(self):
+    """Small accel produces a value near zero-torque via smooth interp (no cliff)."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
 
     ff = FeedforwardModel(table_path="/nonexistent")
-    di = ff.get(ACCEL_DEADBAND * 0.5, 15.0, zero_torque_di=3.0)
-    assert di == 3.0
+    di = ff.get(0.05, 15.0, zero_torque_di=3.0)
+    assert abs(di - 3.0) < 2.0  # near zero-torque, not a big jump
 
   def test_json_override_loads(self, tmp_path):
     """Custom JSON table overrides the default."""
