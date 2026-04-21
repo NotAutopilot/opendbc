@@ -29,3 +29,20 @@ ACCEL_PREAP_FOLLOW = [0.3, 0.6, 0.9, 0.8, 0.7, 0.55]
 PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
 PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
 PEDAL_LONG_KI_V = [0.05, 0.08, 0.10, 0.15]
+
+# Virtual DAS inner PID — sits inside carcontroller, corrects the
+# feedforward output by tracking (a_cmd - a_ego_future). Conservative
+# initial tune: no kp (same philosophy as outer loop), ki faster than
+# outer so inner loop settles before outer reacts.
+VDAS_INNER_K_BP = [0.0, 5.0, 35.0]
+VDAS_INNER_KP_V = [0.0, 0.0, 0.0]
+VDAS_INNER_KI_V = [0.3, 0.2, 0.15]
+
+# Delay compensation: predict a_ego this far into the future using
+# estimated jerk. Longer at highway speed where powertrain is slower.
+VDAS_FUTURE_T_BP = [2.0, 5.0]
+VDAS_FUTURE_T_V = [0.25, 0.5]
+
+# a_ego low-pass filter time constant (seconds). Smooths IMU noise
+# without adding too much phase lag. Matches Toyota's 0.25s RC.
+VDAS_AEGO_FILTER_RC = 0.25
