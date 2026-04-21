@@ -25,6 +25,7 @@ class NAPParamKeys:
   # Radar
   RADAR_ENABLED = "NAPRadarEnabled"
   RADAR_BEHIND_NOSECONE = "NAPRadarBehindNosecone"
+  RADAR_OFFSET = "NAPRadarOffset"
 
   # iBooster / Braking
   IBOOSTER_ENABLED = "NAPiBoosterEnabled"
@@ -48,6 +49,7 @@ DEFAULTS = {
   NAPParamKeys.PEDAL_CALIB_ZERO: 0.0,
   NAPParamKeys.RADAR_ENABLED: False,
   NAPParamKeys.RADAR_BEHIND_NOSECONE: False,
+  NAPParamKeys.RADAR_OFFSET: 0.0,
   NAPParamKeys.IBOOSTER_ENABLED: False,
   NAPParamKeys.BRAKE_FACTOR: 1.0,
   NAPParamKeys.FORCE_PRE_AP: False,

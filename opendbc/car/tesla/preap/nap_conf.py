@@ -241,11 +241,11 @@ class NAPConf:
 
   @property
   def radar_offset(self):
-    return float(self._get('radar_offset', 0.0))
+    return self._get_param_float(NAPParamKeys.RADAR_OFFSET, 'radar_offset', 0.0)
 
   @radar_offset.setter
   def radar_offset(self, value):
-    self._put('radar_offset', float(value))
+    self._put_param_float(NAPParamKeys.RADAR_OFFSET, 'radar_offset', value)
 
   @property
   def pedal_calib_min(self):
