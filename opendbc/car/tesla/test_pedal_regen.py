@@ -2,7 +2,7 @@
 Tests for feedforward-dominant pedal longitudinal control.
 
 Validates:
-  1. Rate limiter prevents WOT-on-engage (pedal ramps at ≤PEDAL_RAMP_RATE/step)
+  1. Rate limiter prevents WOT-on-engage (pedal ramps at ≤PEDAL_RAMP_RATE_UP/step)
   2. Rate limiter allows smooth ramp-down to max regen
   3. ACCEL_PREAP_PROFILES use Tinkla Pedal values (0.3 at standstill)
   4. Updated ki values match feedforward-dominant architecture
@@ -35,7 +35,7 @@ from opendbc.car.tesla.preap.constants import (
   ACCEL_PREAP_PROFILES, PEDAL_LONG_KI_V, PEDAL_LONG_KP_V, ACCEL_PREAP_BP,
 )
 from opendbc.car.tesla.pedal.controller import (
-  compute_pedal_command, PEDAL_RAMP_RATE,
+  compute_pedal_command, PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
 )
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN as TC_PEDAL_DI_MIN
@@ -86,10 +86,9 @@ class TestPedalRateLimiter(unittest.TestCase):
   """
 
   def test_wot_prevention_from_zero(self):
-    """From prev_pedal_di=0, a large accel request should only ramp by PEDAL_RAMP_RATE."""
+    """From prev_pedal_di=0, a large accel request should only ramp by PEDAL_RAMP_RATE_UP."""
     _, new_di = compute_pedal_command(2.5, v_ego=10.0, prev_pedal_di=0.0)
-    # First step: pedal_di should be at most PEDAL_RAMP_RATE from 0
-    self.assertLessEqual(new_di, PEDAL_RAMP_RATE)
+    self.assertLessEqual(new_di, PEDAL_RAMP_RATE_UP)
     self.assertGreater(new_di, 0.0)
 
   def test_ramp_up_over_multiple_steps(self):
@@ -98,16 +97,15 @@ class TestPedalRateLimiter(unittest.TestCase):
     for _ in range(20):
       _, new_di = compute_pedal_command(2.0, v_ego=15.0, prev_pedal_di=prev_di)
       delta = new_di - prev_di
-      self.assertLessEqual(delta, PEDAL_RAMP_RATE + 0.001,
-                           f"Pedal jumped {delta} DI in one step (max {PEDAL_RAMP_RATE})")
-      self.assertGreaterEqual(delta, -PEDAL_RAMP_RATE - 0.001)
+      self.assertLessEqual(delta, PEDAL_RAMP_RATE_UP + 0.001,
+                           f"Pedal jumped {delta} DI in one step (max {PEDAL_RAMP_RATE_UP})")
+      self.assertGreaterEqual(delta, -PEDAL_RAMP_RATE_DOWN - 0.001)
       prev_di = new_di
 
   def test_ramp_down_to_max_regen(self):
     """From prev_pedal_di=0, a large negative accel should ramp down smoothly."""
     _, new_di = compute_pedal_command(-1.5, v_ego=10.0, prev_pedal_di=0.0)
-    # First step: should ramp down by at most PEDAL_RAMP_RATE
-    self.assertGreaterEqual(new_di, -PEDAL_RAMP_RATE)
+    self.assertGreaterEqual(new_di, -PEDAL_RAMP_RATE_DOWN)
     self.assertLess(new_di, 0.0)
 
   def test_reaches_max_regen_eventually(self):
@@ -131,10 +129,8 @@ class TestPedalRateLimiter(unittest.TestCase):
 
   def test_engage_edge_resets_prev(self):
     """Simulating engage edge: prev_pedal_di=0 prevents stale high value from causing WOT."""
-    # Engage edge resets prev_pedal_di to 0.0 (done in carcontroller.update)
-    # A modest accel request from 0 should not jump past PEDAL_RAMP_RATE
     _, new_di = compute_pedal_command(1.0, v_ego=10.0, prev_pedal_di=0.0)
-    self.assertLessEqual(new_di, PEDAL_RAMP_RATE)
+    self.assertLessEqual(new_di, PEDAL_RAMP_RATE_UP)
 
 
 class TestRegenCurve(unittest.TestCase):
@@ -147,13 +143,17 @@ class TestRegenCurve(unittest.TestCase):
 
 
 class TestRampRateConstant(unittest.TestCase):
-  """Verify PEDAL_RAMP_RATE is set correctly."""
+  """Verify asymmetric ramp rates are set correctly."""
 
-  def test_ramp_rate_value(self):
-    self.assertAlmostEqual(PEDAL_RAMP_RATE, 2.5)
+  def test_ramp_rate_up_value(self):
+    self.assertAlmostEqual(PEDAL_RAMP_RATE_UP, 5.0)
 
-  def test_ramp_rate_positive(self):
-    self.assertGreater(PEDAL_RAMP_RATE, 0.0)
+  def test_ramp_rate_down_value(self):
+    self.assertAlmostEqual(PEDAL_RAMP_RATE_DOWN, 2.5)
+
+  def test_ramp_rates_positive(self):
+    self.assertGreater(PEDAL_RAMP_RATE_UP, 0.0)
+    self.assertGreater(PEDAL_RAMP_RATE_DOWN, 0.0)
 
 
 if __name__ == '__main__':

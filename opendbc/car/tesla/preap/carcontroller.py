@@ -3,7 +3,8 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN, PEDAL_DI_ZERO
-from opendbc.car.tesla.pedal.controller import compute_pedal_command, get_zero_torque
+from opendbc.car.tesla.pedal.controller import get_zero_torque
+from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.values import CANBUS, CruiseButtons
 from opendbc.car.carlog import carlog
@@ -41,6 +42,7 @@ class PreAPLongController:
     self.prev_di_cc_engaged = False
     self.prev_preap_long_active = False
     self.preap_long_engage_frame = -1000000
+    self.vdas = VirtualDAS(dt=0.02)
 
   def update(self, CC, CS, frame, tesla_can, can_bus_party):
     can_sends = []
@@ -52,7 +54,6 @@ class PreAPLongController:
     pedal_factor = float(nap_conf.pedal_factor)
     pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
     pedal_long_allowed = use_pedal and pedal_transform_valid
-    pedal_passthrough = nap_conf.pedal_passthrough
 
     # For Pre-AP pedal, we use requested_long as our primary gate instead
     # of long_active. long_active is False during gas press (gasOverride
@@ -66,6 +67,7 @@ class PreAPLongController:
       self.preap_long_engage_frame = frame
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
+      self.vdas.reset(a_init=0.0, pedal_di_init=self.prev_pedal_di)
 
     engage_elapsed_frames = frame - self.preap_long_engage_frame
     in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
@@ -153,14 +155,13 @@ class PreAPLongController:
             can_sends.append(tesla_can.create_pedal_command(0, enable=0))
 
           elif long_active:
-            # Normal operation: planner is active, send computed pedal
             accel_request = float(actuators.accel)
             if in_engage_grace:
               accel_request = max(accel_request, 0.0)
 
-            target_speed_kph = float(CS.pedal_speed_kph)
-            pedal_cmd, self.prev_pedal_di = compute_pedal_command(
-              accel_request, CS.out.vEgo, self.prev_pedal_di, target_speed_kph)
+            self.prev_pedal_di = self.vdas.update(
+              accel_request, CS.out.vEgo, self.prev_pedal_di)
+            pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
             can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
 
             if self.prev_pedal_di <= 0.95 * PEDAL_DI_MIN and not in_engage_grace:
