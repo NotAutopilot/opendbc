@@ -4,6 +4,10 @@ Replaces the open-loop compute_pedal_command() path with a jerk-limited,
 feedback-corrected controller for smooth pedal actuation without DAS hardware.
 """
 
+import json
+import os
+
+import numpy as np
 from numpy import clip, interp
 
 from opendbc.car.common.filter_simple import FirstOrderFilter
@@ -12,6 +16,11 @@ from opendbc.car.tesla.preap.constants import (
   VDAS_INNER_K_BP, VDAS_INNER_KP_V, VDAS_INNER_KI_V,
   VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
   VDAS_AEGO_FILTER_RC,
+)
+from opendbc.car.tesla.preap.ff_table_default import (
+  SPEED_BP as FF_SPEED_BP,
+  ACCEL_BP as FF_ACCEL_BP,
+  DEFAULT_TABLE as FF_DEFAULT_TABLE,
 )
 from opendbc.car.tesla.preap.nap_conf import (
   nap_conf,
@@ -24,6 +33,9 @@ from opendbc.car.tesla.pedal.controller import (
   PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
   ACCEL_DEADBAND,
 )
+
+
+FF_TABLE_PATH = "/data/vdas_ff_table.json"
 
 
 class JerkLimiter:
@@ -47,6 +59,60 @@ class JerkLimiter:
     self.a_limited = a_init
 
 
+class FeedforwardModel:
+  """2D lookup table mapping (speed, accel) → pedal_di.
+
+  Loads from a JSON file if available (produced by generate_ff_table.py),
+  otherwise falls back to the default table computed from the legacy
+  3-breakpoint interpolation. Zero-torque offset is applied at runtime.
+  """
+
+  def __init__(self, table_path: str = FF_TABLE_PATH):
+    self.speed_bp = list(FF_SPEED_BP)
+    self.accel_bp = list(FF_ACCEL_BP)
+    self.table = [list(row) for row in FF_DEFAULT_TABLE]
+    self._load_override(table_path)
+
+  def _load_override(self, path: str):
+    if not os.path.isfile(path):
+      return
+    try:
+      with open(path) as f:
+        data = json.load(f)
+      self.speed_bp = data['speed_bp']
+      self.accel_bp = data['accel_bp']
+      self.table = data['table']
+    except (json.JSONDecodeError, KeyError, TypeError):
+      from opendbc.car.carlog import carlog
+      carlog.warning("vdas: failed to load FF table from %s, using defaults", path)
+
+  def get(self, a_cmd: float, v_ego: float, zero_torque_di: float) -> float:
+    """Look up pedal_di for a given (speed, accel) pair.
+
+    The table is stored with zero_torque_di=0. At runtime the learned
+    zero-torque offset shifts the result: fully applied for positive
+    accel (gas side), linearly blended to zero at max regen.
+    """
+    if abs(a_cmd) < ACCEL_DEADBAND:
+      return zero_torque_di
+
+    # Bilinear interpolation: speed (outer), accel (inner)
+    si = float(interp(v_ego, self.speed_bp, range(len(self.speed_bp))))
+    si_lo = int(si)
+    si_hi = min(si_lo + 1, len(self.speed_bp) - 1)
+    sf = si - si_lo
+
+    di_lo = float(interp(a_cmd, self.accel_bp, self.table[si_lo]))
+    di_hi = float(interp(a_cmd, self.accel_bp, self.table[si_hi]))
+    base_di = di_lo + sf * (di_hi - di_lo)
+
+    # Zero-torque shift: full offset at accel>=0, blends to zero at max regen
+    blend = float(clip((a_cmd - REGEN_MAX) / (0.0 - REGEN_MAX), 0.0, 1.0)) if a_cmd < 0 else 1.0
+    base_di += zero_torque_di * blend
+
+    return base_di
+
+
 class VirtualDAS:
   """Cascaded longitudinal controller for Pre-AP Tesla pedal control.
 
@@ -57,6 +123,7 @@ class VirtualDAS:
   def __init__(self, dt: float = 0.02):
     self.dt = dt
     self.jerk_limiter = JerkLimiter(j_max=2.5, dt=dt)
+    self.ff_model = FeedforwardModel()
     self.prev_pedal_di = 0.0
 
     self.inner_pid = PIDController(
@@ -119,17 +186,12 @@ class VirtualDAS:
     self.prev_pedal_di = pedal_di_init
 
   def _feedforward(self, a_cmd: float, v_ego: float) -> float:
-    """Map acceleration to pedal DI via piecewise linear interpolation."""
+    """Map acceleration to pedal DI via 2D lookup table."""
+    zero_torque_di = get_zero_torque().get(v_ego)
     pedal_profile = nap_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
-    zero_torque_di = get_zero_torque().get(v_ego)
 
-    if abs(a_cmd) < ACCEL_DEADBAND:
-      a_cmd = 0.0
-
-    accel_bp = [REGEN_MAX, 0.0, ACCEL_MAX]
-    accel_v = [PEDAL_DI_MIN, zero_torque_di, max_pedal_value]
-    pedal_di = float(interp(a_cmd, accel_bp, accel_v))
+    pedal_di = self.ff_model.get(a_cmd, v_ego, zero_torque_di)
 
     return float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
 

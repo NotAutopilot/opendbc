@@ -70,7 +70,7 @@ def get_preap_params(ret, fingerprint):
       ret.longitudinalTuning.kf = 1.0
     except AttributeError:
       pass  # kf not available in all capnp schema versions
-    ret.longitudinalActuatorDelay = 0.3
+    ret.longitudinalActuatorDelay = 0.4
 
   # Legacy Model S steering and physical params
   ret.steerLimitTimer = 0.4

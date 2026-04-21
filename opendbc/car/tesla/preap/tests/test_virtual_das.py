@@ -312,3 +312,97 @@ class TestInnerPID:
     vdas = VirtualDAS(dt=0.02)
     di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=0.0)
     assert np.isfinite(di)
+
+
+# --- Phase 3: FeedforwardModel ---
+
+class TestFeedforwardModel:
+
+  @pytest.fixture(autouse=True)
+  def _fixtures(self, mock_nap_conf, mock_zero_torque):
+    pass
+
+  def test_default_table_matches_legacy_at_grid_points(self):
+    """Default FF table should match the old 3-breakpoint interp at grid points."""
+    from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP, DEFAULT_TABLE
+
+    ff = FeedforwardModel(table_path="/nonexistent")
+
+    for si, speed in enumerate(SPEED_BP):
+      max_pedal = float(np.interp(speed, PEDAL_BP, PEDAL_MAX_VALUES))
+      for ai, accel in enumerate(ACCEL_BP):
+        expected = float(np.interp(accel,
+                                   [REGEN_MAX, 0.0, ACCEL_MAX],
+                                   [PEDAL_DI_MIN, 0.0, max_pedal]))
+        # FF model with zero_torque_di=0 should match legacy interp
+        got = ff.get(accel, speed, zero_torque_di=0.0)
+        assert abs(got - expected) < 0.5, \
+          f"Mismatch at speed={speed}, accel={accel}: got={got:.2f}, expected={expected:.2f}"
+
+  def test_zero_torque_shift_positive_accel(self):
+    """Positive accel should shift by full zero-torque offset."""
+    from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
+
+    ff = FeedforwardModel(table_path="/nonexistent")
+    di_zero_zt = ff.get(1.0, 15.0, zero_torque_di=0.0)
+    di_with_zt = ff.get(1.0, 15.0, zero_torque_di=2.0)
+    assert abs((di_with_zt - di_zero_zt) - 2.0) < 0.1
+
+  def test_zero_torque_shift_at_max_regen(self):
+    """At max regen, zero-torque offset should blend to zero."""
+    from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
+
+    ff = FeedforwardModel(table_path="/nonexistent")
+    di_zero_zt = ff.get(REGEN_MAX, 15.0, zero_torque_di=0.0)
+    di_with_zt = ff.get(REGEN_MAX, 15.0, zero_torque_di=2.0)
+    assert abs(di_with_zt - di_zero_zt) < 0.1
+
+  def test_deadband_returns_zero_torque(self):
+    """Small accel within deadband returns zero-torque directly."""
+    from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
+
+    ff = FeedforwardModel(table_path="/nonexistent")
+    di = ff.get(ACCEL_DEADBAND * 0.5, 15.0, zero_torque_di=3.0)
+    assert di == 3.0
+
+  def test_json_override_loads(self, tmp_path):
+    """Custom JSON table overrides the default."""
+    import json
+    from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
+
+    custom = {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [
+        [-10.0, 0.0, 100.0],
+        [-10.0, 0.0, 100.0],
+      ],
+    }
+    path = tmp_path / "ff_table.json"
+    path.write_text(json.dumps(custom))
+
+    ff = FeedforwardModel(table_path=str(path))
+    assert ff.speed_bp == [0.0, 40.0]
+    di = ff.get(2.5, 20.0, zero_torque_di=0.0)
+    assert abs(di - 100.0) < 0.5
+
+  def test_invalid_json_falls_back_to_default(self, tmp_path):
+    """Corrupted JSON file should fall back to defaults."""
+    from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP
+
+    path = tmp_path / "bad.json"
+    path.write_text("{invalid json")
+
+    ff = FeedforwardModel(table_path=str(path))
+    assert ff.speed_bp == list(SPEED_BP)
+
+  def test_vdas_uses_ff_model(self):
+    """VirtualDAS._feedforward should use the FeedforwardModel."""
+    vdas = VirtualDAS(dt=0.02)
+    assert hasattr(vdas, 'ff_model')
+
+    for _ in range(200):
+      di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
+    assert di > PEDAL_DI_ZERO

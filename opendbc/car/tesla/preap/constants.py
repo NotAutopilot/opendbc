@@ -41,7 +41,7 @@ VDAS_INNER_KI_V = [0.3, 0.2, 0.15]
 # Delay compensation: predict a_ego this far into the future using
 # estimated jerk. Longer at highway speed where powertrain is slower.
 VDAS_FUTURE_T_BP = [2.0, 5.0]
-VDAS_FUTURE_T_V = [0.25, 0.5]
+VDAS_FUTURE_T_V = [0.30, 0.55]
 
 # a_ego low-pass filter time constant (seconds). Smooths IMU noise
 # without adding too much phase lag. Matches Toyota's 0.25s RC.
