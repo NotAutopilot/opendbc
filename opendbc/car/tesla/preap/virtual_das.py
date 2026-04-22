@@ -108,8 +108,12 @@ class FeedforwardModel:
     di_hi = float(interp(a_cmd, self.accel_bp, self.table[si_hi]))
     base_di = di_lo + sf * (di_hi - di_lo)
 
-    # Zero-torque shift: full offset at accel>=0, blends to zero at max regen
-    blend = float(clip((a_cmd - REGEN_MAX) / (0.0 - REGEN_MAX), 0.0, 1.0)) if a_cmd < 0 else 1.0
+    # Zero-torque shift: full at accel=0, fades to zero at both extremes.
+    # Reproduces the legacy interp where zt is the midpoint, not an additive offset.
+    if a_cmd < 0:
+      blend = float(clip((a_cmd - REGEN_MAX) / (0.0 - REGEN_MAX), 0.0, 1.0))
+    else:
+      blend = float(1.0 - a_cmd / ACCEL_MAX)
     base_di += zero_torque_di * blend
 
     return base_di

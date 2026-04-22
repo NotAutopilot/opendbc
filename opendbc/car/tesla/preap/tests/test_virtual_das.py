@@ -341,13 +341,18 @@ class TestFeedforwardModel:
           f"Mismatch at speed={speed}, accel={accel}: got={got:.2f}, expected={expected:.2f}"
 
   def test_zero_torque_shift_positive_accel(self):
-    """Positive accel should shift by full zero-torque offset."""
+    """Positive accel zt offset fades: full at accel=0, zero at ACCEL_MAX."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
 
     ff = FeedforwardModel(table_path="/nonexistent")
+    # At accel=1.0, blend = 1 - 1.0/2.5 = 0.6, so offset = 2.0 * 0.6 = 1.2
     di_zero_zt = ff.get(1.0, 15.0, zero_torque_di=0.0)
     di_with_zt = ff.get(1.0, 15.0, zero_torque_di=2.0)
-    assert abs((di_with_zt - di_zero_zt) - 2.0) < 0.1
+    assert abs((di_with_zt - di_zero_zt) - 1.2) < 0.2
+    # At ACCEL_MAX, offset should be zero
+    di_max_zero = ff.get(ACCEL_MAX, 15.0, zero_torque_di=0.0)
+    di_max_zt = ff.get(ACCEL_MAX, 15.0, zero_torque_di=2.0)
+    assert abs(di_max_zt - di_max_zero) < 0.1
 
   def test_zero_torque_shift_at_max_regen(self):
     """At max regen, zero-torque offset should blend to zero."""
