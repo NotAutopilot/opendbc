@@ -411,3 +411,87 @@ class TestFeedforwardModel:
     for _ in range(200):
       di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
     assert di > PEDAL_DI_ZERO
+
+
+# --- Phase 4: Grade Estimation ---
+
+class TestGradeEstimator:
+
+  def test_flat_road_zero_compensation(self):
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    ge = GradeEstimator(dt=0.02)
+    for _ in range(100):
+      grade, pitch_comp = ge.update([0.0, 0.0, 0.0])
+    assert abs(grade) < 0.01
+    assert abs(pitch_comp) < 0.01
+
+  def test_uphill_positive_grade(self):
+    """Uphill (positive pitch) should report positive grade_accel
+    (gravity decelerates the car, so we need more pedal)."""
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    ge = GradeEstimator(dt=0.02)
+    pitch = math.radians(3.0)  # ~5% grade
+    for _ in range(200):
+      grade, _ = ge.update([0.0, pitch, 0.0])
+    assert grade > 0.4  # sin(3°) * 9.81 ≈ 0.51
+
+  def test_downhill_negative_grade(self):
+    """Downhill (negative pitch) should report negative grade_accel."""
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    ge = GradeEstimator(dt=0.02)
+    pitch = math.radians(-3.0)
+    for _ in range(200):
+      grade, _ = ge.update([0.0, pitch, 0.0])
+    assert grade < -0.4
+
+  def test_empty_orientation_graceful(self):
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    ge = GradeEstimator(dt=0.02)
+    grade, pitch_comp = ge.update([])
+    assert grade == 0.0
+    assert pitch_comp == 0.0
+
+  def test_none_orientation_graceful(self):
+    """VirtualDAS with orientation_ned=None should not crash."""
+    vdas = VirtualDAS(dt=0.02)
+    di = vdas.update(0.5, v_ego=15.0, prev_pedal_di=0.0, orientation_ned=None)
+    assert np.isfinite(di)
+
+  def test_pitch_compensation_clamped(self):
+    """Transient pitch compensation should be clamped."""
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator, MAX_PITCH_COMPENSATION
+    ge = GradeEstimator(dt=0.02)
+    # Sudden large pitch change
+    ge.update([0.0, 0.0, 0.0])
+    _, pitch_comp = ge.update([0.0, math.radians(20.0), 0.0])
+    assert abs(pitch_comp) <= MAX_PITCH_COMPENSATION + 0.01
+
+  def test_grade_subtracted_from_aego(self, mock_nap_conf, mock_zero_torque):
+    """On a downhill, grade compensation should reduce the effective a_ego
+    so the PID doesn't think the car is over-accelerating."""
+    import math
+    vdas = VirtualDAS(dt=0.02)
+    pitch = math.radians(-3.0)  # downhill
+
+    # Run with grade: the PID should see less error than without
+    for _ in range(100):
+      vdas.update(0.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
+                  a_ego=0.5, orientation_ned=[0.0, pitch, 0.0])
+
+    # The a_ego_filter should reflect corrected value (a_ego - grade)
+    # grade is negative on downhill, so corrected = 0.5 - (-0.51) = ~1.01
+    # Without grade: filter would settle near 0.5
+    assert vdas.a_ego_filter.x > 0.8  # corrected is higher than raw
+
+  def test_reset_clears_grade(self):
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    ge = GradeEstimator(dt=0.02)
+    for _ in range(100):
+      ge.update([0.0, math.radians(5.0), 0.0])
+    assert abs(ge.pitch_lp.x) > 0.01
+    ge.reset()
+    assert ge.pitch_lp.x == 0.0

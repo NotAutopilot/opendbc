@@ -5,12 +5,13 @@ feedback-corrected controller for smooth pedal actuation without DAS hardware.
 """
 
 import json
+import math
 import os
 
 import numpy as np
 from numpy import clip, interp
 
-from opendbc.car.common.filter_simple import FirstOrderFilter
+from opendbc.car.common.filter_simple import FirstOrderFilter, HighPassFilter
 from opendbc.car.common.pid import PIDController
 from opendbc.car.tesla.preap.constants import (
   VDAS_INNER_K_BP, VDAS_INNER_KP_V, VDAS_INNER_KI_V,
@@ -41,6 +42,61 @@ FF_TABLE_PATH = "/data/vdas_ff_table.json"
 # MPC jitter near steady-state. Applied to the error input, not the output,
 # so there's no discontinuity in the correction signal.
 PID_ERROR_DEADBAND = 0.1  # m/s²
+
+GRAVITY = 9.81  # m/s²
+PITCH_LP_RC = 0.5   # low-pass filter RC for steady-state grade (seconds)
+PITCH_HP_RC1 = 0.1  # high-pass inner RC for transient grade detection
+PITCH_HP_RC2 = 1.0  # high-pass outer RC
+MAX_PITCH_COMPENSATION = 1.5  # m/s² — clamp transient compensation
+
+
+class GradeEstimator:
+  """Estimates road grade from IMU pitch and compensates the controller.
+
+  Uses a low-pass filter on pitch for the steady-state grade component
+  (subtracted from a_ego so the inner PID doesn't fight gravity) and
+  a high-pass filter for transient grade changes (added to feedforward
+  so the controller anticipates crests and dips).
+
+  Follows the same pattern as Toyota's carcontroller.py lines 68-69, 204-235.
+  """
+
+  def __init__(self, dt: float = 0.02):
+    self.pitch_lp = FirstOrderFilter(0.0, PITCH_LP_RC, dt)
+    self.pitch_hp = HighPassFilter(0.0, PITCH_HP_RC1, PITCH_HP_RC2, dt)
+
+  def update(self, orientation_ned: list) -> tuple:
+    """Update filters with current pitch.
+
+    Args:
+      orientation_ned: [roll, pitch, yaw] from CC.orientationNED.
+                       Empty list if not yet calibrated.
+
+    Returns:
+      (grade_accel, pitch_compensation):
+        grade_accel: steady-state gravitational component along road (m/s²).
+                     Positive = downhill (gravity accelerates the car).
+        pitch_compensation: transient feedforward bump for grade changes (m/s²).
+    """
+    if len(orientation_ned) < 2:
+      return 0.0, 0.0
+
+    pitch = orientation_ned[1]
+    self.pitch_lp.update(pitch)
+    self.pitch_hp.update(pitch)
+
+    grade_accel = math.sin(self.pitch_lp.x) * GRAVITY
+    pitch_compensation = float(clip(
+      math.sin(self.pitch_hp.x) * GRAVITY,
+      -MAX_PITCH_COMPENSATION, MAX_PITCH_COMPENSATION))
+
+    return grade_accel, pitch_compensation
+
+  def reset(self):
+    self.pitch_lp.x = 0.0
+    self.pitch_hp.x = 0.0
+    self.pitch_hp._f1.x = 0.0
+    self.pitch_hp._f2.x = 0.0
 
 
 class JerkLimiter:
@@ -130,6 +186,7 @@ class VirtualDAS:
     self.dt = dt
     self.jerk_limiter = JerkLimiter(j_max=2.5, dt=dt)
     self.ff_model = FeedforwardModel()
+    self.grade_estimator = GradeEstimator(dt=dt)
     self.prev_pedal_di = 0.0
 
     self.inner_pid = PIDController(
@@ -144,7 +201,8 @@ class VirtualDAS:
     self.prev_a_ego_filtered = 0.0
 
   def update(self, a_cmd: float, v_ego: float, prev_pedal_di: float,
-             a_ego: float = 0.0, freeze_integrator: bool = False) -> float:
+             a_ego: float = 0.0, freeze_integrator: bool = False,
+             orientation_ned: list | None = None) -> float:
     """Compute pedal DI from acceleration command.
 
     Args:
@@ -153,15 +211,23 @@ class VirtualDAS:
       prev_pedal_di: previous output DI (for rate limiting backstop)
       a_ego: measured longitudinal acceleration in m/s²
       freeze_integrator: True during engage grace period
+      orientation_ned: [roll, pitch, yaw] from CC.orientationNED, or None
 
     Returns:
       pedal_di: output in DI units (caller converts to voltage via di_to_pedal)
     """
     a_limited = self.jerk_limiter.update(a_cmd)
 
-    ff_di = self._feedforward(a_limited, v_ego)
+    grade_accel, pitch_compensation = self.grade_estimator.update(
+      orientation_ned if orientation_ned is not None else [])
 
-    a_ego_filtered = self.a_ego_filter.update(a_ego)
+    ff_di = self._feedforward(a_limited, v_ego)
+    ff_di += pitch_compensation
+
+    # Subtract grade from a_ego so the PID doesn't fight gravity
+    a_ego_corrected = a_ego - grade_accel
+
+    a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
     j_ego = (a_ego_filtered - self.prev_a_ego_filtered) / self.dt
     self.prev_a_ego_filtered = a_ego_filtered
 
@@ -190,6 +256,7 @@ class VirtualDAS:
     """Reset all internal state on engage transition."""
     self.jerk_limiter.reset(a_init)
     self.inner_pid.reset()
+    self.grade_estimator.reset()
     self.a_ego_filter.x = 0.0
     self.prev_a_ego_filtered = 0.0
     self.prev_pedal_di = pedal_di_init

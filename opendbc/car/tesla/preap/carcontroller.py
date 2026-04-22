@@ -178,7 +178,8 @@ class PreAPLongController:
 
             self.prev_pedal_di = self.vdas.update(
               accel_request, CS.out.vEgo, self.prev_pedal_di,
-              a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace)
+              a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
+              orientation_ned=list(CC.orientationNED))
             pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
             can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
 
