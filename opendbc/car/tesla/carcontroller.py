@@ -8,6 +8,7 @@ from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven
 from opendbc.car.tesla.values import CarControllerParams, CANBUS, LEGACY_CARS, CAR
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.tesla.preap.carcontroller import PreAPLongController, init_preap_can
+from opendbc.car.tesla.preap.stock_cc_spoofer import StockCCSpoofer
 
 
 def get_safety_CP():
@@ -35,6 +36,7 @@ class CarController(CarControllerBase):
 
       if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
         self.preap_long = PreAPLongController()
+        self.stock_cc = StockCCSpoofer()
         self.tesla_can = init_preap_can(dbc_names, self.packers)
       else:
         self.tesla_can = TeslaCANRaven(self.packers)
@@ -100,10 +102,18 @@ class CarController(CarControllerBase):
       can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
       can_sends.append(self.tesla_can.create_epas_control(cntr, 1))
 
+    # Pedal-mode longitudinal control. Runs only when op-long is on
+    # (i.e. Comma Pedal present). May write CS.preap_cc_cancel_needed when
+    # pedal mode wants to drop a running stock CC — consumed by stock_cc below.
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.preap_long.update(CC, CS, self.frame, self.tesla_can, CANBUS.party))
-    elif CC.cruiseControl.cancel:
-      can_sends.extend(self.preap_long.send_cancel(CS, self.tesla_can))
+
+    # Stock-CC stalk spoofs (CANCEL / SET_ACCEL). Independent of op-long —
+    # the engagement FSM publishes its intent through CarState flags and the
+    # spoofer is the only TX path for 0x45 STW_ACTN_RQ frames.
+    can_sends.extend(self.stock_cc.update(CS, self.frame, self.tesla_can, CANBUS.party))
+    if self.stock_cc.pcc_event:
+      CS.pccEvent = self.stock_cc.pcc_event
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = self.apply_angle_last

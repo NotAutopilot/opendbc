@@ -184,8 +184,10 @@ class TestNoPedalCCEngage(unittest.TestCase):
       di_cruise_state="ENABLED")
     self.assertFalse(eng.preap_cc_cancel_needed, "Cancel must not fire after double-pull")
 
-  def test_single_pull_cc_standby_no_cancel(self):
-    """Single pull with DI STANDBY: no cancel — preserve user's arming."""
+  def test_single_pull_cc_standby_cancels_after_window(self):
+    """Single pull with DI STANDBY: DI auto-engages on driver's MAIN pull, so NAP
+    must schedule a cancel. If no second pull follows, stock CC drops — leaving
+    lateral only. The schedule is cleared by a second pull (tested separately)."""
     eng = self._make_engagement()
     eng.process_buttons(
       cruise_buttons=2, prev_cruise_buttons=0,
@@ -193,15 +195,20 @@ class TestNoPedalCCEngage(unittest.TestCase):
       use_pedal=False, pedal_long_allowed=False,
       long_control_allowed=True, real_brake_pressed=False,
       di_cruise_state="STANDBY")
-    self.assertEqual(eng.pending_cancel_at_ms, 0, "Should not schedule cancel when DI is STANDBY")
+    self.assertGreater(eng.pending_cancel_at_ms, 0,
+                       "First pull must schedule cancel regardless of DI state")
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
 
+    # Past the double-pull window — cancel fires
     eng.process_buttons(
       cruise_buttons=0, prev_cruise_buttons=0,
       curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
       use_pedal=False, pedal_long_allowed=False,
       long_control_allowed=True, real_brake_pressed=False,
-      di_cruise_state="STANDBY")
-    self.assertFalse(eng.preap_cc_cancel_needed)
+      di_cruise_state="ENABLED")  # DI transitioned to ENABLED after driver's pull
+    self.assertTrue(eng.preap_cc_cancel_needed,
+                    "Cancel must fire after window expires on single pull")
 
   def test_happy_path_armed_double_pull_engages(self):
     """Regression: user arms CC (STANDBY), double-pulls → engage fires, no cancel."""
@@ -241,6 +248,53 @@ class TestNoPedalCCEngage(unittest.TestCase):
       long_control_allowed=True, real_brake_pressed=False,
       di_cruise_state="STANDBY")
     self.assertTrue(eng.preap_cc_engage_needed, "Should engage after arming + re-pull")
+
+
+class TestNoPedalUpDownPassthrough(unittest.TestCase):
+  """In no-pedal mode, up/down stalk presses must not mutate NAP's FSM. Stock CC
+  speed adjust is handled by the DI reading the driver's direct stalk messages;
+  NAP has nothing to contribute. See the stalk-fsm-single-pull-cancel thread."""
+
+  def _engage_lateral_only(self, eng):
+    eng.process_buttons(
+      cruise_buttons=2, prev_cruise_buttons=0,
+      curr_time_ms=1000, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="STANDBY")
+
+  def test_accel_press_leaves_enable_long_false(self):
+    eng = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=750)
+    self._engage_lateral_only(eng)
+    self.assertFalse(eng.enableLongControl)
+    self.assertEqual(eng.pedal_speed_kph, 0.0)
+
+    # Driver presses stalk up (RES_ACCEL = 16)
+    eng.process_buttons(
+      cruise_buttons=16, prev_cruise_buttons=0,
+      curr_time_ms=2000, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="ENABLED")
+
+    self.assertFalse(eng.enableLongControl,
+                     "Up press in no-pedal must not auto-promote enableLongControl")
+    self.assertEqual(eng.pedal_speed_kph, 0.0,
+                     "Up press in no-pedal must not mutate pedal_speed_kph")
+
+  def test_decel_press_leaves_enable_long_false(self):
+    eng = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=750)
+    self._engage_lateral_only(eng)
+
+    eng.process_buttons(
+      cruise_buttons=32, prev_cruise_buttons=0,  # DECEL_SET
+      curr_time_ms=2000, v_ego=15.0, speed_units="KPH",
+      use_pedal=False, pedal_long_allowed=False,
+      long_control_allowed=True, real_brake_pressed=False,
+      di_cruise_state="ENABLED")
+
+    self.assertFalse(eng.enableLongControl)
+    self.assertEqual(eng.pedal_speed_kph, 0.0)
 
 
 if __name__ == "__main__":

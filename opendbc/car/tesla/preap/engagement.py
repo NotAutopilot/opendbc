@@ -58,6 +58,12 @@ class PreAPEngagement:
                       long_control_allowed, real_brake_pressed, di_cruise_state="OFF"):
     button_events = []
 
+    # Stalk-spoof intent flags are single-frame events. Clear at the top so
+    # downstream consumers (StockCCSpoofer) see them only on the frame they
+    # are produced.
+    self.preap_cc_cancel_needed = False
+    self.preap_cc_engage_needed = False
+
     # MAIN button: rising edge only
     if cruise_buttons == CruiseButtons.MAIN and prev_cruise_buttons != CruiseButtons.MAIN:
       carlog.debug("STALK MAIN | cruiseEnabled=%s enableLong=%s pending=%s pedal=%s doublePull=%s",
@@ -154,7 +160,12 @@ class PreAPEngagement:
       self.pending_enable = True
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
-      if not use_pedal and di_cruise_state == "ENABLED":
+      # No-pedal: the driver's physical MAIN pull engages stock CC at the DI
+      # whenever it's armed (STANDBY → ENABLED on the same pull). Schedule a
+      # cancel for after the double-pull window so a single pull drops stock CC
+      # back off, leaving lateral only. A second pull within the window clears
+      # the schedule (see double-pull branch) and leaves stock CC engaged.
+      if not use_pedal:
         self.pending_cancel_at_ms = curr_time_ms + self.double_pull_window_ms
 
   def _make_button_event(self, cruise_buttons, prev_cruise_buttons, curr_time_ms,
@@ -195,10 +206,10 @@ class PreAPEngagement:
       be.type = ButtonType.accelCruise
       if be.pressed:
         self.last_stalk_non_cancel_ms = curr_time_ms
-        if not use_pedal and self.cruiseEnabled and not self.enableLongControl:
-          self.enableLongControl = True
-          self.pending_enable = False
-        if self.enableLongControl:
+        # No-pedal: the DI handles speed adjust natively from the driver's
+        # direct stalk message — NAP stays out. Only mutate our target when
+        # we own longitudinal (pedal mode, long active).
+        if use_pedal and self.enableLongControl:
           speed_uom_kph = CV.MPH_TO_KPH if speed_units == "MPH" else 1.0
           actual_kph = int(v_ego * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
           if state == CruiseButtons.RES_ACCEL:
@@ -211,10 +222,7 @@ class PreAPEngagement:
       be.type = ButtonType.decelCruise
       if be.pressed:
         self.last_stalk_non_cancel_ms = curr_time_ms
-        if not use_pedal and self.cruiseEnabled and not self.enableLongControl:
-          self.enableLongControl = True
-          self.pending_enable = False
-        if self.enableLongControl:
+        if use_pedal and self.enableLongControl:
           speed_uom_kph = CV.MPH_TO_KPH if speed_units == "MPH" else 1.0
           if state == CruiseButtons.DECEL_SET:
             self.pedal_speed_kph -= speed_uom_kph

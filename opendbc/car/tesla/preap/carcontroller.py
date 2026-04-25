@@ -23,26 +23,18 @@ def init_preap_can(dbc_names, packers):
 # positive accel on frame 1). Inspired by Tinkla's proportional ramp.
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 
-# Delay before sending stock CC cancel so pedal establishes control first
-CANCEL_DELAY_FRAMES = 10  # 100ms at 100Hz
-
-# Stock CC engage state machine
-_CC_PHASE_IDLE = 0
-_CC_PHASE_ENGAGING = 1     # Sending SET_ACCEL, waiting for DI_cruiseState == ENABLED
-CC_ENGAGE_TIMEOUT_FRAMES = 50  # 500ms at 100Hz
-
 
 class PreAPLongController:
+  """Pedal-mode longitudinal: VirtualDAS, zero-torque, gas passthrough.
+
+  Stalk-CC spoofs (CANCEL / SET_ACCEL) live in StockCCSpoofer.
+  Communicates with the spoofer via CarState flags only.
+  """
 
   def __init__(self):
     self.prev_pedal_di = 0.0
     self.prev_enable_long_control = False
     self.prev_requested_long = False
-    self.preap_cancel_pending = False
-    self.preap_cancel_frame = -1000000
-    self.cc_engage_phase = _CC_PHASE_IDLE
-    self.cc_engage_start_frame = 0
-    self.prev_di_cc_engaged = False
     self.prev_preap_long_active = False
     self.preap_long_engage_frame = -1000000
     # Snapshot of max-accel-at-engage-speed; used as the deterministic
@@ -74,82 +66,24 @@ class PreAPLongController:
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
       self.vdas.reset(a_init=0.0, pedal_di_init=self.prev_pedal_di)
-      # Snapshot the accel ceiling at engage speed. Used to ramp the
-      # grace-period cap below. Caching here avoids reading Params 50x
-      # during the grace window and keeps the cap stable even if
-      # LongitudinalPersonality is toggled mid-engage (driver can't flip
-      # it in 0.5s anyway).
       _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
     engage_elapsed_frames = frame - self.preap_long_engage_frame
     in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
 
-    # --- Stock CC cancel logic ---
+    # --- Stock CC cancel triggers from pedal mode ---
+    # Engage / disengage / button-press in pedal mode all need to drop stock
+    # CC if it's running. Publish the request via CarState; StockCCSpoofer
+    # consumes it and TXes the CANCEL frame.
     if pedal_long_allowed:
-      if requested_long_rising:
-        self.preap_cancel_pending = True
-        self.preap_cancel_frame = frame
-      if self.prev_requested_long and (not requested_long):
-        self.preap_cancel_pending = True
-        self.preap_cancel_frame = frame
-      if CS.cruise_buttons != CS.prev_cruise_buttons and CS.cruise_buttons != CruiseButtons.IDLE:
-        self.preap_cancel_pending = True
-        self.preap_cancel_frame = frame
-
-    cancel_ready = (frame - self.preap_cancel_frame) >= CANCEL_DELAY_FRAMES
-    if self.preap_cancel_pending and cancel_ready and frame % 10 == 0:
-      msg_stw = CS.msg_stw_actn_req
-      if msg_stw is not None:
-        stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
-        can_sends.insert(0, tesla_can.create_action_request(
-          CruiseButtons.CANCEL, can_bus_party, stlk_counter, msg_stw))
-        self.preap_cancel_pending = False
-        if self.cc_engage_phase != _CC_PHASE_IDLE:
-          self.cc_engage_phase = _CC_PHASE_IDLE
-    elif self.cc_engage_phase == _CC_PHASE_ENGAGING and frame % 10 == 0:
-      di_state = getattr(CS, 'di_cruise_state', 'OFF')
-      timed_out = (frame - self.cc_engage_start_frame) >= CC_ENGAGE_TIMEOUT_FRAMES
-
-      if timed_out:
-        carlog.warning("CC engage timeout after %d frames", frame - self.cc_engage_start_frame)
-        self.cc_engage_phase = _CC_PHASE_IDLE
-      elif di_state == "ENABLED":
-        carlog.debug("CC engage: ENABLED — stock CC active")
-        self.cc_engage_phase = _CC_PHASE_IDLE
-      else:
-        msg_stw = CS.msg_stw_actn_req
-        if msg_stw is not None:
-          stlk_counter = (int(msg_stw.get('MC_STW_ACTN_RQ', 0)) + 1) % 16
-          can_sends.insert(0, tesla_can.create_action_request(
-            CruiseButtons.SET_ACCEL, can_bus_party, stlk_counter, msg_stw))
+      pedal_button_press = (CS.cruise_buttons != CS.prev_cruise_buttons
+                            and CS.cruise_buttons != CruiseButtons.IDLE)
+      pedal_long_falling = self.prev_requested_long and not requested_long
+      if requested_long_rising or pedal_long_falling or pedal_button_press:
+        CS.preap_cc_cancel_needed = True
 
     self.prev_requested_long = requested_long
-
-    # Non-pedal CC commands
-    if not pedal_long_allowed:
-      if CS.preap_cc_cancel_needed:
-        self.preap_cancel_pending = True
-        self.preap_cancel_frame = frame
-        self.cc_engage_phase = _CC_PHASE_IDLE
-        CS.preap_cc_cancel_needed = False
-      if CS.preap_cc_engage_needed and self.cc_engage_phase == _CC_PHASE_IDLE:
-        self.cc_engage_phase = _CC_PHASE_ENGAGING
-        self.cc_engage_start_frame = frame
-        carlog.debug("CC engage: entering ENGAGING (DI=%s)", getattr(CS, 'di_cruise_state', 'OFF'))
-        CS.preap_cc_engage_needed = False
-
     pedal_responding = not CS.pedal_timeout
-
-    CS.pccEvent = None
-
-    # Stock CC engage/disengage events (no-pedal mode)
-    if not pedal_long_allowed:
-      di_cc_engaged = getattr(CS, 'di_cruise_state', 'OFF') == "ENABLED"
-      if di_cc_engaged and not self.prev_di_cc_engaged:
-        CS.pccEvent = "teslaCCEngaged"
-      elif not di_cc_engaged and self.prev_di_cc_engaged:
-        CS.pccEvent = "teslaCCDisengaged"
-      self.prev_di_cc_engaged = di_cc_engaged
 
     if frame % 2 == 0:
       self.prev_enable_long_control = CS.enableLongControl
@@ -216,9 +150,3 @@ class PreAPLongController:
 
     self.prev_preap_long_active = long_active
     return can_sends
-
-  def send_cancel(self, CS, tesla_can):
-    if not CS.pedal_timeout:
-      idle_pedal = nap_conf.di_to_pedal(PEDAL_DI_ZERO)
-      return [tesla_can.create_pedal_command(idle_pedal, enable=0)]
-    return []
