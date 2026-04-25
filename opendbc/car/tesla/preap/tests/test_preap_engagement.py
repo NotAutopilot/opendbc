@@ -153,8 +153,10 @@ class TestNoPedalCCEngage(unittest.TestCase):
     self.assertTrue(eng.cruiseEnabled)
     self.assertTrue(eng.preap_cc_engage_needed, "Should engage when DI is STANDBY")
 
-  def test_single_pull_cc_running_cancels_after_window(self):
-    """Single pull with DI ENABLED: cancel fires after double-pull window expires."""
+  def test_single_pull_cc_running_cancels_immediately(self):
+    """Single pull with DI ENABLED: cancel fires on the same frame for safety —
+    no scheduled-window delay. The spoofer's CANCEL_DELAY_FRAMES (100ms) and
+    frame-slot alignment still apply downstream."""
     eng = self._make_engagement()
     eng.process_buttons(
       cruise_buttons=2, prev_cruise_buttons=0,
@@ -162,37 +164,28 @@ class TestNoPedalCCEngage(unittest.TestCase):
       use_pedal=False, pedal_long_allowed=False,
       long_control_allowed=True, real_brake_pressed=False,
       di_cruise_state="ENABLED")
-    self.assertFalse(eng.preap_cc_cancel_needed, "Cancel should not fire immediately")
-    self.assertTrue(eng.pending_cancel_at_ms > 0)
+    self.assertTrue(eng.preap_cc_cancel_needed,
+                    "Cancel must fire immediately on first pull, not after window")
 
-    # Advance past the double-pull window (750ms)
-    eng.process_buttons(
-      cruise_buttons=0, prev_cruise_buttons=0,
-      curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
-      use_pedal=False, pedal_long_allowed=False,
-      long_control_allowed=True, real_brake_pressed=False,
-      di_cruise_state="ENABLED")
-    self.assertTrue(eng.preap_cc_cancel_needed, "Cancel should fire after window expires")
-
-  def test_double_pull_cc_running_suppresses_cancel(self):
-    """Double-pull with DI ENABLED: pending cancel from first pull is suppressed."""
+  def test_double_pull_cc_running_cancel_then_reengage(self):
+    """Double-pull with DI ENABLED: first pull fires cancel immediately
+    (visible briefly on the bus), second pull re-engages. The cancel-then-
+    engage flicker is the accepted tradeoff for instant single-pull cancel."""
     eng = self._make_engagement()
     self._double_pull(eng, t1=1000, t2=1400, di_cruise_state="ENABLED")
-    self.assertEqual(eng.pending_cancel_at_ms, 0, "Double-pull should suppress pending cancel")
+    # After the double-pull, engage_needed is the live event from the second
+    # pull (single-frame semantics — the first pull's cancel_needed was on
+    # an earlier frame, already consumed by the spoofer).
+    self.assertTrue(
+      eng.preap_cc_engage_needed,
+      "Second pull within window must set engage_needed even if first pull already canceled",
+    )
 
-    # Advance past where cancel would have fired
-    eng.process_buttons(
-      cruise_buttons=0, prev_cruise_buttons=0,
-      curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
-      use_pedal=False, pedal_long_allowed=False,
-      long_control_allowed=True, real_brake_pressed=False,
-      di_cruise_state="ENABLED")
-    self.assertFalse(eng.preap_cc_cancel_needed, "Cancel must not fire after double-pull")
-
-  def test_single_pull_cc_standby_cancels_after_window(self):
-    """Single pull with DI STANDBY: DI auto-engages on driver's MAIN pull, so NAP
-    must schedule a cancel. If no second pull follows, stock CC drops — leaving
-    lateral only. The schedule is cleared by a second pull (tested separately)."""
+  def test_single_pull_cc_standby_cancels_immediately(self):
+    """Single pull with DI STANDBY: cancel must fire on the same frame so any
+    DI auto-engage from the driver's physical MAIN pull is killed within ~100ms.
+    Was previously gated on a 750/400ms window expiry; that left CC briefly
+    engaged in normal driving — see drive d0cdc986 follow-up."""
     eng = self._make_engagement()
     eng.process_buttons(
       cruise_buttons=2, prev_cruise_buttons=0,
@@ -200,20 +193,10 @@ class TestNoPedalCCEngage(unittest.TestCase):
       use_pedal=False, pedal_long_allowed=False,
       long_control_allowed=True, real_brake_pressed=False,
       di_cruise_state="STANDBY")
-    self.assertGreater(eng.pending_cancel_at_ms, 0,
-                       "First pull must schedule cancel regardless of DI state")
+    self.assertTrue(eng.preap_cc_cancel_needed,
+                    "Cancel must fire on the same frame regardless of DI state")
     self.assertTrue(eng.cruiseEnabled)
     self.assertFalse(eng.enableLongControl)
-
-    # Past the double-pull window — cancel fires
-    eng.process_buttons(
-      cruise_buttons=0, prev_cruise_buttons=0,
-      curr_time_ms=1800, v_ego=15.0, speed_units="KPH",
-      use_pedal=False, pedal_long_allowed=False,
-      long_control_allowed=True, real_brake_pressed=False,
-      di_cruise_state="ENABLED")  # DI transitioned to ENABLED after driver's pull
-    self.assertTrue(eng.preap_cc_cancel_needed,
-                    "Cancel must fire after window expires on single pull")
 
   def test_happy_path_armed_double_pull_engages(self):
     """Regression: user arms CC (STANDBY), double-pulls → engage fires, no cancel."""

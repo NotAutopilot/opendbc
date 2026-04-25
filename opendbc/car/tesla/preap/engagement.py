@@ -87,11 +87,6 @@ class PreAPEngagement:
             self.preap_cc_engage_needed = True
             self.preap_last_cc_spoof_ms = curr_time_ms
 
-    if self.pending_cancel_at_ms and curr_time_ms >= self.pending_cancel_at_ms:
-      self.preap_cc_cancel_needed = True
-      self.preap_last_cc_spoof_ms = curr_time_ms
-      self.pending_cancel_at_ms = 0
-
     if cruise_buttons != prev_cruise_buttons:
       be = self._make_button_event(cruise_buttons, prev_cruise_buttons, curr_time_ms,
                                    v_ego, speed_units, use_pedal)
@@ -147,15 +142,13 @@ class PreAPEngagement:
         self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
       else:
         self.pedal_speed_kph = 0.0
-        # Fire engage_needed for any non-ENABLED DI state. If DI auto-engaged
-        # on the driver's physical MAIN pull (CANCEL was suppressed by this
-        # double-pull anyway), it's already ENABLED and we skip. Otherwise
-        # the spoofer enters ENGAGING and retries SET_ACCEL until DI reaches
-        # ENABLED or its 500ms timeout fires. STANDBY-only was too narrow:
-        # at the second-pull frame, DI may have been transitioning through
-        # other states (PRE_FAULT, STANDSTILL) that previously blocked the
-        # retry from ever starting.
-        if not use_pedal and di_cruise_state != "ENABLED":
+        # Always fire engage_needed on a no-pedal double-pull. The first pull
+        # already fired an immediate cancel; even if di_cruise_state still
+        # reads ENABLED at this frame (CAN lag — DI hasn't observed the cancel
+        # yet), our cancel is in-flight and will land within ~100ms, dropping
+        # DI to STANDBY. The spoofer's ENGAGING phase exits cleanly if DI is
+        # observed ENABLED on any frame, so a no-op retry costs nothing.
+        if not use_pedal:
           self.preap_cc_engage_needed = True
           self.preap_last_cc_spoof_ms = curr_time_ms
     else:
@@ -169,12 +162,15 @@ class PreAPEngagement:
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
       # No-pedal: the driver's physical MAIN pull engages stock CC at the DI
-      # whenever it's armed (STANDBY → ENABLED on the same pull). Schedule a
-      # cancel for after the double-pull window so a single pull drops stock CC
-      # back off, leaving lateral only. A second pull within the window clears
-      # the schedule (see double-pull branch) and leaves stock CC engaged.
+      # whenever it's armed (STANDBY → ENABLED on the same pull). Fire the
+      # cancel immediately so unintended CC engagement is killed within ~100 ms
+      # (CANCEL_DELAY_FRAMES + frame slot alignment in the spoofer). A
+      # subsequent second pull within the window will set engage_needed and
+      # the spoofer will re-engage via SET_ACCEL — visible briefly as a
+      # cancel-then-engage flicker, which is the safety-favoring tradeoff.
       if not use_pedal:
-        self.pending_cancel_at_ms = curr_time_ms + self.double_pull_window_ms
+        self.preap_cc_cancel_needed = True
+        self.preap_last_cc_spoof_ms = curr_time_ms
 
   def _make_button_event(self, cruise_buttons, prev_cruise_buttons, curr_time_ms,
                          v_ego, speed_units, use_pedal):
