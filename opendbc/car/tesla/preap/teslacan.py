@@ -10,9 +10,15 @@ PEDAL_M2 = 0.101593626    # Secondary scaling (2x M1 for redundancy)
 PEDAL_D = -22.85856576    # Offset
 GAS_COMMAND_ID = 0x551
 
-# Default STW_ACTN_RQ signal values (all signals except counter, CRC, and button)
+# Default STW_ACTN_RQ signal values (all signals except counter, CRC, and button).
+# VSL_Enbl_Rq=1 matches what the driver's stalk module emits — the DI rejects /
+# anomalously interprets frames with bit 6 of byte 0 cleared. See drive-3
+# segment 2: NAP's spoofed UP_1ST at 47 kph went STANDBY→OFF instead of
+# STANDBY→ENABLED because of this single bit. Was previously a typo
+# ("VSL_Enbl_Stat", which is not a DBC signal) — silently dropped by the
+# packer, so the bit always read 0.
 _STW_DEFAULTS = {
-  "VSL_Enbl_Stat": 0, "DTR_Dist_Rq": 0, "TurnIndLvr_Stat": 0,
+  "VSL_Enbl_Rq": 1, "DTR_Dist_Rq": 0, "TurnIndLvr_Stat": 0,
   "HiBmLvr_Stat": 0, "WprWashSw_Psd": 0, "WprWash_R_Sw_Posn_V2": 0,
   "StW_Lvr_Stat": 0, "StW_Cond_Flt": 0, "StW_Cond_Psd": 0,
   "HrnSw_Psd": 0, "StW_Sw00_Psd": 0, "StW_Sw01_Psd": 0,
