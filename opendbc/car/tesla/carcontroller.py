@@ -102,6 +102,12 @@ class CarController(CarControllerBase):
       can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
       can_sends.append(self.tesla_can.create_epas_control(cntr, 1))
 
+    # Reset pccEvent each tick so it expresses one-frame edge events. Without
+    # this, the previous frame's value sticks (preap_long resets it, but only
+    # runs in pedal mode), and the teslaCC{Engaged,Disengaged} alert
+    # re-triggers indefinitely instead of fading after its 0.8s duration.
+    CS.pccEvent = None
+
     # Pedal-mode longitudinal control. Runs only when op-long is on
     # (i.e. Comma Pedal present). May write CS.preap_cc_cancel_needed when
     # pedal mode wants to drop a running stock CC — consumed by stock_cc below.

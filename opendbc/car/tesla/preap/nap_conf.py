@@ -20,7 +20,7 @@ carlog.info("nap_conf: _PARAMS_AVAILABLE=%s", _PARAMS_AVAILABLE)
 CONFIG_FILE = "/data/nap_params.json"
 
 DEFAULT_CONFIG = {
-  'double_pull_window_ms': 750,
+  'double_pull_window_ms': 400,
   'use_pedal': False,
   'pedal_calibrated': False,
   'accel_profile': 'Chill',
@@ -216,7 +216,11 @@ class NAPConf:
 
   @property
   def double_pull_window_ms(self):
-    return int(self._get('double_pull_window_ms', 750))
+    # Hard cap at 400ms in code — overrides any stored value (e.g. an old
+    # 750 left over in /data/nap_params.json before this change). 400 is
+    # the longest cancel-on-single-pull delay that still feels prompt;
+    # natural human double-pulls land in 250–400ms.
+    return min(int(self._get('double_pull_window_ms', 400)), 400)
 
   @double_pull_window_ms.setter
   def double_pull_window_ms(self, value):

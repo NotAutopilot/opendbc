@@ -147,7 +147,15 @@ class PreAPEngagement:
         self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
       else:
         self.pedal_speed_kph = 0.0
-        if not use_pedal and di_cruise_state == "STANDBY":
+        # Fire engage_needed for any non-ENABLED DI state. If DI auto-engaged
+        # on the driver's physical MAIN pull (CANCEL was suppressed by this
+        # double-pull anyway), it's already ENABLED and we skip. Otherwise
+        # the spoofer enters ENGAGING and retries SET_ACCEL until DI reaches
+        # ENABLED or its 500ms timeout fires. STANDBY-only was too narrow:
+        # at the second-pull frame, DI may have been transitioning through
+        # other states (PRE_FAULT, STANDSTILL) that previously blocked the
+        # retry from ever starting.
+        if not use_pedal and di_cruise_state != "ENABLED":
           self.preap_cc_engage_needed = True
           self.preap_last_cc_spoof_ms = curr_time_ms
     else:

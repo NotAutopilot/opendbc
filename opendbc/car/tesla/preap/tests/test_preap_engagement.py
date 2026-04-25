@@ -134,12 +134,17 @@ class TestNoPedalCCEngage(unittest.TestCase):
       di_cruise_state=di_cruise_state)
     return eng
 
-  def test_double_pull_di_off_no_engage(self):
-    """Double-pull with DI OFF should NOT set engage_needed — lateral only."""
+  def test_double_pull_di_off_engage_needed_set_anyway(self):
+    """Double-pull with DI OFF still sets engage_needed. SET_ACCEL spoofs to
+    an unarmed DI are ignored — the spoofer's 500ms ENGAGING timeout exits
+    cleanly, and teslaCCNotArmed surfaces the unarmed state to the user.
+    Broader gate (was STANDBY-only) avoids missing the engage when DI is
+    transitioning through PRE_FAULT/STANDSTILL/etc at the second-pull frame."""
     eng = self._make_engagement()
     self._double_pull(eng, di_cruise_state="OFF")
     self.assertTrue(eng.cruiseEnabled, "Lateral should be enabled")
-    self.assertFalse(eng.preap_cc_engage_needed, "Should not engage when DI is OFF")
+    self.assertTrue(eng.preap_cc_engage_needed,
+                    "engage_needed fires on any non-ENABLED DI state")
 
   def test_double_pull_di_standby_sets_engage(self):
     """Double-pull with DI STANDBY should set engage_needed for SET_ACCEL spoof."""
@@ -219,10 +224,12 @@ class TestNoPedalCCEngage(unittest.TestCase):
     self.assertFalse(eng.preap_cc_cancel_needed, "Must not cancel the user's armed CC")
 
   def test_double_pull_di_off_then_arm_and_repull(self):
-    """User double-pulls with DI OFF (lateral only), arms cruise, then pulls again."""
+    """User double-pulls with DI OFF (lateral on, engage_needed fires futilely),
+    later arms cruise, pulls again."""
     eng = self._make_engagement()
     self._double_pull(eng, t1=1000, t2=1400, di_cruise_state="OFF")
-    self.assertFalse(eng.preap_cc_engage_needed)
+    self.assertTrue(eng.preap_cc_engage_needed,
+                    "Broader gate fires engage_needed on OFF too; spoofer times out")
     self.assertTrue(eng.cruiseEnabled)
 
     # User presses end-stalk (MAIN) to arm — seen as a first pull (>750ms later)
