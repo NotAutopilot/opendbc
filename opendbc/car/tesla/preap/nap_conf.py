@@ -65,7 +65,6 @@ ACCEL_MAX_PROFILES = {
 ACCEL_MAX_DEFAULT = ACCEL_MAX_PROFILES['Chill']
 
 
-
 def transform_di_to_pedal(val, pedal_zero, pedal_factor):
   """DI units -> pedal voltage. pedal_zero + (val - DI_ZERO) / factor"""
   if pedal_factor == 0:
@@ -91,7 +90,7 @@ class NAPConf:
   def _load(self):
     try:
       if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
+        with open(CONFIG_FILE) as f:
           loaded = json.load(f)
         self._cache = {**DEFAULT_CONFIG, **loaded}
       else:
@@ -178,11 +177,23 @@ class NAPConf:
 
   @property
   def pedal_calibrated(self):
-    return self._get_param_bool(NAPParamKeys.PEDAL_CALIB_DONE, 'pedal_calibrated')
+    if not self._get_param_bool(NAPParamKeys.PEDAL_CALIB_DONE, 'pedal_calibrated'):
+      return False
+    # Defaults-sanity: the done-flag is only trustworthy if at least one calibration
+    # value has moved off its DEFAULT_CONFIG value. Guards against a write-failure
+    # that leaves the flag True but the values unpersisted (see 2026-04 drive-1).
+    if self._calib_zero_raw() == DEFAULT_CONFIG['pedal_calib_zero'] and \
+       self.pedal_factor == DEFAULT_CONFIG['pedal_calib_factor']:
+      return False
+    return True
 
   @pedal_calibrated.setter
   def pedal_calibrated(self, value):
     self._put_param_bool(NAPParamKeys.PEDAL_CALIB_DONE, 'pedal_calibrated', value)
+
+  def _calib_zero_raw(self):
+    """Raw stored pedal_calib_zero (no coast-position transform applied)."""
+    return self._get_param_float(NAPParamKeys.PEDAL_CALIB_ZERO, 'pedal_calib_zero', 0.0)
 
   @property
   def pedal_can_zero(self):
@@ -291,7 +302,6 @@ class NAPConf:
   def pedal_factor(self, value):
     self._put_param_float(NAPParamKeys.PEDAL_CALIB_FACTOR, 'pedal_calib_factor', value)
 
-
   # Utilities
 
   @property
@@ -317,7 +327,7 @@ class NAPConf:
     print(f"    Storage: {storage}")
     print("")
     print("  [CONTROL MODES]")
-    print(f"    Double-Pull Mode:     ON (always enabled)")
+    print("    Double-Pull Mode:     ON (always enabled)")
     print("")
     print("  [LONGITUDINAL]")
     print(f"    Pedal Enabled:        {'ON' if self.use_pedal else 'OFF'}")
