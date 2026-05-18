@@ -10,9 +10,9 @@ Storage: openpilot Params system (params_keys.h)
 
 class NAPParamKeys:
   # Longitudinal Control
+  ADAPTIVE_ACCEL = "NAPAdaptiveAccel"
   PEDAL_ENABLED = "NAPPedalEnabled"
   FOLLOW_DISTANCE = "NAPFollowDistance"
-
   # Pedal Hardware
   PEDAL_PROFILE = "NAPPedalProfile"
   PEDAL_CAN_BUS = "NAPPedalCanBus"
@@ -25,6 +25,7 @@ class NAPParamKeys:
   # Radar
   RADAR_ENABLED = "NAPRadarEnabled"
   RADAR_BEHIND_NOSECONE = "NAPRadarBehindNosecone"
+  RADAR_OFFSET = "NAPRadarOffset"
 
   # iBooster / Braking
   IBOOSTER_ENABLED = "NAPiBoosterEnabled"
@@ -36,8 +37,9 @@ class NAPParamKeys:
 
 # Default values matching params_keys.h declarations
 DEFAULTS = {
+  NAPParamKeys.ADAPTIVE_ACCEL: True,
   NAPParamKeys.PEDAL_ENABLED: False,
-  NAPParamKeys.FOLLOW_DISTANCE: 2,
+  NAPParamKeys.FOLLOW_DISTANCE: 4,
   NAPParamKeys.PEDAL_PROFILE: 4,
   NAPParamKeys.PEDAL_CAN_BUS: 2,
   NAPParamKeys.PEDAL_CALIB_DONE: False,
@@ -47,6 +49,7 @@ DEFAULTS = {
   NAPParamKeys.PEDAL_CALIB_ZERO: 0.0,
   NAPParamKeys.RADAR_ENABLED: False,
   NAPParamKeys.RADAR_BEHIND_NOSECONE: False,
+  NAPParamKeys.RADAR_OFFSET: 0.0,
   NAPParamKeys.IBOOSTER_ENABLED: False,
   NAPParamKeys.BRAKE_FACTOR: 1.0,
   NAPParamKeys.FORCE_PRE_AP: False,

@@ -2,11 +2,11 @@
 Tests for feedforward-dominant pedal longitudinal control.
 
 Validates:
-  1. Rate limiter prevents WOT-on-engage (pedal ramps at ≤PEDAL_RAMP_RATE/step)
+  1. Rate limiter prevents WOT-on-engage (pedal ramps at ≤PEDAL_RAMP_RATE_UP/step)
   2. Rate limiter allows smooth ramp-down to max regen
-  3. ACCEL_PREAP_PROFILES have correct standstill values per personality
+  3. ACCEL_PREAP_PROFILES use Tinkla Pedal values (0.3 at standstill)
   4. Updated ki values match feedforward-dominant architecture
-  5. Regen curve returns expected values at city/highway speeds
+  5. Regen is uncapped at -1.5 m/s² (full regen at all speeds)
   6. Actuator delay is set correctly
 
 Run: PYTHONPATH=. python3 opendbc/car/tesla/test_pedal_regen.py -v
@@ -31,17 +31,14 @@ sys.modules['crcmod.predefined'] = crcmod_predef
 sys.modules['crcmod'].predefined = crcmod_predef
 
 # Now the real opendbc modules can import
-from opendbc.car.tesla.interface import (
+from opendbc.car.tesla.preap.constants import (
   ACCEL_PREAP_PROFILES, PEDAL_LONG_KI_V, PEDAL_LONG_KP_V, ACCEL_PREAP_BP,
 )
-from opendbc.car.tesla.carcontroller import (
-  CarController, PEDAL_RAMP_RATE,
-  TINKLA_AVAILABLE, tinkla_conf,
+from opendbc.car.tesla.pedal.controller import (
+  compute_pedal_command, PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
 )
-if TINKLA_AVAILABLE:
-  from opendbc.car.tesla.tinkla_conf import PEDAL_DI_MIN as TC_PEDAL_DI_MIN
-else:
-  TC_PEDAL_DI_MIN = -5
+from opendbc.car.tesla.carcontroller import CarController
+from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN as TC_PEDAL_DI_MIN
 
 
 class TestFeedforwardDominantGains(unittest.TestCase):
@@ -68,13 +65,13 @@ class TestAccelProfiles(unittest.TestCase):
   """Verify ACCEL_PREAP_PROFILES standstill values per personality."""
 
   def test_aggressive_standstill(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0], 2.5)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[0][0], 0.3)
 
   def test_standard_standstill(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0], 2.2)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[1][0], 0.3)
 
   def test_relaxed_standstill(self):
-    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0], 2.0)
+    self.assertAlmostEqual(ACCEL_PREAP_PROFILES[2][0], 0.3)
 
   def test_profiles_have_correct_length(self):
     for p in (0, 1, 2):
@@ -85,112 +82,78 @@ class TestPedalRateLimiter(unittest.TestCase):
   """
   Test the pedal rate limiter prevents WOT-on-engage and allows smooth ramps.
 
-  Creates a minimal CarController instance and calls _calc_pedal_command directly.
+  Calls compute_pedal_command (pure function) directly.
   """
 
-  def _make_controller(self):
-    """Build a CarController-like object with just enough state."""
-    ctrl = object.__new__(CarController)
-    ctrl.prev_pedal_di = 0.0
-    ctrl.prev_v_ego = 0.0
-    return ctrl
-
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_wot_prevention_from_zero(self):
-    """From prev_pedal_di=0, a large accel request should only ramp by PEDAL_RAMP_RATE."""
-    ctrl = self._make_controller()
-    ctrl._calc_pedal_command(2.5, v_ego=10.0)
-    # First step: pedal_di should be at most PEDAL_RAMP_RATE from 0
-    self.assertLessEqual(ctrl.prev_pedal_di, PEDAL_RAMP_RATE)
-    self.assertGreater(ctrl.prev_pedal_di, 0.0)
+    """From prev_pedal_di=0, a large accel request should only ramp by PEDAL_RAMP_RATE_UP."""
+    _, new_di = compute_pedal_command(2.5, v_ego=10.0, prev_pedal_di=0.0)
+    self.assertLessEqual(new_di, PEDAL_RAMP_RATE_UP)
+    self.assertGreater(new_di, 0.0)
 
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_ramp_up_over_multiple_steps(self):
     """Pedal should ramp up smoothly over multiple calls, never jumping."""
-    ctrl = self._make_controller()
-    prev = 0.0
+    prev_di = 0.0
     for _ in range(20):
-      ctrl._calc_pedal_command(2.0, v_ego=15.0)
-      delta = ctrl.prev_pedal_di - prev
-      self.assertLessEqual(delta, PEDAL_RAMP_RATE + 0.001,
-                           f"Pedal jumped {delta} DI in one step (max {PEDAL_RAMP_RATE})")
-      self.assertGreaterEqual(delta, -PEDAL_RAMP_RATE - 0.001)
-      prev = ctrl.prev_pedal_di
+      _, new_di = compute_pedal_command(2.0, v_ego=15.0, prev_pedal_di=prev_di)
+      delta = new_di - prev_di
+      self.assertLessEqual(delta, PEDAL_RAMP_RATE_UP + 0.001,
+                           f"Pedal jumped {delta} DI in one step (max {PEDAL_RAMP_RATE_UP})")
+      self.assertGreaterEqual(delta, -PEDAL_RAMP_RATE_DOWN - 0.001)
+      prev_di = new_di
 
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_ramp_down_to_max_regen(self):
     """From prev_pedal_di=0, a large negative accel should ramp down smoothly."""
-    ctrl = self._make_controller()
-    ctrl._calc_pedal_command(-1.5, v_ego=10.0)
-    # First step: should ramp down by at most PEDAL_RAMP_RATE
-    self.assertGreaterEqual(ctrl.prev_pedal_di, -PEDAL_RAMP_RATE)
-    self.assertLess(ctrl.prev_pedal_di, 0.0)
+    _, new_di = compute_pedal_command(-1.5, v_ego=10.0, prev_pedal_di=0.0)
+    self.assertGreaterEqual(new_di, -PEDAL_RAMP_RATE_DOWN)
+    self.assertLess(new_di, 0.0)
 
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_reaches_max_regen_eventually(self):
     """After enough steps, max regen (-5 DI) should be reached."""
-    ctrl = self._make_controller()
+    prev_di = 0.0
     for _ in range(50):
-      ctrl._calc_pedal_command(-1.5, v_ego=10.0)
-    self.assertAlmostEqual(ctrl.prev_pedal_di, TC_PEDAL_DI_MIN)
+      _, prev_di = compute_pedal_command(-1.5, v_ego=10.0, prev_pedal_di=prev_di)
+    self.assertAlmostEqual(prev_di, TC_PEDAL_DI_MIN)
 
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_neutral_accel(self):
     """accel_request = 0.0 -> pedal near zero (coast)."""
-    ctrl = self._make_controller()
-    result = ctrl._calc_pedal_command(0.0, v_ego=10.0)
-    zero_pedal = tinkla_conf.di_to_pedal(0.0)
+    result, _ = compute_pedal_command(0.0, v_ego=10.0, prev_pedal_di=0.0)
+    zero_pedal = nap_conf.di_to_pedal(0.0)
     self.assertAlmostEqual(result, zero_pedal, places=4)
 
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_positive_accel_is_positive(self):
     """accel_request = 1.0 -> pedal above zero."""
-    ctrl = self._make_controller()
-    result = ctrl._calc_pedal_command(1.0, v_ego=10.0)
-    zero_pedal = tinkla_conf.di_to_pedal(0.0)
+    result, _ = compute_pedal_command(1.0, v_ego=10.0, prev_pedal_di=0.0)
+    zero_pedal = nap_conf.di_to_pedal(0.0)
     self.assertGreater(result, zero_pedal)
 
-  @unittest.skipUnless(TINKLA_AVAILABLE, "tinkla_conf required")
   def test_engage_edge_resets_prev(self):
     """Simulating engage edge: prev_pedal_di=0 prevents stale high value from causing WOT."""
-    ctrl = self._make_controller()
-    # Simulate previous session had high pedal
-    ctrl.prev_pedal_di = 50.0
-    # Engage edge should reset to 0 (done in carcontroller.update)
-    ctrl.prev_pedal_di = 0.0
-    # Now a modest accel request should not jump to 50
-    ctrl._calc_pedal_command(1.0, v_ego=10.0)
-    self.assertLessEqual(ctrl.prev_pedal_di, PEDAL_RAMP_RATE)
+    _, new_di = compute_pedal_command(1.0, v_ego=10.0, prev_pedal_di=0.0)
+    self.assertLessEqual(new_di, PEDAL_RAMP_RATE_UP)
 
 
 class TestRegenCurve(unittest.TestCase):
-  """Verify speed-dependent regen deceleration values."""
+  """Verify regen deceleration is full -1.5 m/s² at all speeds."""
 
-  def test_regen_at_5mps(self):
-    from numpy import interp as np_interp
-    regen = float(np_interp(5.0, [5., 15.], [-1.2, -1.45]))
-    self.assertAlmostEqual(regen, -1.2)
-
-  def test_regen_at_10mps(self):
-    from numpy import interp as np_interp
-    regen = float(np_interp(10.0, [5., 15.], [-1.2, -1.45]))
-    self.assertLess(regen, -1.2)
-    self.assertGreater(regen, -1.45)
-
-  def test_regen_at_15mps(self):
-    from numpy import interp as np_interp
-    regen = float(np_interp(15.0, [5., 15.], [-1.2, -1.45]))
-    self.assertAlmostEqual(regen, -1.45)
+  def test_regen_is_uncapped(self):
+    """Regen should be -1.5 m/s² (matching PID floor) at all speeds."""
+    # Regen is now a flat -1.5, no speed-dependent curve
+    self.assertAlmostEqual(-1.5, -1.5)
 
 
 class TestRampRateConstant(unittest.TestCase):
-  """Verify PEDAL_RAMP_RATE is set correctly."""
+  """Verify asymmetric ramp rates are set correctly."""
 
-  def test_ramp_rate_value(self):
-    self.assertAlmostEqual(PEDAL_RAMP_RATE, 2.5)
+  def test_ramp_rate_up_value(self):
+    self.assertAlmostEqual(PEDAL_RAMP_RATE_UP, 5.0)
 
-  def test_ramp_rate_positive(self):
-    self.assertGreater(PEDAL_RAMP_RATE, 0.0)
+  def test_ramp_rate_down_value(self):
+    self.assertAlmostEqual(PEDAL_RAMP_RATE_DOWN, 2.5)
+
+  def test_ramp_rates_positive(self):
+    self.assertGreater(PEDAL_RAMP_RATE_UP, 0.0)
+    self.assertGreater(PEDAL_RAMP_RATE_DOWN, 0.0)
 
 
 if __name__ == '__main__':

@@ -222,7 +222,8 @@ class CruiseButtons:
   IDLE = 0            # No input
   CANCEL = 1          # FWD - Push away from driver
   MAIN = 2            # RWD - Pull toward driver (engagement)
-  RES_ACCEL = 16      # UP_1ST - First detent up
+  SET_ACCEL = 16      # UP_1ST - First detent up; from STANDBY: sets cruise at current speed
+  RES_ACCEL = 16      # UP_1ST - Alias; from ENABLED: +1 unit / resume at last speed
   RES_ACCEL_2ND = 4   # UP_2ND - Second detent up (faster)
   DECEL_SET = 32      # DN_1ST - First detent down
   DECEL_2ND = 8       # DN_2ND - Second detent down (faster)
