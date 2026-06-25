@@ -121,6 +121,17 @@ class CarController(CarControllerBase):
     if self.stock_cc.pcc_event:
       CS.pccEvent = self.stock_cc.pcc_event
 
+    # Turn-signal drive: keep the indicator flashing during the lane-change
+    # arming window and maneuver. controlsd sets CC.leftBlinker/rightBlinker
+    # whenever laneChangeState != off, and clears them when it returns to off
+    # (so the blinker stops automatically when the maneuver completes).
+    # turn: 0=none, 1=left, 2=right. Pre-AP has no AP ECU, so openpilot is the
+    # sole source of DAS_bodyControls.
+    if self.frame % 10 == 0:
+      turn = int(CC.rightBlinker) * 2 + int(CC.leftBlinker)
+      cntr = (self.frame // 10) % 16
+      can_sends.append(self.tesla_can.create_body_controls_message(turn, 0, CANBUS.party, cntr))
+
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = self.apply_angle_last
 
