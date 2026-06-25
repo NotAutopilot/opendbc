@@ -543,6 +543,22 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // DAS_bodyControls (0x3E9): turn-signal actuation. Gate on controls_allowed
+  // (matches all other Pre-AP TX) so the indicator can only be driven while
+  // openpilot is engaged — on disengage controlsd clears the blinker anyway,
+  // and this is the defense-in-depth backstop. Also bound the turn-indicator
+  // request to valid values (0-3); the field is 2 bits (bit 8 = byte 1 bits
+  // 0-1) so it cannot exceed 3 — a guard if the field width ever changes.
+  if (msg->addr == 0x3E9U) {
+    int turn_req = (msg->data[1] & 0x03U);  // DAS_turnIndicatorRequest at bit 8
+    if (turn_req > 3) {
+      violation = true;
+    }
+    if (!controls_allowed) {
+      violation = true;
+    }
+  }
+
   if (violation) {
     tx = false;
   }
@@ -587,6 +603,7 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 0
     {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
     {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
+    {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
   };
 
   // RX checks — disable EPAS counter/checksum until we verify the Pre-AP

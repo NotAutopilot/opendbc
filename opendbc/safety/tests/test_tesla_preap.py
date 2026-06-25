@@ -67,6 +67,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     [0x551, 0],  # Pedal bus 0
     [0x551, 2],  # Pedal bus 2
     [0x45,  0],  # STW_ACTN_RQ (stalk spoof)
+    [0x3E9, 0],  # DAS_bodyControls (turn signal)
   ]
 
   STANDSTILL_THRESHOLD = 0.5 / 3.6  # 0.5 kph in m/s
@@ -247,6 +248,21 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.assertFalse(self.safety.get_controls_allowed())
 
   # test_tx_hook_on_wrong_safety_mode: inherited from base class, no override needed.
+
+  def test_body_controls_turn_indicator_allowed(self):
+    # Valid turn-indicator requests (0-3) are allowed when controls_allowed.
+    self.safety.set_controls_allowed(True)
+    for turn in range(4):
+      msg = self.packer.make_can_msg_safety("DAS_bodyControls", 0,
+              {"DAS_turnIndicatorRequest": turn})
+      self.assertTrue(self._tx(msg), f"turn={turn} should be allowed")
+
+  def test_body_controls_blocked_when_not_allowed(self):
+    # Like other actuation, blocked when controls are not allowed.
+    self.safety.set_controls_allowed(False)
+    msg = self.packer.make_can_msg_safety("DAS_bodyControls", 0,
+            {"DAS_turnIndicatorRequest": 1})
+    self.assertFalse(self._tx(msg))
 
   # =====================================================================
   # Pre-AP specific safety tests
