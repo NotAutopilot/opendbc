@@ -102,3 +102,26 @@ class TeslaCANPreAP(TeslaCANRaven):
     data = self.packers[CANBUS.party].make_can_msg("STW_ACTN_RQ", bus, values)[1]
     values["CRC_STW_ACTN_RQ"] = self.stw_crc(data[:7])
     return self.packers[CANBUS.party].make_can_msg("STW_ACTN_RQ", bus, values)
+
+  def create_body_controls_message(self, turn, hazard, bus, counter):
+    """Build DAS_bodyControls (0x3E9) to drive the turn indicator.
+
+    turn: 0=none, 1=left, 2=right (matches CC.rightBlinker*2 + CC.leftBlinker).
+    Reason=1 (DAS_ACTIVE_NAV_LANE_CHANGE) when turning, 0 otherwise. This is the
+    proven Tinkla/Tesla-Unity Pre-AP blinker mechanism — Pre-AP has no AP ECU,
+    so openpilot supplies DAS_bodyControls directly.
+    """
+    values = {
+      "DAS_headlightRequest": 0,
+      "DAS_hazardLightRequest": hazard,
+      "DAS_wiperSpeed": 0,
+      "DAS_turnIndicatorRequest": turn,
+      "DAS_highLowBeamDecision": 0,
+      "DAS_highLowBeamOffReason": 0,
+      "DAS_turnIndicatorRequestReason": 1 if turn > 0 else 0,
+      "DAS_bodyControlsCounter": counter,
+      "DAS_bodyControlsChecksum": 0,
+    }
+    data = self.packers[CANBUS.party].make_can_msg("DAS_bodyControls", bus, values)[1]
+    values["DAS_bodyControlsChecksum"] = self.checksum(0x3E9, data[:7])
+    return self.packers[CANBUS.party].make_can_msg("DAS_bodyControls", bus, values)
