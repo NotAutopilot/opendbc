@@ -8,7 +8,6 @@ import json
 import math
 import os
 
-import numpy as np
 from numpy import clip, interp
 
 from opendbc.car.common.filter_simple import FirstOrderFilter, HighPassFilter
@@ -25,8 +24,8 @@ from opendbc.car.tesla.preap.ff_table_default import (
 )
 from opendbc.car.tesla.preap.nap_conf import (
   nap_conf,
-  PEDAL_DI_MIN, PEDAL_DI_ZERO,
-  PEDAL_BP, PEDAL_MAX_VALUES,
+  PEDAL_DI_MIN,
+  PEDAL_BP,
   ACCEL_MAX, REGEN_MAX,
 )
 from opendbc.car.tesla.pedal.controller import (

@@ -135,6 +135,8 @@ static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
     checksum_byte = 7;
   } else if (msg->addr == 0x488U) {
     checksum_byte = 3;
+  } else {
+    // Unsupported checksummed message.
   }
   if (checksum_byte == -1) {
     return 0U;
@@ -458,6 +460,8 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
       if (elapsed > PREAP_CANCEL_ECHO_WINDOW_US) {
         pcm_cruise_check(false);
       }
+    } else {
+      // Ignore neutral/unused stalk positions.
     }
   }
 }
