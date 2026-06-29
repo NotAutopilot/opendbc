@@ -65,3 +65,18 @@ class TestSTWSpoofByteLayout:
     # the resulting bytes look like a real frame (bit 6 set on byte 0).
     _, dat, _ = packer.make_can_msg("STW_ACTN_RQ", 0, valid_msg | {"VSL_Enbl_Rq": 1})
     assert (dat[0] >> 6) & 1 == 1, "VSL_Enbl_Rq=1 should set bit 6 of byte 0"
+
+  def test_wiper_switch_position_preserved(self):
+    # Phantom-wipe-on-engage fix: WprSw6Posn (wiper 6-position switch, bits
+    # 48-50 = byte 6 bits 0-2) MUST be copied from the live stalk frame, not
+    # forced to 0. When it was dropped, the one-frame jump to 0 at engage was
+    # read as a wiper actuation and caused a single wipe every engagement.
+    tc, msg_stw = _build()
+    msg_stw["WprSw6Posn"] = 3  # driver's real wiper switch at a non-zero detent
+    _, dat, _ = tc.create_action_request(CruiseButtons.SET_ACCEL, CANBUS.party, 6, msg_stw)
+    assert dat[6] & 0x07 == 3, \
+      f"WprSw6Posn must be preserved (expected 3) — got byte6=0x{dat[6]:02x}"
+
+  def test_wiper_switch_in_defaults(self):
+    # Regression guard: WprSw6Posn must stay in the preserve list.
+    assert "WprSw6Posn" in _STW_DEFAULTS
