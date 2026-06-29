@@ -3,7 +3,7 @@ from numpy import interp, clip
 from opendbc.car.tesla.preap.nap_conf import (
   nap_conf,
   PEDAL_DI_MIN, PEDAL_DI_ZERO,
-  PEDAL_BP,
+  PEDAL_BP, PEDAL_MAX_VALUES,
   ACCEL_MAX, REGEN_MAX,
 )
 from opendbc.car.common.conversions import Conversions as CV

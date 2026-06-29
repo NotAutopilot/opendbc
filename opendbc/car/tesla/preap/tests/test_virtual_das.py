@@ -303,8 +303,8 @@ class TestInnerPID:
     """When a_ego matches a_cmd, PID correction should be near zero."""
     vdas = VirtualDAS(dt=0.02)
     for _ in range(200):
-      vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
-                  a_ego=1.0)
+      di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
+                       a_ego=1.0)
     assert abs(vdas.inner_pid.i) < 0.5
 
   def test_backward_compat_no_a_ego_arg(self):
@@ -325,13 +325,13 @@ class TestFeedforwardModel:
   def test_default_table_matches_legacy_at_grid_points(self):
     """Default FF table should match the old 3-breakpoint interp at grid points."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
-    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP, DEFAULT_TABLE
 
     ff = FeedforwardModel(table_path="/nonexistent")
 
-    for speed in SPEED_BP:
+    for si, speed in enumerate(SPEED_BP):
       max_pedal = float(np.interp(speed, PEDAL_BP, PEDAL_MAX_VALUES))
-      for accel in ACCEL_BP:
+      for ai, accel in enumerate(ACCEL_BP):
         expected = float(np.interp(accel,
                                    [REGEN_MAX, 0.0, ACCEL_MAX],
                                    [PEDAL_DI_MIN, 0.0, max_pedal]))

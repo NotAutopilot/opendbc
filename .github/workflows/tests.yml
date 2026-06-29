@@ -8,31 +8,8 @@ on:
   pull_request:
 
 jobs:
-  nap_tests:
-    name: nap tests
-    if: ${{ startsWith(github.ref_name, 'nap-') }}
-    runs-on: ubuntu-24.04
-    steps:
-    - uses: actions/checkout@v4
-    - uses: ./.github/workflows/cache
-    - name: Run NAP tests
-      run: |
-        source setup.sh
-        scons -j8
-        ruff check opendbc/car/tesla/fingerprints.py \
-                   opendbc/car/tesla/preap \
-                   opendbc/car/tesla/pedal/controller.py \
-                   opendbc/car/tesla/test_pedal_regen.py \
-                   opendbc/safety/tests/test_tesla_preap.py
-        pytest opendbc/car/tesla/preap/tests/ \
-               opendbc/car/tesla/test_pedal_regen.py \
-               opendbc/safety/tests/test_tesla_preap.py \
-               opendbc/car/tests/test_fw_fingerprint.py::TestFwFingerprint::test_exact_match \
-               -q
-
   tests:
     name: ./test.sh
-    if: ${{ !startsWith(github.ref_name, 'nap-') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -51,7 +28,6 @@ jobs:
 
   safety_tests:
     name: safety
-    if: ${{ !startsWith(github.ref_name, 'nap-') }}
     runs-on: ${{ github.repository == 'commaai/opendbc' && 'namespace-profile-amd64-8x16' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
@@ -68,7 +44,6 @@ jobs:
 
   mutation:
     name: Safety mutation tests
-    if: ${{ !startsWith(github.ref_name, 'nap-') }}
     runs-on: ${{ github.repository == 'commaai/opendbc' && 'namespace-profile-amd64-8x16' || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
@@ -87,7 +62,6 @@ jobs:
   # TODO: this needs to move to opendbc
   test_models:
     name: test models
-    if: ${{ !startsWith(github.ref_name, 'nap-') }}
     runs-on: ${{ github.repository == 'commaai/opendbc' && 'namespace-profile-amd64-8x16' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
