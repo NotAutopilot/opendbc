@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """ AUTO-FORMATTED USING opendbc/car/debug/format_fingerprints.py, EDIT STRUCTURE THERE."""
 from opendbc.car.structs import CarParams
 from opendbc.car.tesla.values import CAR
@@ -68,10 +69,6 @@ FW_VERSIONS = {
       b'1016704-00-HAA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'\x10\x00A',
     ],
-  },
-  CAR.TESLA_MODEL_S_PREAP: {
-    # Pre-AP uses NAPForcePreAP param to bypass fingerprinting entirely.
-    # No FW_VERSIONS needed — matches tinkla behavior.
   },
   CAR.TESLA_MODEL_S_HW2: {
     (Ecu.eps, 0x730, None): [
