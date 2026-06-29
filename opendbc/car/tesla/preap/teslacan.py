@@ -33,8 +33,10 @@ class TeslaCANPreAP(TeslaCANRaven):
     self.pedal_can_bus = 2
     # Pedal firmware watchdog requires consecutive counter values
     self.pedal_idx = 0
+    self.ibooster_idx = 0
     # STW_ACTN_RQ uses CRC-8 (poly 0x1D), not the byte-sum checksum
     self.stw_crc = crcmod.mkCrcFun(0x11d, initCrc=0x00, rev=False, xorOut=0xff)
+    self.ibooster_crc = crcmod.mkCrcFun(0x11d, initCrc=0x00, rev=False, xorOut=0xff)
 
   @staticmethod
   def pedal_checksum(msg_id, dat):
@@ -66,6 +68,27 @@ class TeslaCANPreAP(TeslaCANRaven):
     struct.pack_into("B", msg, 5, self.pedal_checksum(GAS_COMMAND_ID, msg.raw))
 
     return (GAS_COMMAND_ID, bytes(msg.raw), pedal_can_bus)
+
+  def create_ibooster_command(self, mode: int, position_mm: float, bus: int = CANBUS.party):
+    if mode not in (0, 2):
+      raise ValueError("iBooster mode must be 0 or 2")
+
+    idx = self.ibooster_idx
+    self.ibooster_idx = (self.ibooster_idx + 1) % 16
+
+    rel_raw = 32256
+    clamped_position_mm = max(-5.0, min(15.0, position_mm))
+    pos_raw = round((clamped_position_mm + 5.0) / 0.015625)
+
+    data = bytearray(6)
+    data[1] = (mode << 4) | idx
+    data[2] = rel_raw & 0xFF
+    data[3] = (rel_raw >> 8) & 0xFF
+    data[4] = pos_raw & 0xFF
+    data[5] = (pos_raw >> 8) & 0x0F
+    data[0] = self.ibooster_crc(bytes(data[1:]))
+
+    return (0x553, bytes(data), bus)
 
   def create_epas_control(self, counter, mode):
     values = {

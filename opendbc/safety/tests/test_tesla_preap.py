@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import unittest
-import numpy as np
+import crcmod
 
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
 from opendbc.car.tesla.values import CarControllerParams
@@ -14,6 +14,7 @@ from opendbc.safety.tests.common import CANPackerSafety
 PREAP_FLAG_ENABLE_PEDAL = 1
 PREAP_FLAG_RADAR_EMULATION = 2
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
+PREAP_FLAG_ENABLE_IBOOSTER = 8
 
 # Stalk lever positions from tesla_preap.h
 STALK_FWD_CANCEL = 1
@@ -66,6 +67,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     [0x214, 0],  # EPB_epasControl
     [0x551, 0],  # Pedal bus 0
     [0x551, 2],  # Pedal bus 2
+    [0x553, 0],  # ECU_BrakeCommand
     [0x45,  0],  # STW_ACTN_RQ (stalk spoof)
   ]
 
@@ -378,19 +380,15 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
           break
         angle = next_angle
 
-      self.assertIsNotNone(blocked_at,
-                           f"Speed {speed}: VM limit never blocked — reached {angle:.1f} deg "
-                           f"(Python expected max {expected_max:.1f} deg)")
+      self.assertIsNotNone(blocked_at, f"Speed {speed}: VM limit never blocked — reached {angle:.1f} deg (Python expected max {expected_max:.1f} deg)")
       # Tight bound: blocked angle must be within ±25% of Python's computation.
       # Absorbs float32/float64 drift but catches order-of-magnitude bugs.
       lower_bound = expected_max * 0.75
       upper_bound = expected_max * 1.25
-      self.assertGreaterEqual(blocked_at, lower_bound,
-                              f"Speed {speed}: blocked at {blocked_at:.1f} deg — "
-                              f"too LOW (expected ~{expected_max:.1f}, bound {lower_bound:.1f})")
-      self.assertLessEqual(blocked_at, upper_bound,
-                           f"Speed {speed}: blocked at {blocked_at:.1f} deg — "
-                           f"too HIGH (expected ~{expected_max:.1f}, bound {upper_bound:.1f})")
+      too_low_msg = f"Speed {speed}: blocked at {blocked_at:.1f} deg — too LOW (expected ~{expected_max:.1f}, bound {lower_bound:.1f})"
+      too_high_msg = f"Speed {speed}: blocked at {blocked_at:.1f} deg — too HIGH (expected ~{expected_max:.1f}, bound {upper_bound:.1f})"
+      self.assertGreaterEqual(blocked_at, lower_bound, too_low_msg)
+      self.assertLessEqual(blocked_at, upper_bound, too_high_msg)
 
   def _setup_safety_hooks(self):
     """Subclasses call this to set up the correct safety hooks."""
@@ -468,6 +466,102 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     # Use clearly pressed value when gas=True; clearly not pressed when gas=False.
     raw = self.PEDAL_RAW_CLEAR_PRESS if gas else 400
     return self._pedal_msg(raw)
+
+  def _setup_ibooster_safety_hooks(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap,
+                                 PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_ENABLE_IBOOSTER)
+    self.safety.init_tests()
+
+  @staticmethod
+  def _ibooster_position_raw(position_mm):
+    clamped_position = min(max(position_mm, -5), 15)
+    return round((clamped_position + 5) / 0.015625)
+
+  @staticmethod
+  def _ibooster_crc(data):
+    crc = crcmod.mkCrcFun(0x11d, initCrc=0x00, rev=False, xorOut=0xff)
+    return crc(bytes(data[1:6]))
+
+  def _ibooster_msg(self, mode=0, position_mm=0, relative_raw=32256, counter=0, bus=0, length=6, corrupt_crc=False):
+    position_raw = self._ibooster_position_raw(position_mm)
+    data = bytearray(8)
+    data[1] = ((mode & 0x3) << 4) | (counter & 0xF)
+    data[2] = relative_raw & 0xFF
+    data[3] = (relative_raw >> 8) & 0xFF
+    data[4] = position_raw & 0xFF
+    data[5] = (position_raw >> 8) & 0xF
+    data[0] = self._ibooster_crc(data)
+    if corrupt_crc:
+      data[0] ^= 0xFF
+    return libsafety_py.make_CANPacket(0x553, bus, bytes(data[:length]))
+
+  def test_ibooster_blocked_without_flag(self):
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self._ibooster_msg(mode=0, position_mm=0)))
+
+  def test_ibooster_wrong_bus_and_length_blocked(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertFalse(self._tx(self._ibooster_msg(bus=1)))
+    self.assertFalse(self._tx(self._ibooster_msg(bus=2)))
+    self.assertFalse(self._tx(self._ibooster_msg(length=5)))
+    self.assertFalse(self._tx(self._ibooster_msg(length=7)))
+
+  def test_ibooster_invalid_modes_blocked(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    for mode in (1, 3):
+      self.assertFalse(self._tx(self._ibooster_msg(mode=mode)))
+
+  def test_ibooster_without_controls_allows_release_only(self):
+    self._setup_ibooster_safety_hooks()
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=1)))
+    self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0)))
+
+  def test_ibooster_mode_2_zero_position_allowed_with_controls_allowed(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=0)))
+
+  def test_ibooster_nonzero_position_blocked_with_controls_allowed(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=0.015625)))
+
+  def test_ibooster_relative_raw_must_stay_fixed(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    for relative_raw in (0, 32255, 32257, 0xFFFF):
+      self.assertFalse(self._tx(self._ibooster_msg(mode=0, position_mm=0, relative_raw=relative_raw)))
+
+  def test_ibooster_crc_must_match_payload(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertFalse(self._tx(self._ibooster_msg(mode=0, position_mm=0, corrupt_crc=True)))
+
+  def test_ibooster_counter_must_advance(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=0)))
+    self.assertFalse(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=0)))
+    self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=1)))
 
   def test_pedal_allowed_with_flag(self):
     self._rx(self._pcm_status_msg(True))

@@ -1,6 +1,6 @@
 import numpy as np
 
-from opendbc.car import get_safety_config, structs, STD_CARGO_KG
+from opendbc.car import get_safety_config, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.tesla.preap.nap_conf import nap_conf
 
@@ -8,6 +8,7 @@ from opendbc.car.tesla.preap.nap_conf import nap_conf
 PREAP_FLAG_ENABLE_PEDAL = 1
 PREAP_FLAG_RADAR_EMULATION = 2
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
+PREAP_FLAG_ENABLE_IBOOSTER = 8
 from opendbc.car.tesla.preap.constants import (
   ACCEL_PREAP_BP, ACCEL_PREAP_PROFILES,
   PEDAL_LONG_K_BP, PEDAL_LONG_KP_V, PEDAL_LONG_KI_V,
@@ -36,13 +37,16 @@ def get_preap_params(ret, fingerprint):
   # Build safety param flags for the standalone Pre-AP safety mode
   flags = 0
   use_pedal = nap_conf.use_pedal
+  use_ibooster = nap_conf.use_ibooster
   radar_enabled = nap_conf.radar_enabled
   radar_behind_nosecone = nap_conf.radar_behind_nosecone
-  carlog.info("Pre-AP fingerprint: use_pedal=%s radar_enabled=%s behind_nosecone=%s",
-              use_pedal, radar_enabled, radar_behind_nosecone)
+  carlog.info("Pre-AP fingerprint: use_pedal=%s use_ibooster=%s radar_enabled=%s behind_nosecone=%s",
+              use_pedal, use_ibooster, radar_enabled, radar_behind_nosecone)
 
   if use_pedal:
     flags |= PREAP_FLAG_ENABLE_PEDAL
+  if use_ibooster:
+    flags |= PREAP_FLAG_ENABLE_IBOOSTER
   if radar_enabled:
     flags |= PREAP_FLAG_RADAR_EMULATION
   if radar_behind_nosecone:
