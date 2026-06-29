@@ -22,6 +22,7 @@ CONFIG_FILE = "/data/nap_params.json"
 DEFAULT_CONFIG = {
   'double_pull_window_ms': 400,
   'use_pedal': False,
+  'use_ibooster': False,
   'pedal_calibrated': False,
   'accel_profile': 'Chill',
   'pedal_can_zero': False,
@@ -158,6 +159,14 @@ class NAPConf:
   @use_pedal.setter
   def use_pedal(self, value):
     self._put_param_bool(NAPParamKeys.PEDAL_ENABLED, 'use_pedal', value)
+
+  @property
+  def use_ibooster(self):
+    return self._get_param_bool(NAPParamKeys.IBOOSTER_ENABLED, 'use_ibooster')
+
+  @use_ibooster.setter
+  def use_ibooster(self, value):
+    self._put_param_bool(NAPParamKeys.IBOOSTER_ENABLED, 'use_ibooster', value)
 
   @property
   def radar_enabled(self):

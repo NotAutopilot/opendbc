@@ -1,0 +1,84 @@
+{
+  "source": {
+    "log_root": "logs/tinkla-logs",
+    "segments": [
+      "drive-1/42f1eef3b1ddc182_2026-04-24--08-27-05--14--rlog.bz2",
+      "drive-3/42f1eef3b1ddc182_2025-07-09--20-47-54--40--rlog.bz2"
+    ],
+    "extractor": "opendbc/car/tesla/preap/tests/extract_ibooster_replay_fixture.py"
+  },
+  "segments": [
+    {
+      "name": "2026-04-24--08-27-05--14--rlog",
+      "real_command_count": 600,
+      "impostor_553_count": 456,
+      "command_crc_valid_count": 600,
+      "command_relative_raw_values": [
+        32256
+      ],
+      "mode_counts": {
+        "2": 600
+      },
+      "positive_command_count": 20,
+      "min_positive_command_position_mm": 1.015625,
+      "max_command_position_mm": 3.453125,
+      "max_command_step_mm": 1.015625,
+      "status_strict_counter_rate": 0.9827030693573003,
+      "status_counter_violation_median_gap_s": 0.01993062449997751,
+      "status_counter_violation_p99_gap_s": 0.021140156999990722,
+      "status_max_gap_s": 0.029451406000021052,
+      "status_position_cross_scale_lag_s": 1.629658801000005,
+      "positive_command_aego_p10": -0.9076339602470398,
+      "frames": {
+        "zero_command": "c42a007e4001",
+        "positive_first": "0327007e8101",
+        "positive_max": "332e007e1d02",
+        "status_first_positive": "280d311400",
+        "status_brake_applied": "3801c51500",
+        "bus1_impostor": "344305770000ff02"
+      }
+    },
+    {
+      "name": "2025-07-09--20-47-54--40--rlog",
+      "real_command_count": 600,
+      "impostor_553_count": 293,
+      "command_crc_valid_count": 600,
+      "command_relative_raw_values": [
+        32256
+      ],
+      "mode_counts": {
+        "2": 348,
+        "0": 252
+      },
+      "positive_command_count": 35,
+      "min_positive_command_position_mm": 1.046875,
+      "max_command_position_mm": 1.984375,
+      "max_command_step_mm": 1.109375,
+      "status_strict_counter_rate": 0.5225341231006954,
+      "status_counter_violation_median_gap_s": 0.020005052000215073,
+      "status_counter_violation_p99_gap_s": 0.04043635399966661,
+      "status_max_gap_s": 0.060336198000186414,
+      "status_position_cross_scale_lag_s": 1.329611874999955,
+      "positive_command_aego_p10": -0.9063264727592468,
+      "frames": {
+        "zero_command": "cf2d007e4001",
+        "positive_first": "152d007e8701",
+        "positive_max": "2d27007ebf01",
+        "status_first_positive": "0e06311400",
+        "status_brake_applied": "b806051600",
+        "bus1_impostor": "08334705ffff2702"
+      }
+    }
+  ],
+  "profile": {
+    "positive_command_count": 55,
+    "max_command_position_mm": 3.453125,
+    "min_positive_command_position_mm": 1.015625,
+    "max_command_step_mm": 1.109375,
+    "status_position_cross_scale_lag_s": 1.47963533799998,
+    "actuator_delay_control_frames": 3,
+    "positive_command_aego_p10": -0.9076339602470398,
+    "aego_noise_amplitude": 0.08,
+    "normalized_decel_gain": 1.0
+  }
+}

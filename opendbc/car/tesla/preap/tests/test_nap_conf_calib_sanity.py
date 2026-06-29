@@ -53,3 +53,15 @@ def test_calibrated_false_when_flag_unset_even_if_values_differ(tmp_conf):
   _write(tmp_conf, pedal_calibrated=False, pedal_calib_zero=0.25, pedal_calib_factor=0.035)
   conf = nap_conf_module.NAPConf()
   assert conf.pedal_calibrated is False
+
+
+def test_ibooster_defaults_disabled(tmp_conf):
+  _write(tmp_conf)
+  conf = nap_conf_module.NAPConf()
+  assert conf.use_ibooster is False
+
+
+def test_ibooster_reads_json_fallback(tmp_conf):
+  _write(tmp_conf, use_ibooster=True)
+  conf = nap_conf_module.NAPConf()
+  assert conf.use_ibooster is True

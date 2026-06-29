@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - 'nap-*'
   pull_request:
 
 jobs:
