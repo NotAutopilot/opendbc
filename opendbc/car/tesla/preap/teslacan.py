@@ -11,15 +11,28 @@ PEDAL_D = -22.85856576    # Offset
 GAS_COMMAND_ID = 0x551
 
 # Default STW_ACTN_RQ signal values (all signals except counter, CRC, and button).
+# Each key here is copied from the live stalk frame (create_action_request uses
+# msg_stw.get(key, default), so the default is only a fallback when the signal is
+# absent) — so these mirror the driver's real stalk state.
+#
 # VSL_Enbl_Rq=1 matches what the driver's stalk module emits — the DI rejects /
 # anomalously interprets frames with bit 6 of byte 0 cleared. See drive-3
 # segment 2: NAP's spoofed UP_1ST at 47 kph went STANDBY→OFF instead of
 # STANDBY→ENABLED because of this single bit. Was previously a typo
 # ("VSL_Enbl_Stat", which is not a DBC signal) — silently dropped by the
 # packer, so the bit always read 0.
+#
+# WprSw6Posn (wiper 6-position switch) MUST be listed so it is preserved from the
+# live frame. When it was omitted, the packer wrote it as 0 in every spoofed
+# frame; at engage that one-frame jump from the driver's real wiper position to 0
+# was read by the body controller as a wiper actuation, causing a single phantom
+# wipe on every engagement. We do NOT add the other unpreserved switch bits
+# (StW_Sw07..15, SpdCtrlLvrStat_Inv) on purpose — keep this change minimal so we
+# don't risk spoofing a horn/high-beam/other stalk press.
 _STW_DEFAULTS = {
   "VSL_Enbl_Rq": 1, "DTR_Dist_Rq": 0, "TurnIndLvr_Stat": 0,
   "HiBmLvr_Stat": 0, "WprWashSw_Psd": 0, "WprWash_R_Sw_Posn_V2": 0,
+  "WprSw6Posn": 0,
   "StW_Lvr_Stat": 0, "StW_Cond_Flt": 0, "StW_Cond_Psd": 0,
   "HrnSw_Psd": 0, "StW_Sw00_Psd": 0, "StW_Sw01_Psd": 0,
   "StW_Sw02_Psd": 0, "StW_Sw03_Psd": 0, "StW_Sw04_Psd": 0,
