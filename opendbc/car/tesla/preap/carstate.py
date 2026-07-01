@@ -187,8 +187,6 @@ def get_preap_can_parsers(CP):
   # math.nan frequency = don't invalidate CAN health if pedal is absent
   pedal_messages = [("GAS_SENSOR", math.nan)]
 
-  ap_messages = [("ESP_B", 0)]
-
   return {
     Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
     Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], pedal_messages, pedal_bus),

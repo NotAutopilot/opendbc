@@ -8,6 +8,8 @@ from opendbc.car.tesla.preap.ibooster import (
   IBoosterLimits,
   IBoosterState,
 )
+from opendbc.car.tesla.preap.nap_conf import REGEN_MAX
+from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 
 
 _TARGET_DECEL = 1.0
@@ -255,3 +257,45 @@ def test_over_strong_ibooster_does_not_create_brake_grab_after_settling():
   sustained_worst_decel = min(a_ego for a_ego, _ in history[_SETTLED_FRAME:])
 
   assert sustained_worst_decel > -_OVERSHOOT_BOUND
+
+
+def test_real_vdas_longitudinal_loop_requests_ibooster_when_regen_is_insufficient():
+  vdas = VirtualDAS(dt=0.02)
+  vdas.ibooster_allocator = IBoosterAllocator(_limits_for_sim(), cannot_deliver_frames=120)
+  vdas.reset(a_init=REGEN_MAX, pedal_di_init=PEDAL_DI_MIN)
+  plant = DeterministicIBoosterPlant(
+    regen_authority=0.2,
+    ibooster_gain=1.0,
+    actuator_delay_steps=5,
+  )
+
+  prev_pedal_di = PEDAL_DI_MIN
+  prev_ibooster_mm = 0.0
+  a_ego = 0.0
+  history = []
+
+  for _ in range(_LOOP_FRAMES):
+    out = vdas.update_longitudinal(
+      a_cmd=REGEN_MAX,
+      v_ego=20.0,
+      prev_pedal_di=prev_pedal_di,
+      prev_ibooster_mm=prev_ibooster_mm,
+      a_ego=a_ego,
+      ibooster_state=_ready_state(reported_position_mm=prev_ibooster_mm),
+    )
+    a_ego = plant.step(
+      pedal_di=out.pedal_effort_di,
+      ibooster_mm=out.ibooster_mm,
+      v_ego=20.0,
+      grade_accel=0.0,
+    )
+    prev_pedal_di = out.pedal_effort_di
+    prev_ibooster_mm = out.ibooster_mm
+    history.append((a_ego, out))
+
+  max_ibooster_mm = max(out.ibooster_mm for _, out in history)
+  final_a_ego, final_out = history[-1]
+
+  assert max_ibooster_mm > 0.0
+  assert final_a_ego < -0.35
+  assert not final_out.ibooster_allocation.cannot_deliver

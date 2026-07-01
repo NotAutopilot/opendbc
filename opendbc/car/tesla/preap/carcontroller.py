@@ -33,6 +33,7 @@ class PreAPLongController:
 
   def __init__(self):
     self.prev_pedal_di = 0.0
+    self.prev_ibooster_mm = 0.0
     self.prev_enable_long_control = False
     self.prev_requested_long = False
     self.prev_preap_long_active = False
@@ -65,6 +66,7 @@ class PreAPLongController:
       self.preap_long_engage_frame = frame
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
+      self.prev_ibooster_mm = 0.0
       self.vdas.reset(a_init=0.0, pedal_di_init=self.prev_pedal_di)
       _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
@@ -110,15 +112,27 @@ class PreAPLongController:
               accel_cap = grace_progress * self.engage_a_max
               accel_request = max(0.0, min(accel_request, accel_cap))
 
-            self.prev_pedal_di = self.vdas.update(
-              accel_request, CS.out.vEgo, self.prev_pedal_di,
-              a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
-              orientation_ned=list(CC.orientationNED))
+            ibooster_state = getattr(CS, "ibooster_state", None)
+            if nap_conf.use_ibooster and ibooster_state is not None:
+              long_out = self.vdas.update_longitudinal(
+                accel_request, CS.out.vEgo, self.prev_pedal_di,
+                self.prev_ibooster_mm, a_ego=CS.out.aEgo,
+                freeze_integrator=in_engage_grace,
+                orientation_ned=list(CC.orientationNED),
+                ibooster_state=ibooster_state)
+              self.prev_pedal_di = long_out.pedal_effort_di
+              self.prev_ibooster_mm = long_out.ibooster_mm
+              if long_out.ibooster_allocation.cannot_deliver and not in_engage_grace:
+                CS.pccEvent = "pedalMaxRegen"
+            else:
+              self.prev_pedal_di = self.vdas.update(
+                accel_request, CS.out.vEgo, self.prev_pedal_di,
+                a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
+                orientation_ned=list(CC.orientationNED))
+              if self.prev_pedal_di <= 0.95 * PEDAL_DI_MIN and not in_engage_grace:
+                CS.pccEvent = "pedalMaxRegen"
             pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
             can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
-
-            if self.prev_pedal_di <= 0.95 * PEDAL_DI_MIN and not in_engage_grace:
-              CS.pccEvent = "pedalMaxRegen"
 
           else:
             # pedal_engaged but not long_active and not gasPressed:

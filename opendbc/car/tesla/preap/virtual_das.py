@@ -7,8 +7,8 @@ feedback-corrected controller for smooth pedal actuation without DAS hardware.
 import json
 import math
 import os
+from dataclasses import dataclass
 
-import numpy as np
 from numpy import clip, interp
 
 from opendbc.car.common.filter_simple import FirstOrderFilter, HighPassFilter
@@ -23,10 +23,16 @@ from opendbc.car.tesla.preap.ff_table_default import (
   ACCEL_BP as FF_ACCEL_BP,
   DEFAULT_TABLE as FF_DEFAULT_TABLE,
 )
+from opendbc.car.tesla.preap.ibooster import (
+  IBoosterAllocation,
+  IBoosterAllocator,
+  IBoosterLimits,
+  IBoosterState,
+)
 from opendbc.car.tesla.preap.nap_conf import (
   nap_conf,
-  PEDAL_DI_MIN, PEDAL_DI_ZERO,
-  PEDAL_BP, PEDAL_MAX_VALUES,
+  PEDAL_DI_MIN,
+  PEDAL_BP,
   ACCEL_MAX, REGEN_MAX,
 )
 from opendbc.car.tesla.pedal.controller import (
@@ -42,6 +48,8 @@ FF_TABLE_PATH = "/data/vdas_ff_table.json"
 # MPC jitter near steady-state. Applied to the error input, not the output,
 # so there's no discontinuity in the correction signal.
 PID_ERROR_DEADBAND = 0.1  # m/s²
+VDAS_COMBINED_NEG_LIMIT_DI = -12.0
+
 
 GRAVITY = 9.81  # m/s²
 PITCH_LP_RC = 0.5   # low-pass filter RC for steady-state grade (seconds)
@@ -175,6 +183,15 @@ class FeedforwardModel:
     return base_di
 
 
+@dataclass(frozen=True)
+class VDASLongitudinalOutput:
+  control_effort_di: float
+  pedal_effort_di: float
+  brake_residual_di: float
+  ibooster_mm: float
+  ibooster_allocation: IBoosterAllocation
+
+
 class VirtualDAS:
   """Cascaded longitudinal controller for Pre-AP Tesla pedal control.
 
@@ -188,13 +205,14 @@ class VirtualDAS:
     self.ff_model = FeedforwardModel()
     self.grade_estimator = GradeEstimator(dt=dt)
     self.prev_pedal_di = 0.0
+    self.ibooster_allocator = IBoosterAllocator(IBoosterLimits.locked())
 
     self.inner_pid = PIDController(
       k_p=(VDAS_INNER_K_BP, VDAS_INNER_KP_V),
       k_i=(VDAS_INNER_K_BP, VDAS_INNER_KI_V),
       k_f=0.0,
       pos_limit=PEDAL_RAMP_RATE_UP,
-      neg_limit=-PEDAL_RAMP_RATE_DOWN,
+      neg_limit=VDAS_COMBINED_NEG_LIMIT_DI,
       rate=1.0 / dt,
     )
     self.a_ego_filter = FirstOrderFilter(0.0, VDAS_AEGO_FILTER_RC, dt)
@@ -216,6 +234,56 @@ class VirtualDAS:
     Returns:
       pedal_di: output in DI units (caller converts to voltage via di_to_pedal)
     """
+    self.inner_pid.neg_limit = -PEDAL_RAMP_RATE_DOWN
+    control_effort_di = self._compute_control_effort_di(
+      a_cmd=a_cmd,
+      v_ego=v_ego,
+      a_ego=a_ego,
+      freeze_integrator=freeze_integrator,
+      orientation_ned=orientation_ned,
+    )
+
+    pedal_profile = nap_conf.get_pedal_profile_values()
+    max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
+    pedal_di = float(clip(control_effort_di, PEDAL_DI_MIN, max_pedal_value))
+    pedal_di = self._rate_limit(pedal_di, prev_pedal_di)
+
+    self.prev_pedal_di = pedal_di
+    return pedal_di
+
+  def update_longitudinal(self, a_cmd: float, v_ego: float, prev_pedal_di: float,
+                          prev_ibooster_mm: float, a_ego: float,
+                          ibooster_state: IBoosterState,
+                          freeze_integrator: bool = False,
+                          orientation_ned: list | None = None) -> VDASLongitudinalOutput:
+    self.inner_pid.neg_limit = VDAS_COMBINED_NEG_LIMIT_DI
+    control_effort_di = self._compute_control_effort_di(
+      a_cmd=a_cmd,
+      v_ego=v_ego,
+      a_ego=a_ego,
+      freeze_integrator=freeze_integrator,
+      orientation_ned=orientation_ned,
+    )
+    allocation = self.ibooster_allocator.allocate(
+      control_effort_di=control_effort_di,
+      prev_pedal_di=prev_pedal_di,
+      prev_ibooster_mm=prev_ibooster_mm,
+      v_ego=v_ego,
+      state=ibooster_state,
+      under_delivering=control_effort_di < PEDAL_DI_MIN,
+    )
+
+    self.prev_pedal_di = allocation.pedal_effort_di
+    return VDASLongitudinalOutput(
+      control_effort_di=control_effort_di,
+      pedal_effort_di=allocation.pedal_effort_di,
+      brake_residual_di=allocation.brake_residual_di,
+      ibooster_mm=allocation.ibooster_mm,
+      ibooster_allocation=allocation,
+    )
+
+  def _compute_control_effort_di(self, a_cmd: float, v_ego: float, a_ego: float,
+                                 freeze_integrator: bool, orientation_ned: list | None) -> float:
     a_limited = self.jerk_limiter.update(a_cmd)
 
     grade_accel, pitch_compensation = self.grade_estimator.update(
@@ -241,21 +309,13 @@ class VirtualDAS:
     pid_correction = float(self.inner_pid.update(
       error, speed=v_ego, freeze_integrator=freeze_integrator))
 
-    pedal_di = ff_di + pid_correction
-
-    pedal_profile = nap_conf.get_pedal_profile_values()
-    max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
-    pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
-
-    pedal_di = self._rate_limit(pedal_di, prev_pedal_di)
-
-    self.prev_pedal_di = pedal_di
-    return pedal_di
+    return ff_di + pid_correction
 
   def reset(self, a_init: float = 0.0, pedal_di_init: float = 0.0):
     """Reset all internal state on engage transition."""
     self.jerk_limiter.reset(a_init)
     self.inner_pid.reset()
+    self.ibooster_allocator.reset()
     self.grade_estimator.reset()
     self.a_ego_filter.x = 0.0
     self.prev_a_ego_filtered = 0.0
