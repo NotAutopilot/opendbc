@@ -80,6 +80,29 @@ def test_sub_deadband_residual_holds_zero_ibooster_mm_when_unlocked():
   assert out.ibooster_mm == pytest.approx(0.0)
   assert out.health is IBoosterHealth.READY
 
+
+def test_ready_unlocked_allocator_converts_residual_to_ibooster_travel():
+  limits = IBoosterLimits(
+    max_mm=8.0,
+    max_mm_step=8.0,
+    residual_deadband_di=0.25,
+    residual_to_mm=((0.0, 1.0), (0.0, 4.0)),
+  )
+  allocator = IBoosterAllocator(limits)
+
+  out = allocator.allocate(
+    control_effort_di=PEDAL_DI_MIN - 1.0,
+    prev_pedal_di=PEDAL_DI_MIN,
+    prev_ibooster_mm=0.0,
+    v_ego=15.0,
+    state=_ready_state(),
+  )
+
+  assert out.ibooster_mm > 0.0
+  assert out.health is IBoosterHealth.READY
+  assert not out.cannot_deliver
+
+
 def test_ready_but_locked_ibooster_becomes_cannot_deliver_after_persistence():
   allocator = IBoosterAllocator(IBoosterLimits.locked(), cannot_deliver_frames=3)
 

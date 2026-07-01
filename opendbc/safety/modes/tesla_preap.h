@@ -566,7 +566,8 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       int crc = msg->data[0];
       int expected_crc = preap_compute_ibooster_crc(msg);
 
-      if (crc != expected_crc) {
+      bool crc_valid = crc == expected_crc;
+      if (!crc_valid) {
         violation = true;
       }
       if ((preap_ibooster_tx_counter >= 0) && (counter != ((preap_ibooster_tx_counter + 1) & 0x0F))) {
@@ -585,7 +586,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       if (!get_longitudinal_allowed() && (mode != 0)) {
         violation = true;
       }
-      if (!violation) {
+      if (crc_valid) {
         preap_ibooster_tx_counter = counter;
       }
     }

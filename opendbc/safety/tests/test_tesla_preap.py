@@ -522,8 +522,8 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self._setup_ibooster_safety_hooks()
     self.assertFalse(self.safety.get_controls_allowed())
 
-    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=1)))
-    self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0)))
+    self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=0)))
+    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=1, counter=1)))
 
   def test_ibooster_mode_2_zero_position_allowed_with_controls_allowed(self):
     self._setup_ibooster_safety_hooks()
@@ -562,6 +562,15 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=0)))
     self.assertFalse(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=0)))
     self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=1)))
+
+  def test_ibooster_counter_recovers_after_rejected_position(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=0)))
+    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=0.015625, counter=1)))
+    self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=2)))
 
   def test_pedal_allowed_with_flag(self):
     self._rx(self._pcm_status_msg(True))

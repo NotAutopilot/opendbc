@@ -51,11 +51,18 @@ class IBoosterAllocation:
   ibooster_mm: float
   health: IBoosterHealth
 
+  @property
+  def cannot_deliver(self) -> bool:
+    return self.health is IBoosterHealth.CANNOT_DELIVER
+
 
 class IBoosterAllocator:
   def __init__(self, limits: IBoosterLimits, cannot_deliver_frames: int = 50):
     self.limits = limits
     self.cannot_deliver_frames = max(1, cannot_deliver_frames)
+    self._cannot_deliver_count = 0
+
+  def reset(self):
     self._cannot_deliver_count = 0
 
   def allocate(self, control_effort_di: float, prev_pedal_di: float, prev_ibooster_mm: float,

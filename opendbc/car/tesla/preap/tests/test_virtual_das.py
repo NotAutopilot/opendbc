@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import patch, MagicMock
+from opendbc.car.tesla.preap.ibooster import IBoosterHealth, IBoosterState
 import numpy as np
 
 from opendbc.car.tesla.preap.virtual_das import JerkLimiter, VirtualDAS
@@ -96,6 +97,13 @@ def mock_zero_torque():
   with patch('opendbc.car.tesla.preap.virtual_das.get_zero_torque', return_value=mock_zt):
     yield mock_zt
 
+def _ready_ibooster_state() -> IBoosterState:
+  return IBoosterState(
+    health=IBoosterHealth.READY,
+    can_actuate=True,
+    reported_position_mm=0.0,
+  )
+
 
 # --- Phase 1: VirtualDAS feedforward + jerk limiter ---
 
@@ -124,6 +132,46 @@ class TestVirtualDAS:
       di = vdas.update(REGEN_MAX, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
     assert abs(di - PEDAL_DI_MIN) < 0.5
 
+  def test_update_keeps_negative_integral_within_pedal_only_bound_at_max_regen(self):
+    vdas = VirtualDAS(dt=0.02)
+
+    for _ in range(2000):
+      vdas.update(REGEN_MAX, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di, a_ego=0.0)
+
+    assert vdas.inner_pid.i >= -PEDAL_RAMP_RATE_DOWN - 1e-9
+
+  def test_ibooster_path_allows_internal_effort_below_pedal_floor(self):
+    vdas = VirtualDAS(dt=0.02)
+    vdas.reset(a_init=REGEN_MAX, pedal_di_init=PEDAL_DI_MIN)
+
+    out = None
+    prev_pedal_di = PEDAL_DI_MIN
+    prev_ibooster_mm = 0.0
+    for _ in range(80):
+      out = vdas.update_longitudinal(
+        a_cmd=REGEN_MAX,
+        v_ego=15.0,
+        prev_pedal_di=prev_pedal_di,
+        prev_ibooster_mm=prev_ibooster_mm,
+        a_ego=0.2,
+        ibooster_state=_ready_ibooster_state(),
+      )
+      prev_pedal_di = out.pedal_effort_di
+      prev_ibooster_mm = out.ibooster_mm
+
+    assert out.control_effort_di < PEDAL_DI_MIN
+    assert out.pedal_effort_di == pytest.approx(PEDAL_DI_MIN)
+    assert out.brake_residual_di > 0.0
+
+  def test_existing_update_still_returns_only_pedal_di(self):
+    vdas = VirtualDAS(dt=0.02)
+    vdas.reset(a_init=-1.0, pedal_di_init=0.0)
+
+    pedal_di = vdas.update(a_cmd=-1.0, v_ego=15.0, prev_pedal_di=0.0, a_ego=0.0)
+
+    assert isinstance(pedal_di, float)
+    assert pedal_di >= PEDAL_DI_MIN
+
   def test_jerk_limiting_active_on_step(self):
     vdas = VirtualDAS(dt=0.02)
     di_first = vdas.update(ACCEL_MAX, v_ego=15.0, prev_pedal_di=0.0)
@@ -148,6 +196,34 @@ class TestVirtualDAS:
     assert vdas.jerk_limiter.a_limited == 0.0
     assert vdas.prev_pedal_di == 5.0
     assert vdas.inner_pid.i == 0.0
+
+  def test_reset_clears_ibooster_cannot_deliver_state(self):
+    vdas = VirtualDAS(dt=0.02)
+    vdas.ibooster_allocator.cannot_deliver_frames = 2
+
+    for _ in range(2):
+      out = vdas.ibooster_allocator.allocate(
+        control_effort_di=PEDAL_DI_MIN - 2.0,
+        prev_pedal_di=PEDAL_DI_MIN,
+        prev_ibooster_mm=0.0,
+        v_ego=15.0,
+        state=_ready_ibooster_state(),
+        under_delivering=True,
+      )
+
+    assert out.cannot_deliver
+
+    vdas.reset(a_init=REGEN_MAX, pedal_di_init=PEDAL_DI_MIN)
+    out = vdas.ibooster_allocator.allocate(
+      control_effort_di=PEDAL_DI_MIN - 2.0,
+      prev_pedal_di=PEDAL_DI_MIN,
+      prev_ibooster_mm=0.0,
+      v_ego=15.0,
+      state=_ready_ibooster_state(),
+      under_delivering=True,
+    )
+
+    assert not out.cannot_deliver
 
   def test_small_accel_near_zero(self):
     """Small accel produces a small positive DI near zero-torque (smooth interp, no cliff)."""
@@ -303,8 +379,8 @@ class TestInnerPID:
     """When a_ego matches a_cmd, PID correction should be near zero."""
     vdas = VirtualDAS(dt=0.02)
     for _ in range(200):
-      di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
-                       a_ego=1.0)
+      vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
+                  a_ego=1.0)
     assert abs(vdas.inner_pid.i) < 0.5
 
   def test_backward_compat_no_a_ego_arg(self):
@@ -325,13 +401,13 @@ class TestFeedforwardModel:
   def test_default_table_matches_legacy_at_grid_points(self):
     """Default FF table should match the old 3-breakpoint interp at grid points."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
-    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP, DEFAULT_TABLE
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP
 
     ff = FeedforwardModel(table_path="/nonexistent")
 
-    for si, speed in enumerate(SPEED_BP):
+    for speed in SPEED_BP:
       max_pedal = float(np.interp(speed, PEDAL_BP, PEDAL_MAX_VALUES))
-      for ai, accel in enumerate(ACCEL_BP):
+      for accel in ACCEL_BP:
         expected = float(np.interp(accel,
                                    [REGEN_MAX, 0.0, ACCEL_MAX],
                                    [PEDAL_DI_MIN, 0.0, max_pedal]))
