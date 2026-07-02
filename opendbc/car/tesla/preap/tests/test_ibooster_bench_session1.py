@@ -7,10 +7,13 @@ import pytest
 
 from opendbc.car.tesla.preap.ibooster_session1_bench import (
   BENCH_POSITION_RAW_ZERO,
+  IBOOSTER_BUS,
   IBOOSTER_PRIOR_MAX_MM,
   IBOOSTER_PRIOR_MAX_STEP_MM_PER_100MS,
+  IBOOSTER_STATUS_ADDR,
   BenchAbort,
   BenchTimings,
+  CanFrame,
   IBoosterSession1BenchRunner,
   ReplayFixtureFakeECU,
   build_ibooster_zero_command,
@@ -38,19 +41,52 @@ def _short_timings() -> BenchTimings:
     post_skip_observe_s=0.02,
     gap_sweep_s=(0.02, 0.05),
     post_gap_observe_s=0.02,
+    fault_observation_s=0.03,
     rx_poll_s=0.005,
     rx_timeout_s=0.02,
   )
 
 
-def _fixture_fake(**kwargs) -> ReplayFixtureFakeECU:
+def _fixture_fake(fake_cls=ReplayFixtureFakeECU, **kwargs) -> ReplayFixtureFakeECU:
   fixture = load_ibooster_replay_fixture()
   frames = fixture.segments[0].frames
-  return ReplayFixtureFakeECU(
+  return fake_cls(
     status_554=frames.status_first_positive,
     impostor_553=frames.bus1_impostor,
     **kwargs,
   )
+
+
+class CounterSkipFaultFakeECU(ReplayFixtureFakeECU):
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+    self.previous_counter: int | None = None
+    self.fault_active = False
+
+  def send(self, address: int, bus: int, data: bytes) -> None:
+    decoded = decode_553(data)
+    counter = decoded["counter"]
+    if self.previous_counter is not None and ((counter - self.previous_counter) & 0x0F) == 2:
+      self.fault_active = True
+    if self.fault_active and decoded["mode"] == 0:
+      self.fault_active = False
+    self.previous_counter = counter
+    super().send(address, bus, data)
+
+  def recv(self) -> list[CanFrame]:
+    frames = super().recv()
+    if not self.fault_active:
+      return frames
+
+    faulted_frames: list[CanFrame] = []
+    for frame in frames:
+      if (frame.address, frame.bus) == (IBOOSTER_STATUS_ADDR, IBOOSTER_BUS):
+        data = bytearray(frame.data)
+        data[1] = (data[1] & 0x0F) | 0x10
+        faulted_frames.append(CanFrame(address=frame.address, bus=frame.bus, data=bytes(data)))
+      else:
+        faulted_frames.append(frame)
+    return faulted_frames
 
 
 def _run(tmp_path: Path, fake: ReplayFixtureFakeECU | None = None) -> dict:
@@ -84,6 +120,10 @@ def test_zero_position_tx_generator_rejects_non_bench_modes():
   for mode in (-1, 1, 3, 6):
     with pytest.raises(ValueError):
       build_ibooster_zero_command(mode=mode, counter=0)
+
+
+def test_default_gap_sweep_starts_at_half_second():
+  assert BenchTimings().gap_sweep_s == (0.5, 1.0, 2.0, 5.0)
 
 
 def test_healthy_session_writes_complete_artifact_and_filters_impostors(tmp_path):
@@ -169,3 +209,49 @@ def test_session_aborts_and_writes_artifact_on_rx_loss(tmp_path):
   artifact = json.loads(next(tmp_path.glob("pod-*-ibooster-session1.json")).read_text())
   assert artifact["abort"]["reason"] == "RX loss"
   assert artifact["abort"]["missing"] in ("0x554", "0x39D")
+
+
+def test_counter_skip_fault_observation_records_mode_0_clear(tmp_path):
+  fake = _fixture_fake(fake_cls=CounterSkipFaultFakeECU)
+  artifact = _run(tmp_path, fake=fake)
+
+  assert artifact["abort"] is None
+  assert [case["name"] for case in artifact["cases"]] == [
+    "mode_0_zero_hold",
+    "mode_2_zero_hold",
+    "transition_0_to_2_zero",
+    "transition_2_to_0_zero",
+    "counter_skip_zero",
+  ]
+
+  counter_skip_case = artifact["cases"][-1]
+  assert counter_skip_case["result"] == "fault_observed"
+  assert counter_skip_case["cleared_by_mode_0"] is True
+  assert counter_skip_case["fault"]["reason"] == "0x554 Status != NO_FAULT"
+  assert counter_skip_case["fault_observation"]["status_554"][0]["decoded"]["status"] != 0
+  assert counter_skip_case["fault_observation"]["status_554"][-1]["decoded"]["status"] == 0
+
+  observation_txs = [tx for tx in artifact["tx_events"] if tx["case"] == "fault_observation_mode_0_zero"]
+  assert observation_txs
+  assert all(tx["decoded"]["mode"] == 0 for tx in observation_txs)
+  assert all(tx["decoded"]["position_raw"] == BENCH_POSITION_RAW_ZERO for tx in observation_txs)
+
+
+def test_abort_sends_mode_0_release_before_transport_close(tmp_path):
+  fake = _fixture_fake(fault_after_tx_count=2)
+  runner = IBoosterSession1BenchRunner(
+    car="pod",
+    output_dir=tmp_path,
+    transport=fake,
+    clock=FakeClock(),
+    timings=_short_timings(),
+  )
+
+  with pytest.raises(BenchAbort):
+    runner.run()
+
+  artifact = json.loads(next(tmp_path.glob("pod-*-ibooster-session1.json")).read_text())
+  assert artifact["abort"]["reason"] == "0x554 Status != NO_FAULT"
+  assert artifact["tx_events"][-1]["case"] == "exit_mode_0_zero"
+  assert artifact["tx_events"][-1]["decoded"]["mode"] == 0
+  assert decode_553(fake.sent[-1].data)["mode"] == 0

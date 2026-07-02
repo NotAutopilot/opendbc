@@ -53,8 +53,9 @@ class BenchTimings:
   sustain_s: float = 5.0
   transition_hold_s: float = 0.5
   post_skip_observe_s: float = 1.0
-  gap_sweep_s: tuple[float, ...] = (0.2, 0.5, 1.0, 2.0, 5.0)
+  gap_sweep_s: tuple[float, ...] = (0.5, 1.0, 2.0, 5.0)
   post_gap_observe_s: float = 1.0
+  fault_observation_s: float = 5.0
   rx_poll_s: float = 0.01
   rx_timeout_s: float = 0.25
 
@@ -73,6 +74,12 @@ class BenchAbort(RuntimeError):
     self.reason = reason
     self.payload = payload
 
+
+class BenchObservedFault(RuntimeError):
+  def __init__(self, reason: str, payload: dict):
+    super().__init__(reason)
+    self.reason = reason
+    self.payload = payload
 
 def build_ibooster_zero_command(*, mode: int, counter: int) -> bytes:
   if mode not in (0, 2):
@@ -226,6 +233,7 @@ class IBoosterSession1BenchRunner:
     self.readiness_baseline: int | None = None
     self.artifact_path: Path | None = None
     self.artifact = self._new_artifact()
+    self.exit_mode_0_attempted = False
 
   def run(self) -> Path:
     self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -240,20 +248,22 @@ class IBoosterSession1BenchRunner:
       self._run_hold_case("mode_2_zero_hold", mode=2, duration_s=self.timings.sustain_s)
       self._run_transition_case("transition_0_to_2_zero", first_mode=0, second_mode=2)
       self._run_transition_case("transition_2_to_0_zero", first_mode=2, second_mode=0)
-      self._run_counter_skip_case()
-      self._run_gap_sweep_case()
-      self.artifact["completed_at"] = self._now_utc()
-      self._write_artifact()
+      if not self._run_counter_skip_case():
+        self._run_gap_sweep_case()
+      self._complete_session()
       self._print(f"Complete. Output file: {self.artifact_path}")
       return self.artifact_path
     except BenchAbort as exc:
       self.artifact["abort"] = exc.payload
-      self.artifact["completed_at"] = self._now_utc()
-      self._write_artifact()
+      self._complete_session()
       self._print(f"STOP NOW: {exc.reason}")
       self._print(f"Output file: {self.artifact_path}")
       raise
     finally:
+      if self.artifact_path is not None and not self.exit_mode_0_attempted:
+        self._send_exit_mode_0()
+        self.artifact["completed_at"] = self._now_utc()
+        self._write_artifact()
       self.transport.close()
 
   def _new_artifact(self) -> dict:
@@ -281,6 +291,7 @@ class IBoosterSession1BenchRunner:
         "post_skip_observe_s": self.timings.post_skip_observe_s,
         "gap_sweep_s": list(self.timings.gap_sweep_s),
         "post_gap_observe_s": self.timings.post_gap_observe_s,
+        "fault_observation_s": self.timings.fault_observation_s,
         "rx_timeout_s": self.timings.rx_timeout_s,
       },
       "health": {"initial_554": None, "initial_39d": None},
@@ -321,6 +332,21 @@ class IBoosterSession1BenchRunner:
     })
     self.counter = (self.counter + 1) & 0x0F
 
+  def _complete_session(self) -> None:
+    self._send_exit_mode_0()
+    self.artifact["completed_at"] = self._now_utc()
+    self._write_artifact()
+
+  def _send_exit_mode_0(self) -> None:
+    if self.exit_mode_0_attempted:
+      return
+
+    self.exit_mode_0_attempted = True
+    try:
+      self._send(mode=0, case="exit_mode_0_zero")
+    except Exception as exc:
+      self.artifact["exit_mode_0_error"] = repr(exc)
+
   def _await_initial_health(self) -> None:
     deadline = self.clock.monotonic() + self.timings.rx_timeout_s
     while self.clock.monotonic() <= deadline:
@@ -350,7 +376,7 @@ class IBoosterSession1BenchRunner:
     self._hold_mode(name, mode=second_mode, duration_s=self.timings.transition_hold_s)
     self._finish_case(case)
 
-  def _run_counter_skip_case(self) -> None:
+  def _run_counter_skip_case(self) -> bool:
     case = self._start_case("counter_skip_zero")
     self._send(mode=2, case=case["name"])
     self._poll_for(self.timings.tx_period_s)
@@ -358,29 +384,50 @@ class IBoosterSession1BenchRunner:
     skip_sent_at = self.clock.monotonic()
     self.counter = skipped_counter
     self._send(mode=2, case=case["name"], counter_skip=True)
-    first_healthy = self._observe_until_healthy_554_after(skip_sent_at, self.timings.post_skip_observe_s)
+    try:
+      first_healthy = self._observe_until_healthy_554_after(
+        skip_sent_at,
+        self.timings.post_skip_observe_s,
+        expected_fault_case=case,
+      )
+    except BenchObservedFault as fault:
+      self._run_fault_observation(case, fault)
+      return True
     case["recovery_time_s"] = None if first_healthy is None else first_healthy - skip_sent_at
     self._finish_case(case)
+    return False
 
-  def _run_gap_sweep_case(self) -> None:
+  def _run_gap_sweep_case(self) -> bool:
     case = self._start_case("tx_gap_sweep_mode_2_zero")
     for gap_s in self.timings.gap_sweep_s:
       self._send(mode=2, case=case["name"])
       self._poll_for(self.timings.tx_period_s)
       start_idx = len(self.artifact["rx_events"])
       gap_started = self.clock.monotonic()
-      self._poll_for(gap_s)
-      gap_ended = self.clock.monotonic()
-      self._send(mode=2, case=case["name"])
-      self._poll_for(self.timings.post_gap_observe_s)
-      rx_window = self.artifact["rx_events"][start_idx:]
-      self.artifact["gap_results"].append({
-        "duration_s": gap_s,
-        "start_s": gap_started,
-        "end_s": gap_ended,
-        "status_554": [rx for rx in rx_window if rx["address"] == IBOOSTER_STATUS_ADDR],
-      })
+      gap_ended: float | None = None
+      try:
+        self._poll_for(gap_s, expected_fault_case=case)
+        gap_ended = self.clock.monotonic()
+        self._send(mode=2, case=case["name"])
+        self._poll_for(self.timings.post_gap_observe_s, expected_fault_case=case)
+      except BenchObservedFault as fault:
+        self._record_gap_result(gap_s, gap_started, gap_ended or self.clock.monotonic(), start_idx, "fault_observed")
+        self._run_fault_observation(case, fault)
+        return True
+      self._record_gap_result(gap_s, gap_started, gap_ended, start_idx, "passed")
     self._finish_case(case)
+    return False
+
+  def _record_gap_result(self, duration_s: float, start_s: float, end_s: float, start_idx: int, result: str) -> None:
+    rx_window = self.artifact["rx_events"][start_idx:]
+    self.artifact["gap_results"].append({
+      "duration_s": duration_s,
+      "start_s": start_s,
+      "end_s": end_s,
+      "result": result,
+      "status_554": [rx for rx in rx_window if rx["address"] == IBOOSTER_STATUS_ADDR],
+      "readiness_39d": [rx for rx in rx_window if rx["address"] == IBOOSTER_READY_ADDR],
+    })
 
   def _hold_mode(self, case: str, *, mode: int, duration_s: float) -> None:
     end_time = self.clock.monotonic() + duration_s
@@ -392,18 +439,30 @@ class IBoosterSession1BenchRunner:
       self._poll_rx()
       self.clock.sleep(self.timings.rx_poll_s)
 
-  def _poll_for(self, duration_s: float) -> None:
+  def _poll_for(
+    self,
+    duration_s: float,
+    *,
+    expected_fault_case: dict | None = None,
+    observe_faults: bool = False,
+  ) -> None:
     end_time = self.clock.monotonic() + duration_s
     while self.clock.monotonic() < end_time:
-      self._poll_rx()
+      self._poll_rx(expected_fault_case=expected_fault_case, observe_faults=observe_faults)
       self.clock.sleep(self.timings.rx_poll_s)
 
-  def _observe_until_healthy_554_after(self, after_s: float, duration_s: float) -> float | None:
+  def _observe_until_healthy_554_after(
+    self,
+    after_s: float,
+    duration_s: float,
+    *,
+    expected_fault_case: dict | None = None,
+  ) -> float | None:
     deadline = self.clock.monotonic() + duration_s
     first_healthy: float | None = None
     while self.clock.monotonic() < deadline:
       before = len(self.artifact["rx_events"])
-      self._poll_rx()
+      self._poll_rx(expected_fault_case=expected_fault_case)
       for event in self.artifact["rx_events"][before:]:
         if event["address"] == IBOOSTER_STATUS_ADDR and event["time_s"] >= after_s and event["decoded"]["status"] == 0:
           if first_healthy is None:
@@ -411,38 +470,122 @@ class IBoosterSession1BenchRunner:
       self.clock.sleep(self.timings.rx_poll_s)
     return first_healthy
 
-  def _poll_rx(self, *, check_timeout: bool = True) -> None:
+  def _run_fault_observation(self, case: dict, fault: BenchObservedFault) -> None:
+    self._print(f"FAULT OBSERVED: {fault.reason}")
+    observed_idx = fault.payload.get("rx_event_index")
+    start_idx = observed_idx if isinstance(observed_idx, int) else len(self.artifact["rx_events"])
+    window_started = self.clock.monotonic()
+    deadline = window_started + self.timings.fault_observation_s
+    next_tx = window_started
+
+    while self.clock.monotonic() < deadline:
+      if self.clock.monotonic() >= next_tx:
+        self._send(mode=0, case="fault_observation_mode_0_zero")
+        next_tx += self.timings.tx_period_s
+      self._poll_rx(observe_faults=True)
+      self.clock.sleep(self.timings.rx_poll_s)
+
+    observed_events = self.artifact["rx_events"][start_idx:]
+    status_events = [rx for rx in observed_events if rx["address"] == IBOOSTER_STATUS_ADDR]
+    readiness_events = [rx for rx in observed_events if rx["address"] == IBOOSTER_READY_ADDR]
+    last_status = status_events[-1]["decoded"]["status"] if status_events else None
+    last_readiness = readiness_events[-1]["decoded"]["readiness"] if readiness_events else self.readiness_baseline
+    cleared_by_mode_0 = last_status == 0 and last_readiness == self.readiness_baseline
+
+    case["end_s"] = self.clock.monotonic()
+    case["result"] = "fault_observed"
+    case["fault"] = fault.payload
+    case["cleared_by_mode_0"] = cleared_by_mode_0
+    case["fault_observation"] = {
+      "start_s": window_started,
+      "end_s": self.clock.monotonic(),
+      "duration_s": self.timings.fault_observation_s,
+      "tx_mode": 0,
+      "status_554": status_events,
+      "readiness_39d": readiness_events,
+    }
+    self._print(f"FAULT OBSERVED: cleared_by_mode_0={str(cleared_by_mode_0).lower()}")
+
+  def _poll_rx(
+    self,
+    *,
+    check_timeout: bool = True,
+    expected_fault_case: dict | None = None,
+    observe_faults: bool = False,
+  ) -> None:
     for frame in self.transport.recv():
-      self._record_frame(frame)
+      self._record_frame(frame, expected_fault_case=expected_fault_case, observe_faults=observe_faults)
     if check_timeout:
       self._check_rx_freshness()
 
-  def _record_frame(self, frame: CanFrame) -> None:
+  def _record_frame(
+    self,
+    frame: CanFrame,
+    *,
+    expected_fault_case: dict | None = None,
+    observe_faults: bool = False,
+  ) -> None:
     if (frame.address, frame.bus, len(frame.data)) == (IBOOSTER_STATUS_ADDR, IBOOSTER_BUS, IBOOSTER_STATUS_LEN):
       decoded_554 = decode_554(frame.data)
       event = self._rx_event(frame, decoded_554)
       self.artifact["rx_events"].append(event)
+      event_index = len(self.artifact["rx_events"]) - 1
       self.last_554_time = self.clock.monotonic()
       if self.artifact["health"]["initial_554"] is None:
         self.artifact["health"]["initial_554"] = decoded_554
-      if decoded_554["status"] != 0:
-        self._abort("0x554 Status != NO_FAULT", frame=event)
       if not decoded_554["brake_ok"]:
-        self._abort("0x554 BrakeOK == 0", frame=event)
+        self._abort("0x554 BrakeOK == 0", frame=event, rx_event_index=event_index)
       if decoded_554["driver_brake"]:
-        self._abort("0x554 DriverBrakeApplied == 1", frame=event)
+        self._abort("0x554 DriverBrakeApplied == 1", frame=event, rx_event_index=event_index)
+      if decoded_554["status"] != 0:
+        self._fault_or_abort(
+          "0x554 Status != NO_FAULT",
+          expected_fault_case=expected_fault_case,
+          observe_faults=observe_faults,
+          frame=event,
+          rx_event_index=event_index,
+        )
       return
 
     if (frame.address, frame.bus, len(frame.data)) == (IBOOSTER_READY_ADDR, IBOOSTER_BUS, IBOOSTER_READY_LEN):
       decoded_39d = decode_39d(frame.data)
       event = self._rx_event(frame, decoded_39d)
       self.artifact["rx_events"].append(event)
+      event_index = len(self.artifact["rx_events"]) - 1
       self.last_39d_time = self.clock.monotonic()
       if self.readiness_baseline is None:
         self.readiness_baseline = decoded_39d["readiness"]
         self.artifact["health"]["initial_39d"] = decoded_39d
       elif decoded_39d["readiness"] != self.readiness_baseline:
-        self._abort("0x39D readiness changed", frame=event)
+        self._fault_or_abort(
+          "0x39D readiness changed",
+          expected_fault_case=expected_fault_case,
+          observe_faults=observe_faults,
+          frame=event,
+          rx_event_index=event_index,
+        )
+
+  def _fault_or_abort(
+    self,
+    reason: str,
+    *,
+    expected_fault_case: dict | None,
+    observe_faults: bool,
+    **payload: object,
+  ) -> None:
+    if observe_faults:
+      return
+    if expected_fault_case is not None:
+      raise BenchObservedFault(
+        reason,
+        {
+          "reason": reason,
+          "time_s": self.clock.monotonic(),
+          "case": expected_fault_case["name"],
+          **payload,
+        },
+      )
+    self._abort(reason, **payload)
 
   def _rx_event(self, frame: CanFrame, decoded: dict) -> dict:
     return {
