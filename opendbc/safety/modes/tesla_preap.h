@@ -79,6 +79,7 @@ void can_set_checksum(CANPacket_t *packet);
 #define PREAP_FLAG_RADAR_EMULATION      2U
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
 #define PREAP_FLAG_ENABLE_IBOOSTER      8U
+#define PREAP_FLAG_IBOOSTER_BENCH       16U
 
 // ============================================
 // State variables
@@ -86,6 +87,7 @@ void can_set_checksum(CANPacket_t *packet);
 
 static bool preap_enable_pedal = false;
 static bool preap_enable_ibooster = false;
+static bool preap_ibooster_bench = false;
 static bool preap_radar_emulation = false;
 static bool preap_radar_behind_nosecone = false;
 
@@ -560,7 +562,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
 
   // iBooster (0x553): locked initial gate allows only 0 mm requests.
   if (msg->addr == 0x553U) {
-    if (!preap_enable_ibooster) {
+    if (!preap_enable_ibooster && !preap_ibooster_bench) {
       violation = true;
     } else {
       int mode = (msg->data[1] >> 4) & 0x03U;
@@ -574,7 +576,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       if (!crc_valid) {
         violation = true;
       }
-      if ((preap_ibooster_tx_counter >= 0) && (counter != ((preap_ibooster_tx_counter + 1) & 0x0F))) {
+      if (!preap_ibooster_bench && (preap_ibooster_tx_counter >= 0) && (counter != ((preap_ibooster_tx_counter + 1) & 0x0F))) {
         violation = true;
       }
 
@@ -587,10 +589,10 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       if (position_raw != 320) {
         violation = true;
       }
-      if (!get_longitudinal_allowed() && (mode != 0)) {
+      if (!preap_ibooster_bench && !get_longitudinal_allowed() && (mode != 0)) {
         violation = true;
       }
-      if (crc_valid) {
+      if (crc_valid && !preap_ibooster_bench) {
         preap_ibooster_tx_counter = counter;
       }
     }
@@ -620,6 +622,7 @@ static bool tesla_preap_fwd_hook(int bus_num, int addr) {
 
 static safety_config tesla_preap_init(uint16_t param) {
   preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
+  preap_ibooster_bench = GET_FLAG(param, PREAP_FLAG_IBOOSTER_BENCH);
   preap_enable_ibooster = GET_FLAG(param, PREAP_FLAG_ENABLE_IBOOSTER);
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
   preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
@@ -643,6 +646,10 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
     {0x553, 0, 6, .check_relay = false, .disable_static_blocking = true},  // iBooster
     {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
+  };
+
+  static const CanMsg PREAP_IBOOSTER_BENCH_TX_MSGS[] = {
+    {0x553, 0, 6, .check_relay = false, .disable_static_blocking = true},
   };
 
   // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
@@ -677,6 +684,9 @@ static safety_config tesla_preap_init(uint16_t param) {
              {0x552, 2, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR
   };
 
+  if (preap_ibooster_bench) {
+    return BUILD_SAFETY_CFG(preap_rx_checks, PREAP_IBOOSTER_BENCH_TX_MSGS);
+  }
   return preap_enable_pedal ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS)
                             : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
 }
