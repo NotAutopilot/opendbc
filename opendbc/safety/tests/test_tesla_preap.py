@@ -15,6 +15,7 @@ PREAP_FLAG_ENABLE_PEDAL = 1
 PREAP_FLAG_RADAR_EMULATION = 2
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
 PREAP_FLAG_ENABLE_IBOOSTER = 8
+PREAP_FLAG_IBOOSTER_BENCH = 16
 
 # Stalk lever positions from tesla_preap.h
 STALK_FWD_CANCEL = 1
@@ -472,6 +473,11 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
                                  PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_ENABLE_IBOOSTER)
     self.safety.init_tests()
 
+  def _setup_ibooster_bench_safety_hooks(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap,
+                                 PREAP_FLAG_IBOOSTER_BENCH)
+    self.safety.init_tests()
+
   @staticmethod
   def _ibooster_position_raw(position_mm):
     clamped_position = min(max(position_mm, -5), 15)
@@ -571,6 +577,51 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=0)))
     self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=0.015625, counter=1)))
     self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=2)))
+
+  def test_ibooster_shipped_gate_blocks_mode_2_zero_without_controls_allowed(self):
+    self._setup_ibooster_safety_hooks()
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=0)))
+
+  def test_ibooster_shipped_gate_still_checks_counter_without_bench_flag(self):
+    self._setup_ibooster_safety_hooks()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self.assertTrue(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=0)))
+    self.assertFalse(self._tx(self._ibooster_msg(mode=0, position_mm=0, counter=2)))
+
+  def test_ibooster_bench_allows_mode_2_zero_without_controls_allowed(self):
+    self._setup_ibooster_bench_safety_hooks()
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=0)))
+
+  def test_ibooster_bench_allows_deliberate_counter_skip_at_zero_position(self):
+    self._setup_ibooster_bench_safety_hooks()
+
+    self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=0)))
+    self.assertTrue(self._tx(self._ibooster_msg(mode=2, position_mm=0, counter=2)))
+
+  def test_ibooster_bench_blocks_nonzero_position(self):
+    self._setup_ibooster_bench_safety_hooks()
+
+    self.assertFalse(self._tx(self._ibooster_msg(mode=2, position_mm=0.015625, counter=0)))
+
+  def test_ibooster_bench_blocks_non_553_tx(self):
+    self._setup_ibooster_bench_safety_hooks()
+    self.safety.set_controls_allowed(True)
+
+    blocked_messages = [
+      self._angle_cmd_msg(0, 0),
+      self.packer.make_can_msg_safety("EPB_epasControl", 0, {"EPB_epasEACAllow": 0}),
+      self.packer.make_can_msg_safety("DAS_control", 0, {"DAS_aebEvent": 0}),
+      self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 0}),
+      self._pcm_status_msg(False),
+    ]
+    for msg in blocked_messages:
+      self.assertFalse(self._tx(msg))
 
   def test_pedal_allowed_with_flag(self):
     self._rx(self._pcm_status_msg(True))
