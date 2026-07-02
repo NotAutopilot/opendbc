@@ -89,6 +89,46 @@ class CounterSkipFaultFakeECU(ReplayFixtureFakeECU):
     return faulted_frames
 
 
+class GapSilenceFaultFakeECU(ReplayFixtureFakeECU):
+  def __init__(self, *, resume_after_mode_0: bool, **kwargs):
+    super().__init__(**kwargs)
+    self.resume_after_mode_0 = resume_after_mode_0
+    self.previous_counter: int | None = None
+    self.seen_counter_skip = False
+    self.gap_probe_started = False
+    self.recv_count_after_gap_probe = 0
+    self.silent = False
+    self.mode_0_frames_after_silence = 0
+
+  def send(self, address: int, bus: int, data: bytes) -> None:
+    decoded = decode_553(data)
+    counter = decoded["counter"]
+    if self.previous_counter is not None and ((counter - self.previous_counter) & 0x0F) == 2:
+      self.seen_counter_skip = True
+    elif self.seen_counter_skip and not self.gap_probe_started and decoded["mode"] == 2:
+      self.gap_probe_started = True
+      self.recv_count_after_gap_probe = 0
+
+    if self.silent and decoded["mode"] == 0:
+      self.mode_0_frames_after_silence += 1
+      if self.resume_after_mode_0:
+        self.silent = False
+
+    self.previous_counter = counter
+    super().send(address, bus, data)
+
+  def recv(self) -> list[CanFrame]:
+    if self.gap_probe_started and self.mode_0_frames_after_silence == 0:
+      self.recv_count_after_gap_probe += 1
+      if self.recv_count_after_gap_probe > 2:
+        self.silent = True
+
+    if self.silent:
+      return []
+
+    return super().recv()
+
+
 def _run(tmp_path: Path, fake: ReplayFixtureFakeECU | None = None) -> dict:
   runner = IBoosterSession1BenchRunner(
     car="ray",
@@ -235,6 +275,39 @@ def test_counter_skip_fault_observation_records_mode_0_clear(tmp_path):
   assert observation_txs
   assert all(tx["decoded"]["mode"] == 0 for tx in observation_txs)
   assert all(tx["decoded"]["position_raw"] == BENCH_POSITION_RAW_ZERO for tx in observation_txs)
+
+
+def test_gap_rx_loss_observation_records_mode_0_clear_after_rx_resumes(tmp_path):
+  fake = _fixture_fake(fake_cls=GapSilenceFaultFakeECU, resume_after_mode_0=True)
+  artifact = _run(tmp_path, fake=fake)
+
+  assert artifact["abort"] is None
+  gap_case = artifact["cases"][-1]
+  assert gap_case["name"] == "tx_gap_sweep_mode_2_zero"
+  assert gap_case["result"] == "fault_observed"
+  assert gap_case["fault"]["reason"] == "RX loss"
+  assert gap_case["fault_observation"]["rx_resumed"] is True
+  assert gap_case["cleared_by_mode_0"] is True
+  assert gap_case["fault_observation"]["status_554"][-1]["decoded"]["status"] == 0
+  assert gap_case["fault_observation"]["readiness_39d"][-1]["decoded"]["readiness"] == artifact["health"]["initial_39d"]["readiness"]
+  assert artifact["gap_results"][-1]["result"] == "fault_observed"
+
+
+def test_gap_rx_loss_observation_completes_when_rx_stays_silent(tmp_path):
+  fake = _fixture_fake(fake_cls=GapSilenceFaultFakeECU, resume_after_mode_0=False)
+  artifact = _run(tmp_path, fake=fake)
+
+  assert artifact["abort"] is None
+  gap_case = artifact["cases"][-1]
+  assert gap_case["name"] == "tx_gap_sweep_mode_2_zero"
+  assert gap_case["result"] == "fault_observed"
+  assert gap_case["fault"]["reason"] == "RX loss"
+  assert gap_case["fault_observation"]["rx_resumed"] is False
+  assert gap_case["cleared_by_mode_0"] is False
+  assert gap_case["fault_observation"]["status_554"] == []
+  assert gap_case["fault_observation"]["readiness_39d"] == []
+  assert artifact["tx_events"][-1]["case"] == "exit_mode_0_zero"
+  assert decode_553(fake.sent[-1].data)["mode"] == 0
 
 
 def test_abort_sends_mode_0_release_before_transport_close(tmp_path):

@@ -482,25 +482,28 @@ class IBoosterSession1BenchRunner:
       if self.clock.monotonic() >= next_tx:
         self._send(mode=0, case="fault_observation_mode_0_zero")
         next_tx += self.timings.tx_period_s
-      self._poll_rx(observe_faults=True)
+      self._poll_rx(check_timeout=False, observe_faults=True)
       self.clock.sleep(self.timings.rx_poll_s)
 
     observed_events = self.artifact["rx_events"][start_idx:]
     status_events = [rx for rx in observed_events if rx["address"] == IBOOSTER_STATUS_ADDR]
     readiness_events = [rx for rx in observed_events if rx["address"] == IBOOSTER_READY_ADDR]
+    rx_resumed = any(rx["address"] == IBOOSTER_STATUS_ADDR and rx["time_s"] >= window_started for rx in observed_events)
     last_status = status_events[-1]["decoded"]["status"] if status_events else None
-    last_readiness = readiness_events[-1]["decoded"]["readiness"] if readiness_events else self.readiness_baseline
-    cleared_by_mode_0 = last_status == 0 and last_readiness == self.readiness_baseline
+    last_readiness = readiness_events[-1]["decoded"]["readiness"] if readiness_events else None
+    cleared_by_mode_0 = rx_resumed and last_status == 0 and last_readiness == self.readiness_baseline
 
     case["end_s"] = self.clock.monotonic()
     case["result"] = "fault_observed"
     case["fault"] = fault.payload
+    case["rx_resumed"] = rx_resumed
     case["cleared_by_mode_0"] = cleared_by_mode_0
     case["fault_observation"] = {
       "start_s": window_started,
       "end_s": self.clock.monotonic(),
       "duration_s": self.timings.fault_observation_s,
       "tx_mode": 0,
+      "rx_resumed": rx_resumed,
       "status_554": status_events,
       "readiness_39d": readiness_events,
     }
@@ -516,7 +519,7 @@ class IBoosterSession1BenchRunner:
     for frame in self.transport.recv():
       self._record_frame(frame, expected_fault_case=expected_fault_case, observe_faults=observe_faults)
     if check_timeout:
-      self._check_rx_freshness()
+      self._check_rx_freshness(expected_fault_case=expected_fault_case)
 
   def _record_frame(
     self,
@@ -597,12 +600,12 @@ class IBoosterSession1BenchRunner:
       "decoded": decoded,
     }
 
-  def _check_rx_freshness(self) -> None:
+  def _check_rx_freshness(self, *, expected_fault_case: dict | None = None) -> None:
     now = self.clock.monotonic()
     if self.last_554_time is None or now - self.last_554_time > self.timings.rx_timeout_s:
-      self._abort("RX loss", missing="0x554")
+      self._fault_or_abort("RX loss", expected_fault_case=expected_fault_case, observe_faults=False, missing="0x554")
     if self.last_39d_time is None or now - self.last_39d_time > self.timings.rx_timeout_s:
-      self._abort("RX loss", missing="0x39D")
+      self._fault_or_abort("RX loss", expected_fault_case=expected_fault_case, observe_faults=False, missing="0x39D")
 
   def _start_case(self, name: str) -> dict:
     self._print(f"Running: {name}")
