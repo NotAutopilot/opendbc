@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import unittest
-import numpy as np
 
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
 from opendbc.car.tesla.values import CarControllerParams
@@ -394,19 +393,24 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
           break
         angle = next_angle
 
-      self.assertIsNotNone(blocked_at,
-                           f"Speed {speed}: VM limit never blocked — reached {angle:.1f} deg "
-                           f"(Python expected max {expected_max:.1f} deg)")
+      self.assertIsNotNone(
+        blocked_at,
+        f"Speed {speed}: VM limit never blocked — reached {angle:.1f} deg (Python expected max {expected_max:.1f} deg)",
+      )
       # Tight bound: blocked angle must be within ±25% of Python's computation.
       # Absorbs float32/float64 drift but catches order-of-magnitude bugs.
       lower_bound = expected_max * 0.75
       upper_bound = expected_max * 1.25
-      self.assertGreaterEqual(blocked_at, lower_bound,
-                              f"Speed {speed}: blocked at {blocked_at:.1f} deg — "
-                              f"too LOW (expected ~{expected_max:.1f}, bound {lower_bound:.1f})")
-      self.assertLessEqual(blocked_at, upper_bound,
-                           f"Speed {speed}: blocked at {blocked_at:.1f} deg — "
-                           f"too HIGH (expected ~{expected_max:.1f}, bound {upper_bound:.1f})")
+      self.assertGreaterEqual(
+        blocked_at,
+        lower_bound,
+        f"Speed {speed}: blocked at {blocked_at:.1f} deg — too LOW (expected ~{expected_max:.1f}, bound {lower_bound:.1f})",
+      )
+      self.assertLessEqual(
+        blocked_at,
+        upper_bound,
+        f"Speed {speed}: blocked at {blocked_at:.1f} deg — too HIGH (expected ~{expected_max:.1f}, bound {upper_bound:.1f})",
+      )
 
   def _setup_safety_hooks(self):
     """Subclasses call this to set up the correct safety hooks."""
