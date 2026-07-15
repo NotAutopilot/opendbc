@@ -210,6 +210,7 @@ struct CarState {
   teslaCCEngaged @63 :Bool;     # NAP: rising edge of stock Tesla CC engaging (no-pedal mode)
   teslaCCDisengaged @64 :Bool;  # NAP: falling edge of stock Tesla CC
   teslaCCNotArmed @65 :Bool;    # NAP: lateral engaged but DI_cruiseState != STANDBY/ENABLED
+  turnSignalStalkState @66 :UInt8;  # NAP: physical turn-signal lever, 0=idle, 1=left, 2=right
 
   # cruise state
   cruiseState @10 :CruiseState;

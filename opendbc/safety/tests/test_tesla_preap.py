@@ -200,7 +200,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     #      generic openpilot brake handler doesn't also kill lateral
     #
     # This design ensures brake drops pedal (longitudinal) but keeps steering
-    # (lateral). The driver can always override steering via hands-on level >= 3.
+    # (lateral). The driver can always override steering via hands-on level >= 2.
     # See test_preap_engagement.py for Python-layer verification.
     #
     # Panda-layer invariant: brake_pressed is ALWAYS false.
@@ -284,7 +284,9 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def test_steering_disengage_hands_on(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
-    self._rx(self._angle_meas_msg(0, hands_on_level=3))
+    self._rx(self._angle_meas_msg(0, hands_on_level=1))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_cruise_engaged_prev())
 
@@ -322,7 +324,7 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def test_stalk_rearm_after_steering_disengage(self):
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
-    self._rx(self._angle_meas_msg(0, hands_on_level=3))
+    self._rx(self._angle_meas_msg(0, hands_on_level=2))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_cruise_engaged_prev())
     self._rx(self._angle_meas_msg(0, hands_on_level=0))

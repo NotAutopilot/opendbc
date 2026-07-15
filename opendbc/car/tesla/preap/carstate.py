@@ -17,6 +17,7 @@ except ImportError:
 
 # Pre-AP door signal names from GTW_carState
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
+HANDS_ON_DISENGAGE_LEVEL = 2
 
 
 def _current_time_millis():
@@ -64,7 +65,7 @@ def update_preap(cs, can_parsers):
     "EAC_ERROR_HIGH_ANGLE_REQ", "EAC_ERROR_HIGH_ANGLE_RATE_REQ",
     "EAC_ERROR_HIGH_ANGLE_SAFETY", "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY",
   )
-  ret.steeringDisengage = cs.hands_on_level >= 3 or epas_rejecting
+  ret.steeringDisengage = cs.hands_on_level >= HANDS_ON_DISENGAGE_LEVEL or epas_rejecting
   cs.engagement.handle_steering_disengage(ret.steeringDisengage)
 
   # Cruise state
@@ -77,13 +78,16 @@ def update_preap(cs, can_parsers):
   if speed_units is not None:
     cs.speed_units = speed_units
 
+  digital_speed = cp_chassis.vl["DI_state"]["DI_digitalSpeed"]
+  if speed_units == "KPH":
+    ret.vEgoCluster = digital_speed * CV.KPH_TO_MS
+  elif speed_units == "MPH":
+    ret.vEgoCluster = digital_speed * CV.MPH_TO_MS
+
   if cs.enableLongControl and nap_conf.use_pedal:
     ret.cruiseState.speed = cs.pedal_speed_kph * CV.KPH_TO_MS
-  else:
-    if speed_units == "KPH":
-      ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
-    elif speed_units == "MPH":
-      ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
+  elif speed_units is not None:
+    ret.cruiseState.speed = max(ret.vEgoCluster, 1e-3)
 
   ret.cruiseState.standstill = False
   ret.standstill = cruise_state == "STANDSTILL"
@@ -134,6 +138,11 @@ def update_preap(cs, can_parsers):
   # Suppress brakePressed so generic brake-disengage path doesn't kill lateral
   ret.brakePressed = False
   ret.buttonEvents = button_events
+
+  # The lamp stays latched while openpilot drives it. Publish the physical
+  # lever level so modeld can reliably detect new taps from conflated carState.
+  turn_lever = int(cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"])
+  ret.turnSignalStalkState = 0 if turn_lever == 3 else turn_lever
 
   can_engage = cs.engagement.check_can_engage(ret.doorOpen, ret.gearShifter, ret.seatbeltUnlatched)
   ret.cruiseState.enabled = cs.engagement.cruiseEnabled and can_engage
@@ -186,8 +195,6 @@ def get_preap_can_parsers(CP):
   pedal_bus = 0 if nap_conf.pedal_can_zero else 2
   # math.nan frequency = don't invalidate CAN health if pedal is absent
   pedal_messages = [("GAS_SENSOR", math.nan)]
-
-  ap_messages = [("ESP_B", 0)]
 
   return {
     Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),

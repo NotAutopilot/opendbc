@@ -39,7 +39,7 @@
 // ALL ACTUAL SAFETY CHECKS REMAIN FULLY ACTIVE:
 //   - Steering angle + rate limits via steer_angle_cmd_checks_vm()
 //   - controls_allowed gating on all TX
-//   - Disengage on hands-on override (level >= 3)
+//   - Disengage on hands-on override (level >= 2)
 //   - Disengage on EPAS error codes 6-9
 //   - Disengage on door open, gear out of Drive
 //   - Disengage on stalk cancel (with 600ms echo filter)
@@ -78,6 +78,7 @@ void can_set_checksum(CANPacket_t *packet);
 #define PREAP_FLAG_ENABLE_PEDAL         1U
 #define PREAP_FLAG_RADAR_EMULATION      2U
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
+#define PREAP_HANDS_ON_DISENGAGE_LEVEL  2
 
 // ============================================
 // State variables
@@ -371,7 +372,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     // Error codes 6/7/8 = EPAS request validators rejected angle/rate, 9 = safety layer.
     // All indicate the EPAS stopped steering — driver must be notified immediately.
     bool epas_rejecting = (eac_status == 0) && (eac_error_code >= 6) && (eac_error_code <= 9);
-    steering_disengage = (hands_on_level >= 3) || epas_rejecting;
+    steering_disengage = (hands_on_level >= PREAP_HANDS_ON_DISENGAGE_LEVEL) || epas_rejecting;
 
     // Re-arm fix: force cruise_engaged_prev reset on steering disengage
     // so next stalk pull creates a clean rising edge
