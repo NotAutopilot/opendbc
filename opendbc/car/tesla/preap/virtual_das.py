@@ -8,7 +8,6 @@ import json
 import math
 import os
 
-import numpy as np
 from numpy import clip, interp
 
 from opendbc.car.common.filter_simple import FirstOrderFilter, HighPassFilter
@@ -17,6 +16,9 @@ from opendbc.car.tesla.preap.constants import (
   VDAS_INNER_K_BP, VDAS_INNER_KP_V, VDAS_INNER_KI_V,
   VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
   VDAS_AEGO_FILTER_RC,
+  VDAS_ACCEL_JERK_MAX, VDAS_DECEL_JERK_MAX,
+  VDAS_ZERO_TORQUE_TRANSITION_WIDTH,
+  VDAS_EGO_JERK_MAX,
 )
 from opendbc.car.tesla.preap.ff_table_default import (
   SPEED_BP as FF_SPEED_BP,
@@ -25,7 +27,7 @@ from opendbc.car.tesla.preap.ff_table_default import (
 )
 from opendbc.car.tesla.preap.nap_conf import (
   nap_conf,
-  PEDAL_DI_MIN, PEDAL_DI_ZERO,
+  PEDAL_DI_MIN,
   PEDAL_BP, PEDAL_MAX_VALUES,
   ACCEL_MAX, REGEN_MAX,
 )
@@ -102,18 +104,26 @@ class GradeEstimator:
 class JerkLimiter:
   """S-curve rate limiter on acceleration commands.
 
-  Bounds the rate of change of acceleration (jerk) to j_max,
-  preventing discontinuous inputs from reaching the pedal controller.
+  Uses a comfort-oriented positive jerk bound while retaining a stronger
+  negative bound for braking response.
   """
 
-  def __init__(self, j_max: float = 2.5, dt: float = 0.02):
-    self.j_max = j_max
+  def __init__(self, j_max: float | None = None, dt: float = 0.02,
+               j_accel_max: float = VDAS_ACCEL_JERK_MAX,
+               j_decel_max: float = VDAS_DECEL_JERK_MAX):
+    if j_max is not None:
+      j_accel_max = j_max
+      j_decel_max = j_max
+    self.j_accel_max = j_accel_max
+    self.j_decel_max = j_decel_max
     self.dt = dt
     self.a_limited = 0.0
 
   def update(self, a_cmd: float) -> float:
-    da_max = self.j_max * self.dt
-    self.a_limited += float(clip(a_cmd - self.a_limited, -da_max, da_max))
+    da = a_cmd - self.a_limited
+    da_min = -self.j_decel_max * self.dt
+    da_max = self.j_accel_max * self.dt
+    self.a_limited += float(clip(da, da_min, da_max))
     return self.a_limited
 
   def reset(self, a_init: float = 0.0):
@@ -123,9 +133,9 @@ class JerkLimiter:
 class FeedforwardModel:
   """2D lookup table mapping (speed, accel) → pedal_di.
 
-  Loads from a JSON file if available (produced by generate_ff_table.py),
-  otherwise falls back to the default table computed from the legacy
-  3-breakpoint interpolation. Zero-torque offset is applied at runtime.
+  Loads from a JSON file if available, otherwise falls back to the default
+  table computed from the legacy 3-breakpoint interpolation. Zero-torque
+  offset is applied at runtime.
   """
 
   def __init__(self, table_path: str = FF_TABLE_PATH):
@@ -140,12 +150,90 @@ class FeedforwardModel:
     try:
       with open(path) as f:
         data = json.load(f)
-      self.speed_bp = data['speed_bp']
-      self.accel_bp = data['accel_bp']
-      self.table = data['table']
-    except (json.JSONDecodeError, KeyError, TypeError):
+      speed_bp, accel_bp, table = self._parse_override(data)
+      self.speed_bp = speed_bp
+      self.accel_bp = accel_bp
+      self.table = table
+    except (json.JSONDecodeError, KeyError, OSError, OverflowError, TypeError, ValueError):
       from opendbc.car.carlog import carlog
       carlog.warning("vdas: failed to load FF table from %s, using defaults", path)
+
+  @staticmethod
+  def _parse_override(data: dict) -> tuple[list[float], list[float], list[list[float]]]:
+    speed_bp = [float(value) for value in data['speed_bp']]
+    accel_bp = [float(value) for value in data['accel_bp']]
+    table = [[float(value) for value in row] for row in data['table']]
+
+    breakpoints_are_finite = all(math.isfinite(value) for value in speed_bp + accel_bp)
+    speed_is_ordered = len(speed_bp) >= 2 and all(
+      right > left for left, right in zip(speed_bp, speed_bp[1:], strict=False)
+    )
+    accel_is_ordered = len(accel_bp) >= 2 and all(
+      right > left for left, right in zip(accel_bp, accel_bp[1:], strict=False)
+    )
+    speed_covers_control_range = (
+      speed_is_ordered and speed_bp[0] <= PEDAL_BP[0] and speed_bp[-1] >= PEDAL_BP[-1]
+    )
+    accel_covers_control_range = (
+      accel_is_ordered and accel_bp[0] <= REGEN_MAX and accel_bp[-1] >= ACCEL_MAX
+    )
+    table_shape_matches = len(table) == len(speed_bp) and all(len(row) == len(accel_bp) for row in table)
+    rows_are_finite = all(math.isfinite(value) for row in table for value in row)
+    rows_are_monotonic = all(all(
+      right >= left for left, right in zip(row, row[1:], strict=False)
+    ) for row in table)
+    values_are_physical = all(
+      PEDAL_DI_MIN <= value <= max(PEDAL_MAX_VALUES)
+      for row in table for value in row
+    )
+    zero_transition_is_safe = (
+      table_shape_matches and rows_are_finite and rows_are_monotonic
+      and all(FeedforwardModel._zero_transition_is_safe(accel_bp, row) for row in table)
+    )
+
+    if not all((breakpoints_are_finite, speed_is_ordered, accel_is_ordered,
+                speed_covers_control_range, accel_covers_control_range,
+                table_shape_matches, rows_are_finite, rows_are_monotonic,
+                values_are_physical, zero_transition_is_safe)):
+      raise ValueError("invalid VDAS feedforward table")
+
+    return speed_bp, accel_bp, table
+
+  @staticmethod
+  def _zero_transition_is_safe(accel_bp: list[float], row: list[float]) -> bool:
+    transition_width = VDAS_ZERO_TORQUE_TRANSITION_WIDTH
+    slope_sample = transition_width * 1e-3
+    di_low = float(interp(-transition_width, accel_bp, row))
+    di_zero = float(interp(0.0, accel_bp, row))
+    di_high = float(interp(transition_width, accel_bp, row))
+    slope_low = (
+      di_low - float(interp(-transition_width - slope_sample, accel_bp, row))
+    ) / slope_sample
+    slope_high = (
+      float(interp(transition_width + slope_sample, accel_bp, row)) - di_high
+    ) / slope_sample
+    secant_low = (di_zero - di_low) / transition_width
+    secant_high = (di_high - di_zero) / transition_width
+    if secant_low > 0.0 and secant_high > 0.0:
+      slope_zero = 2.0 * secant_low * secant_high / (secant_low + secant_high)
+    else:
+      slope_zero = 0.0
+
+    return (
+      FeedforwardModel._hermite_slopes_are_monotonic(secant_low, slope_low, slope_zero)
+      and FeedforwardModel._hermite_slopes_are_monotonic(secant_high, slope_zero, slope_high)
+    )
+
+  @staticmethod
+  def _hermite_slopes_are_monotonic(secant: float, slope_low: float, slope_high: float) -> bool:
+    if secant == 0.0:
+      return slope_low == 0.0 and slope_high == 0.0
+    if secant < 0.0 or slope_low < 0.0 or slope_high < 0.0:
+      return False
+
+    normalized_low = slope_low / secant
+    normalized_high = slope_high / secant
+    return normalized_low * normalized_low + normalized_high * normalized_high <= 9.0
 
   def get(self, a_cmd: float, v_ego: float, zero_torque_di: float) -> float:
     """Look up pedal_di for a given (speed, accel) pair.
@@ -154,6 +242,56 @@ class FeedforwardModel:
     zero-torque offset shifts the result: fully applied for positive
     accel (gas side), linearly blended to zero at max regen.
     """
+    transition_width = VDAS_ZERO_TORQUE_TRANSITION_WIDTH
+    if abs(a_cmd) >= transition_width:
+      return self._get_raw(a_cmd, v_ego, zero_torque_di)
+
+    accel_low = -transition_width
+    accel_high = transition_width
+    di_low = self._get_raw(accel_low, v_ego, zero_torque_di)
+    di_zero = self._get_raw(0.0, v_ego, zero_torque_di)
+    di_high = self._get_raw(accel_high, v_ego, zero_torque_di)
+
+    slope_sample = transition_width * 1e-3
+    slope_low = (
+      di_low - self._get_raw(accel_low - slope_sample, v_ego, zero_torque_di)
+    ) / slope_sample
+    slope_high = (
+      self._get_raw(accel_high + slope_sample, v_ego, zero_torque_di) - di_high
+    ) / slope_sample
+
+    secant_low = (di_zero - di_low) / transition_width
+    secant_high = (di_high - di_zero) / transition_width
+    if secant_low > 0.0 and secant_high > 0.0:
+      slope_zero = 2.0 * secant_low * secant_high / (secant_low + secant_high)
+    else:
+      slope_zero = 0.0
+
+    if a_cmd < 0.0:
+      return self._hermite(a_cmd, accel_low, 0.0, di_low, di_zero, slope_low, slope_zero)
+    return self._hermite(a_cmd, 0.0, accel_high, di_zero, di_high, slope_zero, slope_high)
+
+  @staticmethod
+  def _hermite(x: float, x_low: float, x_high: float,
+               y_low: float, y_high: float,
+               slope_low: float, slope_high: float) -> float:
+    span = x_high - x_low
+    position = (x - x_low) / span
+    position_sq = position * position
+    position_cu = position_sq * position
+    basis_low = 2.0 * position_cu - 3.0 * position_sq + 1.0
+    basis_low_slope = position_cu - 2.0 * position_sq + position
+    basis_high = -2.0 * position_cu + 3.0 * position_sq
+    basis_high_slope = position_cu - position_sq
+
+    return (
+      basis_low * y_low
+      + basis_low_slope * span * slope_low
+      + basis_high * y_high
+      + basis_high_slope * span * slope_high
+    )
+
+  def _get_raw(self, a_cmd: float, v_ego: float, zero_torque_di: float) -> float:
     # Bilinear interpolation: speed (outer), accel (inner)
     si = float(interp(v_ego, self.speed_bp, range(len(self.speed_bp))))
     si_lo = int(si)
@@ -184,7 +322,7 @@ class VirtualDAS:
 
   def __init__(self, dt: float = 0.02):
     self.dt = dt
-    self.jerk_limiter = JerkLimiter(j_max=2.5, dt=dt)
+    self.jerk_limiter = JerkLimiter(dt=dt)
     self.ff_model = FeedforwardModel()
     self.grade_estimator = GradeEstimator(dt=dt)
     self.prev_pedal_di = 0.0
@@ -221,14 +359,17 @@ class VirtualDAS:
     grade_accel, pitch_compensation = self.grade_estimator.update(
       orientation_ned if orientation_ned is not None else [])
 
-    ff_di = self._feedforward(a_limited, v_ego)
-    ff_di += pitch_compensation
+    ff_accel = a_limited + pitch_compensation
+    ff_di = self._feedforward(ff_accel, v_ego)
 
     # Subtract grade from a_ego so the PID doesn't fight gravity
     a_ego_corrected = a_ego - grade_accel
 
     a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
-    j_ego = (a_ego_filtered - self.prev_a_ego_filtered) / self.dt
+    j_ego = float(clip(
+      (a_ego_filtered - self.prev_a_ego_filtered) / self.dt,
+      -VDAS_EGO_JERK_MAX, VDAS_EGO_JERK_MAX,
+    ))
     self.prev_a_ego_filtered = a_ego_filtered
 
     future_t = float(interp(v_ego, VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V))
@@ -257,8 +398,8 @@ class VirtualDAS:
     self.jerk_limiter.reset(a_init)
     self.inner_pid.reset()
     self.grade_estimator.reset()
-    self.a_ego_filter.x = 0.0
-    self.prev_a_ego_filtered = 0.0
+    self.a_ego_filter.x = a_init
+    self.prev_a_ego_filtered = a_init
     self.prev_pedal_di = pedal_di_init
 
   def _feedforward(self, a_cmd: float, v_ego: float) -> float:

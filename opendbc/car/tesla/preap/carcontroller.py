@@ -65,7 +65,7 @@ class PreAPLongController:
       self.preap_long_engage_frame = frame
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
-      self.vdas.reset(a_init=0.0, pedal_di_init=self.prev_pedal_di)
+      self.vdas.reset(a_init=CS.out.aEgo, pedal_di_init=self.prev_pedal_di)
       _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
     engage_elapsed_frames = frame - self.preap_long_engage_frame

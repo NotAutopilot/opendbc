@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from opendbc.can.parser import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.tesla.values import DBC, CANBUS, CAR
@@ -8,6 +10,74 @@ try:
   from opendbc.car.tesla.preap.nap_conf import nap_conf
 except ImportError:
   nap_conf = None
+
+
+BOSCH_POINT_BASE_ADDRESS = 0x310
+BOSCH_POINT_ADDRESS_STRIDE = 3
+BOSCH_TRACK_MAX_MISSED_CYCLES = 2
+BOSCH_TRACK_MAX_DISTANCE_DELTA_M = 10.0
+BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
+
+
+@dataclass(frozen=True)
+class BoschTrackObservation:
+  d_rel: float
+  y_rel: float
+  v_rel: float
+  a_rel: float
+  yv_rel: float
+  measured: bool
+
+
+@dataclass
+class BoschTrack:
+  point: structs.RadarData.RadarPoint
+  missed_cycles: int = 0
+
+
+class BoschTrackLifecycle:
+  def __init__(self):
+    self._slots: dict[int, BoschTrack] = {}
+    self._next_track_id = 0
+
+  @property
+  def points(self):
+    return [self._slots[slot].point for slot in sorted(self._slots)]
+
+  def update(self, slot: int, observation: BoschTrackObservation | None):
+    track = self._slots.get(slot)
+    if observation is None:
+      if track is None:
+        return
+
+      track.missed_cycles += 1
+      if track.missed_cycles > BOSCH_TRACK_MAX_MISSED_CYCLES:
+        del self._slots[slot]
+      else:
+        track.point.measured = False
+      return
+
+    if track is None or self._is_discontinuous(track.point, observation):
+      point = structs.RadarData.RadarPoint()
+      point.trackId = self._next_track_id
+      self._next_track_id += 1
+      track = BoschTrack(point)
+      self._slots[slot] = track
+
+    track.missed_cycles = 0
+    track.point.dRel = observation.d_rel
+    track.point.yRel = observation.y_rel
+    track.point.vRel = observation.v_rel
+    track.point.aRel = observation.a_rel
+    track.point.yvRel = observation.yv_rel
+    track.point.measured = observation.measured
+
+  @staticmethod
+  def _is_discontinuous(point, observation):
+    distance_delta = abs(observation.d_rel - point.dRel)
+    velocity_delta = abs(observation.v_rel - point.vRel)
+    return (distance_delta > BOSCH_TRACK_MAX_DISTANCE_DELTA_M or
+            velocity_delta > BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS)
 
 
 class RadarInterface(RadarInterfaceBase):
@@ -39,7 +109,7 @@ class RadarInterface(RadarInterfaceBase):
         ])
 
     self.radar_off_can = CP.radarUnavailable
-    if not  CP.radarUnavailable:
+    if not CP.radarUnavailable:
       self.rcp = CANParser(DBC[CP.carFingerprint][Bus.radar], messages, CANBUS.radar)
     else:
       self.rcp = None
@@ -47,6 +117,7 @@ class RadarInterface(RadarInterfaceBase):
 
     self.updated_messages = set()
     self.track_id = 0
+    self.bosch_tracks = BoschTrackLifecycle()
     # Keep parity with Tinkla radar lateral alignment behavior.
     # For behind-nosecone installs, users can configure horizontal offset in meters.
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
@@ -84,13 +155,24 @@ class RadarInterface(RadarInterfaceBase):
         ret.errors.radarFault = True
     elif self.bosch_radar:
       radar_status = self.rcp.vl['TeslaRadarSguInfo']
-      if radar_status['RADC_HWFail']:
+      if radar_status['RADC_HWFail'] or radar_status['RADC_SGUFail']:
         ret.errors.radarFault = True
+      if radar_status['RADC_SensorDirty']:
+        ret.errors.radarUnavailableTemporary = True
 
     # Radar tracks
     for i in range(self.num_points):
       msg_a = self.rcp.vl[f'RadarPoint{i}_A']
       msg_b = self.rcp.vl[f'RadarPoint{i}_B']
+
+      if self.bosch_radar:
+        point_a_address = BOSCH_POINT_BASE_ADDRESS + i * BOSCH_POINT_ADDRESS_STRIDE
+        slot_addresses = {point_a_address, point_a_address + 1}
+        observation = None
+        if slot_addresses <= self.updated_messages:
+          observation = self._parse_bosch_track(msg_a, msg_b)
+        self.bosch_tracks.update(i, observation)
+        continue
 
       # Make sure msg A and B are together
       if msg_a['Index'] != msg_b['Index2']:
@@ -98,12 +180,6 @@ class RadarInterface(RadarInterfaceBase):
 
       # Check if it's a valid track
       if not msg_a['Tracked']:
-        if i in self.pts:
-          del self.pts[i]
-        continue
-
-      # Check if it's a valid point
-      if self.bosch_radar and (msg_a["LongDist"] > 250.0 or msg_a["LongDist"] <= 0 or msg_a["ProbExist"] < 50.0):
         if i in self.pts:
           del self.pts[i]
         continue
@@ -122,6 +198,22 @@ class RadarInterface(RadarInterfaceBase):
       self.pts[i].yvRel = msg_b['LatSpeed']
       self.pts[i].measured = bool(msg_a['Meas'])
 
-    ret.points = list(self.pts.values())
+    ret.points = self.bosch_tracks.points if self.bosch_radar else list(self.pts.values())
     self.updated_messages.clear()
     return ret
+
+  def _parse_bosch_track(self, msg_a, msg_b):
+    if msg_a['Index'] != msg_b['Index2'] or not msg_a['Tracked']:
+      return None
+
+    if msg_a["LongDist"] > 250.0 or msg_a["LongDist"] <= 0 or msg_a["ProbExist"] < 50.0:
+      return None
+
+    return BoschTrackObservation(
+      d_rel=msg_a['LongDist'],
+      y_rel=msg_a['LatDist'] + self.radar_offset,
+      v_rel=msg_a['LongSpeed'],
+      a_rel=msg_a['LongAccel'],
+      yv_rel=msg_b['LatSpeed'],
+      measured=bool(msg_a['Meas']),
+    )

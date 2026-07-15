@@ -1,10 +1,17 @@
 """Tests for VirtualDAS: JerkLimiter, feedforward, and inner PID."""
 
-import pytest
-from unittest.mock import patch, MagicMock
-import numpy as np
+import json
+from types import SimpleNamespace
 
-from opendbc.car.tesla.preap.virtual_das import JerkLimiter, VirtualDAS
+import numpy as np
+import pytest
+
+from opendbc.car.tesla.preap.ff_table_default import (
+  SPEED_BP as FF_SPEED_BP,
+  ACCEL_BP as FF_ACCEL_BP,
+  DEFAULT_TABLE as FF_DEFAULT_TABLE,
+)
+from opendbc.car.tesla.preap.virtual_das import FeedforwardModel, JerkLimiter, VirtualDAS
 from opendbc.car.tesla.preap.nap_conf import (
   PEDAL_DI_MIN, PEDAL_DI_ZERO, ACCEL_MAX, REGEN_MAX,
   PEDAL_BP, PEDAL_MAX_VALUES,
@@ -17,6 +24,16 @@ from opendbc.car.tesla.pedal.controller import (
 # --- Phase 1: JerkLimiter ---
 
 class TestJerkLimiter:
+
+  def test_default_limits_positive_steps_more_than_negative_steps(self):
+    jl = JerkLimiter(dt=0.02)
+
+    positive_step = jl.update(1.0)
+    jl.reset()
+    negative_step = jl.update(-1.0)
+
+    assert positive_step == pytest.approx(0.02)
+    assert negative_step == pytest.approx(-0.05)
 
   def test_step_response_bounded(self):
     jl = JerkLimiter(j_max=2.5, dt=0.02)
@@ -83,18 +100,17 @@ class TestJerkLimiter:
 # --- Shared fixtures for VirtualDAS tests ---
 
 @pytest.fixture()
-def mock_nap_conf():
-  with patch('opendbc.car.tesla.preap.virtual_das.nap_conf') as mock_conf:
-    mock_conf.get_pedal_profile_values.return_value = PEDAL_MAX_VALUES
-    yield mock_conf
+def mock_nap_conf(monkeypatch):
+  mock_conf = SimpleNamespace(get_pedal_profile_values=lambda: PEDAL_MAX_VALUES)
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.nap_conf', mock_conf)
+  return mock_conf
 
 
 @pytest.fixture()
-def mock_zero_torque():
-  mock_zt = MagicMock()
-  mock_zt.get.return_value = PEDAL_DI_ZERO
-  with patch('opendbc.car.tesla.preap.virtual_das.get_zero_torque', return_value=mock_zt):
-    yield mock_zt
+def mock_zero_torque(monkeypatch):
+  mock_zt = SimpleNamespace(get=lambda _v_ego: PEDAL_DI_ZERO)
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.get_zero_torque', lambda: mock_zt)
+  return mock_zt
 
 
 # --- Phase 1: VirtualDAS feedforward + jerk limiter ---
@@ -303,8 +319,8 @@ class TestInnerPID:
     """When a_ego matches a_cmd, PID correction should be near zero."""
     vdas = VirtualDAS(dt=0.02)
     for _ in range(200):
-      di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
-                       a_ego=1.0)
+      vdas.update(1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
+                  a_ego=1.0)
     assert abs(vdas.inner_pid.i) < 0.5
 
   def test_backward_compat_no_a_ego_arg(self):
@@ -312,6 +328,16 @@ class TestInnerPID:
     vdas = VirtualDAS(dt=0.02)
     di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=0.0)
     assert np.isfinite(di)
+
+  def test_prediction_clamps_one_frame_acceleration_spike(self):
+    vdas = VirtualDAS(dt=0.02)
+
+    pedal_di = vdas.update(
+      0.0, v_ego=15.0, prev_pedal_di=0.0,
+      a_ego=100.0, freeze_integrator=False,
+    )
+
+    assert pedal_di > -0.1
 
 
 # --- Phase 3: FeedforwardModel ---
@@ -325,13 +351,13 @@ class TestFeedforwardModel:
   def test_default_table_matches_legacy_at_grid_points(self):
     """Default FF table should match the old 3-breakpoint interp at grid points."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
-    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP, DEFAULT_TABLE
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP
 
     ff = FeedforwardModel(table_path="/nonexistent")
 
-    for si, speed in enumerate(SPEED_BP):
+    for speed in SPEED_BP:
       max_pedal = float(np.interp(speed, PEDAL_BP, PEDAL_MAX_VALUES))
-      for ai, accel in enumerate(ACCEL_BP):
+      for accel in ACCEL_BP:
         expected = float(np.interp(accel,
                                    [REGEN_MAX, 0.0, ACCEL_MAX],
                                    [PEDAL_DI_MIN, 0.0, max_pedal]))
@@ -380,8 +406,8 @@ class TestFeedforwardModel:
       'speed_bp': [0.0, 40.0],
       'accel_bp': [-1.5, 0.0, 2.5],
       'table': [
-        [-10.0, 0.0, 100.0],
-        [-10.0, 0.0, 100.0],
+        [-5.0, 0.0, 80.0],
+        [-5.0, 0.0, 80.0],
       ],
     }
     path = tmp_path / "ff_table.json"
@@ -390,7 +416,7 @@ class TestFeedforwardModel:
     ff = FeedforwardModel(table_path=str(path))
     assert ff.speed_bp == [0.0, 40.0]
     di = ff.get(2.5, 20.0, zero_torque_di=0.0)
-    assert abs(di - 100.0) < 0.5
+    assert abs(di - 80.0) < 0.5
 
   def test_invalid_json_falls_back_to_default(self, tmp_path):
     """Corrupted JSON file should fall back to defaults."""
@@ -402,6 +428,128 @@ class TestFeedforwardModel:
 
     ff = FeedforwardModel(table_path=str(path))
     assert ff.speed_bp == list(SPEED_BP)
+
+  @pytest.mark.parametrize("invalid_override", [
+    {
+      'speed_bp': [0.0, float('nan')],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0, 80.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 10 ** 400],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0, 80.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 0.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0, 80.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 2.5, 0.0],
+      'table': [[-5.0, 80.0, 0.0], [-5.0, 80.0, 0.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, float('nan'), 80.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 1.0, 0.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.1, 0.0, 80.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0, 90.1], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [10.0, 30.0],
+      'accel_bp': [-1.5, 0.0, 2.5],
+      'table': [[-5.0, 0.0, 70.0], [-5.0, 0.0, 80.0]],
+    },
+    {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-0.5, 0.0, 0.5],
+      'table': [[-5.0, 0.0, 70.0], [-5.0, 0.0, 80.0]],
+    },
+  ], ids=[
+    "nonfinite-breakpoint",
+    "overflowing-breakpoint",
+    "duplicate-breakpoint",
+    "unordered-breakpoint",
+    "missing-row",
+    "ragged-row",
+    "nonfinite-row",
+    "nonmonotonic-row",
+    "below-minimum-di",
+    "above-maximum-di",
+    "incomplete-speed-coverage",
+    "incomplete-acceleration-coverage",
+  ])
+  def test_invalid_override_tables_fall_back_to_defaults(self, tmp_path, invalid_override):
+    path = tmp_path / "invalid_table.json"
+    path.write_text(json.dumps(invalid_override))
+
+    ff = FeedforwardModel(table_path=str(path))
+
+    assert ff.speed_bp == list(FF_SPEED_BP)
+    assert ff.accel_bp == list(FF_ACCEL_BP)
+    assert ff.table == [list(row) for row in FF_DEFAULT_TABLE]
+
+  def test_zero_torque_transition_is_monotonic_and_c1_across_speeds(self):
+    ff = FeedforwardModel(table_path="/nonexistent")
+    step = 1e-4
+
+    for speed in np.linspace(0.0, 40.0, 9):
+      for zero_torque_di in (0.0, 3.0, 5.0):
+        samples = [ff.get(accel, speed, zero_torque_di)
+                   for accel in np.linspace(-0.3, 0.3, 121)]
+        assert all(right >= left for left, right in zip(samples, samples[1:], strict=False))
+
+        for accel in (-0.25, 0.0, 0.25):
+          center = ff.get(accel, speed, zero_torque_di)
+          slope_left = (center - ff.get(accel - step, speed, zero_torque_di)) / step
+          slope_right = (ff.get(accel + step, speed, zero_torque_di) - center) / step
+          assert slope_left == pytest.approx(slope_right, abs=0.05), (
+            f"speed={speed}, zero_torque_di={zero_torque_di}, accel={accel}"
+          )
+
+  def test_override_with_unsafe_zero_torque_transition_falls_back(self, tmp_path):
+    custom = {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [-1.5, -0.251, -0.25, 0.0, 0.25, 0.251, 2.5],
+      'table': [
+        [-5.0, -5.0, 0.0, 0.1, 0.2, 80.0, 80.0],
+        [-5.0, -5.0, 0.0, 0.1, 0.2, 80.0, 80.0],
+      ],
+    }
+    path = tmp_path / "steep_monotonic_table.json"
+    path.write_text(json.dumps(custom))
+    ff = FeedforwardModel(table_path=str(path))
+
+    samples = [ff.get(accel, 20.0, zero_torque_di=0.0)
+               for accel in np.linspace(-0.25, 0.25, 501)]
+
+    assert ff.accel_bp == list(FF_ACCEL_BP)
+    assert all(right >= left for left, right in zip(samples, samples[1:], strict=False))
 
   def test_vdas_uses_ff_model(self):
     """VirtualDAS._feedforward should use the FeedforwardModel."""
@@ -495,3 +643,57 @@ class TestGradeEstimator:
     assert abs(ge.pitch_lp.x) > 0.01
     ge.reset()
     assert ge.pitch_lp.x == 0.0
+
+
+class TestVDASDomainBoundaries:
+
+  @pytest.fixture(autouse=True)
+  def _fixtures(self, mock_nap_conf, mock_zero_torque):
+    pass
+
+  def test_transient_grade_compensation_enters_feedforward_in_acceleration_domain(self):
+    class FixedGradeEstimator:
+      def update(self, _orientation_ned):
+        return 0.0, 0.2
+
+    vdas = VirtualDAS(dt=0.02)
+    vdas.grade_estimator = FixedGradeEstimator()
+    vdas.jerk_limiter.reset(a_init=0.4)
+    vdas.a_ego_filter.x = 0.4
+    vdas.prev_a_ego_filtered = 0.4
+    expected_di = vdas._feedforward(0.6, v_ego=20.0)
+
+    pedal_di = vdas.update(
+      0.4, v_ego=20.0, prev_pedal_di=expected_di,
+      a_ego=0.4, freeze_integrator=False, orientation_ned=[0.0, 0.0, 0.0],
+    )
+
+    assert pedal_di == pytest.approx(expected_di)
+    assert vdas.inner_pid.i == pytest.approx(0.0)
+
+  def test_engage_reset_starts_estimator_from_measured_acceleration(self, monkeypatch):
+    from opendbc.car.tesla.preap.carcontroller import PreAPLongController
+
+    controller = PreAPLongController()
+    measured_acceleration = 0.7
+    cc = SimpleNamespace(
+      actuators=SimpleNamespace(accel=0.0),
+      longActive=False,
+      orientationNED=[],
+    )
+    cs = SimpleNamespace(
+      cruiseEnabled=True,
+      enableLongControl=True,
+      out=SimpleNamespace(vEgo=15.0, aEgo=measured_acceleration),
+      pedal_interceptor_value=0.0,
+      cruise_buttons=0,
+      prev_cruise_buttons=0,
+      pedal_timeout=False,
+    )
+
+    controller_conf = SimpleNamespace(use_pedal=False, pedal_factor=1.0)
+    monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.nap_conf', controller_conf)
+    controller.update(cc, cs, frame=1, tesla_can=None, can_bus_party=0)
+
+    assert controller.vdas.a_ego_filter.x == pytest.approx(measured_acceleration)
+    assert controller.vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration)

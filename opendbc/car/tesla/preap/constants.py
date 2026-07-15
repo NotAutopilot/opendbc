@@ -46,3 +46,17 @@ VDAS_FUTURE_T_V = [0.30, 0.55]
 # a_ego low-pass filter time constant (seconds). Smooths IMU noise
 # without adding too much phase lag. Matches Toyota's 0.25s RC.
 VDAS_AEGO_FILTER_RC = 0.25
+
+# Acceleration command shaping. Positive transitions use a comfort-oriented
+# bound while braking retains the stronger existing response.
+VDAS_ACCEL_JERK_MAX = 1.0  # m/s³
+VDAS_DECEL_JERK_MAX = 2.5  # m/s³
+
+# Acceleration interval blended across zero torque to remove the propulsion/
+# regen slope discontinuity in the legacy-derived feedforward table.
+VDAS_ZERO_TORQUE_TRANSITION_WIDTH = 0.25  # m/s² on each side of zero
+
+# Physical bound on measured acceleration derivative used by delay prediction.
+# This limits one-frame sensor/source discontinuities without constraining the
+# tighter acceleration-command jerk limits above.
+VDAS_EGO_JERK_MAX = 5.0  # m/s³
