@@ -51,6 +51,7 @@ VDAS_AEGO_FILTER_RC = 0.25
 # bound while braking retains the stronger existing response.
 VDAS_ACCEL_JERK_MAX = 1.0  # m/s³
 VDAS_DECEL_JERK_MAX = 2.5  # m/s³
+VDAS_ACCEL_SNAP_MAX = 4.0  # m/s⁴
 
 # Acceleration interval blended across zero torque to remove the propulsion/
 # regen slope discontinuity in the legacy-derived feedforward table.

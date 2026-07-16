@@ -1,0 +1,219 @@
+from types import SimpleNamespace
+
+import pytest
+
+from opendbc.car.tesla.preap.carcontroller import PreAPLongController
+from opendbc.car.tesla.preap.engagement import PreAPEngagement
+from opendbc.car.tesla.preap.nap_conf import PEDAL_DI_ZERO, PEDAL_MAX_VALUES
+from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
+from opendbc.car.tesla.preap.teslacan import GAS_COMMAND_ID, PEDAL_D, PEDAL_M1, TeslaCANPreAP
+from opendbc.car.tesla.pedal.controller import PEDAL_RAMP_RATE_UP
+
+
+def _pedal_conf():
+  return SimpleNamespace(
+    use_pedal=True,
+    pedal_factor=1.0,
+    di_to_pedal=lambda pedal_di: pedal_di,
+    get_pedal_profile_values=lambda: PEDAL_MAX_VALUES,
+  )
+
+
+def _zero_torque():
+  return SimpleNamespace(
+    get=lambda _v_ego: PEDAL_DI_ZERO,
+    update=lambda *_args: None,
+  )
+
+
+@pytest.fixture
+def controller_env(monkeypatch):
+  zero_torque = _zero_torque()
+  monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.nap_conf', _pedal_conf())
+  monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.get_zero_torque', lambda: zero_torque)
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.nap_conf', _pedal_conf())
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.get_zero_torque', lambda: zero_torque)
+
+  feedback = PedalFeedback()
+  feedback.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 1}, 0)
+  cs = SimpleNamespace(
+    cruiseEnabled=False,
+    enableLongControl=False,
+    real_brake_pressed=False,
+    out=SimpleNamespace(vEgo=15.0, aEgo=0.0, gasPressed=False),
+    pedal_interceptor_value=0.0,
+    cruise_buttons=0,
+    prev_cruise_buttons=0,
+    pedal=feedback,
+    pedal_timeout=feedback.timeout,
+    pccEvent=None,
+    preap_cc_cancel_needed=False,
+  )
+  cc = SimpleNamespace(
+    actuators=SimpleNamespace(accel=0.0),
+    longActive=False,
+    orientationNED=[],
+  )
+  return PreAPLongController(), cc, cs, TeslaCANPreAP({})
+
+
+def _decode_pedal_command(command):
+  address, data, _bus = command
+  assert address == GAS_COMMAND_ID
+  raw_command = (data[0] << 8) | data[1]
+  return SimpleNamespace(
+    enabled=bool(data[4] & 0x80),
+    command=raw_command * PEDAL_M1 + PEDAL_D,
+    raw_command=raw_command,
+  )
+
+
+def _activate_longitudinal(cc, cs):
+  cs.cruiseEnabled = True
+  cs.enableLongControl = True
+  cc.longActive = True
+
+
+def test_fully_disengaged_pedal_is_silent(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+
+  assert controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0) == []
+  assert controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0) == []
+
+
+@pytest.mark.parametrize("override", ["brake", "gas"])
+def test_active_pedal_releases_once_then_stays_silent(controller_env, override):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+  active = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+  assert len(active) == 1
+  assert _decode_pedal_command(active[0]).enabled
+
+  if override == "brake":
+    cs.enableLongControl = False
+    cs.real_brake_pressed = True
+  else:
+    cc.longActive = False
+    cs.out.gasPressed = True
+
+  release = controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0)
+  assert len(release) == 1
+  assert not _decode_pedal_command(release[0]).enabled
+  assert _decode_pedal_command(release[0]).raw_command == 0
+  assert controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0) == []
+
+
+def test_engage_while_brake_already_held_is_lateral_only():
+  engagement = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
+  engagement.preap_brake_pressed_prev = True
+
+  engagement.process_buttons(
+    cruise_buttons=2,
+    prev_cruise_buttons=0,
+    curr_time_ms=1000,
+    v_ego=15.0,
+    speed_units="KPH",
+    use_pedal=True,
+    pedal_long_allowed=True,
+    long_control_allowed=True,
+    real_brake_pressed=True,
+  )
+
+  assert engagement.cruiseEnabled
+  assert not engagement.enableLongControl
+  assert engagement.enableJustCC
+
+
+def test_timeout_rearm_requires_reset_then_advancing_healthy_feedback(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 7}, 20)
+  cs.pedal_timeout = cs.pedal.timeout
+  reset = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+  assert len(reset) == 1
+  assert not _decode_pedal_command(reset[0]).enabled
+  assert _decode_pedal_command(reset[0]).raw_command == 0
+
+  assert controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0) == []
+
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 7}, 40)
+  cs.pedal_timeout = cs.pedal.timeout
+  assert controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0) == []
+
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 8}, 60)
+  cs.pedal_timeout = cs.pedal.timeout
+  enabled = controller.update(cc, cs, frame=6, tesla_can=tesla_can, can_bus_party=0)
+  assert len(enabled) == 1
+  assert _decode_pedal_command(enabled[0]).enabled
+
+
+def _start_gas_override(cc, cs):
+  cs.cruiseEnabled = True
+  cs.enableLongControl = True
+  cs.out.gasPressed = True
+  cs.out.aEgo = 1.618
+  cs.pedal_interceptor_value = 0.0
+  cc.longActive = False
+  cc.actuators.accel = 0.34
+  cc.orientationNED = [0.0, 0.05, 0.0]
+
+
+def _hold_gas_override(controller, cc, cs, tesla_can):
+  override_commands = []
+  for frame in range(0, 460, 2):
+    override_commands.extend(controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0))
+  return override_commands
+
+
+def test_requested_engage_during_gas_override_is_silent(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _start_gas_override(cc, cs)
+
+  override_commands = _hold_gas_override(controller, cc, cs, tesla_can)
+
+  assert override_commands == []
+
+
+def test_engage_grace_starts_on_actual_long_active_rising(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _start_gas_override(cc, cs)
+  _hold_gas_override(controller, cc, cs, tesla_can)
+
+  cs.out.gasPressed = False
+  cs.out.aEgo = 0.1
+  cc.longActive = True
+  controller.update(cc, cs, frame=460, tesla_can=tesla_can, can_bus_party=0)
+
+  assert controller.preap_long_engage_frame == 460
+
+
+def test_gas_override_timeout_rearm_has_no_launch(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _start_gas_override(cc, cs)
+  _hold_gas_override(controller, cc, cs, tesla_can)
+
+  cs.out.gasPressed = False
+  cs.out.aEgo = 0.1
+  cc.longActive = True
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 9}, 4600)
+  cs.pedal_timeout = cs.pedal.timeout
+  reset = controller.update(cc, cs, frame=460, tesla_can=tesla_can, can_bus_party=0)
+
+  assert controller.preap_long_engage_frame == 460
+  assert len(reset) == 1
+  assert not _decode_pedal_command(reset[0]).enabled
+
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 9}, 4620)
+  cs.pedal_timeout = cs.pedal.timeout
+  assert controller.update(cc, cs, frame=462, tesla_can=tesla_can, can_bus_party=0) == []
+
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 10}, 4640)
+  cs.pedal_timeout = cs.pedal.timeout
+  first_enabled = controller.update(cc, cs, frame=464, tesla_can=tesla_can, can_bus_party=0)
+  assert len(first_enabled) == 1
+  first_command = _decode_pedal_command(first_enabled[0])
+  assert first_command.enabled
+  assert first_command.command < PEDAL_RAMP_RATE_UP - 1.0
+  assert controller.vdas.jerk_limiter.a_limited < 0.2
+  assert controller.vdas.grade_estimator.pitch_lp.x > 0.02

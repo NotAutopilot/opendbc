@@ -138,6 +138,10 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def _gear_msg(self, gear):
     return self.packer.make_can_msg_safety("DI_torque2", 0, {"DI_gear": gear})
 
+  def _di_brake_msg(self, brake):
+    values = {"DI_gear": 4, "DI_brakePedal": 1 if brake else 0}
+    return self.packer.make_can_msg_safety("DI_torque2", 0, values)
+
   def _door_msg(self, door_fl=0, door_fr=0, door_rl=0, door_rr=0):
     values = {
       "DOOR_STATE_FL": door_fl,
@@ -187,23 +191,16 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
   def test_prev_user_brake(self):
     # PRE-AP BRAKE ARCHITECTURE:
-    # The panda hardcodes brake_pressed=false (tesla_preap.h:340) so the
-    # framework's generic brake-disengage path never fires. This is deliberate:
+    # The panda keeps the framework's brake_pressed=false so generic brake
+    # disengagement never kills lateral control. Separate raw-brake latches
+    # still block enabled pedal commands at the TX hook.
     #
-    # Pre-AP brake-to-disengage is handled in the Python layer, NOT the panda:
-    #   1. preap/carstate.py:41 — reads real_brake_pressed from BrakeMessage CAN
-    #   2. preap/carstate.py:132 — passes it to engagement.process_buttons()
-    #   3. preap/engagement.py:92-100 — on brake rising edge (pedal mode):
-    #      drops enableLongControl=False but keeps cruiseEnabled=True
-    #      (lateral stays active, only longitudinal/pedal drops)
-    #   4. preap/carstate.py:134 — suppresses ret.brakePressed=False so the
-    #      generic openpilot brake handler doesn't also kill lateral
+    # Python ORs DI_torque2.DI_brakePedal and BrakeMessage.driverBrakeStatus,
+    # drops longitudinal while keeping cruise/lateral enabled, and suppresses
+    # public CarState.brakePressed. Panda independently ORs the same two raw
+    # sources so it closes the interval before Python observes BrakeMessage.
     #
-    # This design ensures brake drops pedal (longitudinal) but keeps steering
-    # (lateral). The driver can always override steering via hands-on level >= 2.
-    # See test_preap_engagement.py for Python-layer verification.
-    #
-    # Panda-layer invariant: brake_pressed is ALWAYS false.
+    # Framework invariant: brake_pressed remains false; pedal authority does not.
     self.assertFalse(self.safety.get_brake_pressed_prev())
     self._rx(self._user_brake_msg(True))
     self.assertFalse(self.safety.get_brake_pressed_prev())
@@ -211,9 +208,8 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.assertFalse(self.safety.get_brake_pressed_prev())
 
   def test_allow_user_brake_at_zero_speed(self):
-    # Pre-AP: brake_pressed is always false in panda → brake never affects
-    # controls_allowed at the panda level. See test_prev_user_brake for the
-    # full brake architecture explanation.
+    # Brake does not clear controls_allowed because lateral remains available;
+    # the separate pedal TX interlock is covered below.
     self._rx(self._speed_msg(0))
     self._rx(self._user_brake_msg(True))
     self.safety.set_controls_allowed(True)
@@ -221,9 +217,8 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.assertTrue(self.safety.get_controls_allowed())
 
   def test_not_allow_user_brake_when_moving(self):
-    # Pre-AP: brake_pressed is always false in panda → brake while moving
-    # doesn't disengage at the panda level. The brake-to-drop-longitudinal
-    # path is in preap/engagement.py:92-100. See test_prev_user_brake.
+    # Brake while moving still leaves controls_allowed set for lateral. Python
+    # drops longitudinal, while panda independently blocks enabled pedal TX.
     self._rx(self._user_brake_msg(True))
     self.safety.set_controls_allowed(True)
     self._rx(self._speed_msg(self.STANDSTILL_THRESHOLD + 1))
@@ -567,26 +562,25 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
       self.assertTrue(self._tx(tx_msg),
                       f"Pedal TX must be allowed at raw {raw} (noise range)")
 
-  def test_pedal_passthrough_enable_0_always_allowed(self):
-    # NAP's pedal passthrough feature: when driver presses OEM pedal, Python
-    # sends GAS_COMMAND with enable=0 to tell the Comma Pedal to passthrough
-    # driver's foot directly. This message RELEASES control and is always safe.
-    # Panda must let enable=0 through regardless of controls_allowed / gas_pressed.
+  def test_pedal_release_enable_0_always_allowed(self):
+    # A disabled GAS_COMMAND relinquishes authority and lets Comma Pedal pass
+    # the driver's OEM pedal voltage through. The controller sends it once on
+    # authority loss; panda must allow that release regardless of engagement.
     disable_msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0,
                                                   {"GAS_COMMAND": 0, "ENABLE": 0})
 
     # Case 1: not engaged, no gas — still allowed (benign)
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertTrue(self._tx(disable_msg),
-                    "enable=0 must be allowed when not engaged (passthrough)")
+                    "enable=0 must be allowed when not engaged")
 
-    # Case 2: engaged but driver pressing gas — this is the passthrough scenario
+    # Case 2: driver gas must not prevent the one-shot authority release.
     self._rx(self._pcm_status_msg(True))
     self._rx(self._pedal_msg(self.PEDAL_RAW_CLEAR_PRESS, bus=2))
     self.assertTrue(self.safety.get_gas_pressed_prev())
     self.assertFalse(self.safety.get_longitudinal_allowed())
     self.assertTrue(self._tx(disable_msg),
-                    "enable=0 must be allowed during gas override (explicit passthrough)")
+                    "enable=0 must be allowed during gas override")
 
   def test_pedal_enable_1_blocked_on_gas_press(self):
     # Conversely, enable=1 (authoritative accel command) MUST be blocked
@@ -600,6 +594,52 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self._rx(self._pedal_msg(self.PEDAL_RAW_CLEAR_PRESS, bus=2))
     self.assertFalse(self._tx(enable_msg),
                      "enable=1 must be blocked during driver gas press")
+
+  def test_each_raw_brake_source_blocks_only_enabled_pedal_commands(self):
+    enable_msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0,
+                                                 {"GAS_COMMAND": 0, "ENABLE": 1})
+    disable_msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0,
+                                                  {"GAS_COMMAND": 0, "ENABLE": 0})
+
+    for source, brake_msg in (("DI_torque2", self._di_brake_msg(True)),
+                              ("BrakeMessage", self._user_brake_msg(True))):
+      with self.subTest(source=source):
+        self.setUp()
+        self._rx(self._pcm_status_msg(True))
+        self.assertTrue(self._tx(enable_msg))
+
+        self._rx(brake_msg)
+
+        self.assertTrue(self.safety.get_controls_allowed())
+        self.assertFalse(self._tx(enable_msg))
+        self.assertTrue(self._tx(disable_msg))
+        self.assertTrue(self._tx(self._angle_cmd_msg(0, 1)))
+
+  def test_di_brake_closes_twenty_ms_seam_and_sources_clear_independently(self):
+    enable_msg = self.packer.make_can_msg_safety("GAS_COMMAND", 0,
+                                                 {"GAS_COMMAND": 0, "ENABLE": 1})
+    self._rx(self._pcm_status_msg(True))
+    self._rx(self._di_brake_msg(False))
+    self._rx(self._user_brake_msg(False))
+    self.assertTrue(self._tx(enable_msg))
+
+    self._rx(self._di_brake_msg(True))
+    self.assertFalse(self._tx(enable_msg))
+
+    self.safety.set_timer(20000)
+    self._rx(self._user_brake_msg(False))
+    self.assertFalse(self._tx(enable_msg))
+
+    self._rx(self._di_brake_msg(False))
+    self.assertTrue(self._tx(enable_msg))
+
+    self._rx(self._user_brake_msg(True))
+    self.assertFalse(self._tx(enable_msg))
+    self._rx(self._di_brake_msg(False))
+    self.assertFalse(self._tx(enable_msg))
+
+    self._rx(self._user_brake_msg(False))
+    self.assertTrue(self._tx(enable_msg))
 
   def test_pedal_enable_0_blocked_without_flag(self):
     # If PREAP_FLAG_ENABLE_PEDAL is not set, NO 0x551 TX is allowed

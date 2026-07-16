@@ -94,6 +94,8 @@ static int preap_pedal_can = -1;
 static int preap_gear = 4;        // init to Drive to avoid false disables on startup
 static int preap_gear_prev = 4;
 static bool preap_doors_open = false;
+static bool preap_di_brake_pressed = false;
+static bool preap_brake_message_pressed = false;
 
 // Stalk echo filter
 static uint32_t preap_last_stalk_engage_us = 0;
@@ -397,9 +399,10 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // Brake (0x20a) — force false so generic_rx_checks doesn't drop controls_allowed.
-  // Pre-AP brake → steering-only is handled in the software layer.
+  // Brake (0x20a) — latch pedal authority separately, but keep the framework
+  // brake false so generic_rx_checks doesn't drop lateral controls_allowed.
   if (msg->addr == 0x20aU) {
+    preap_brake_message_pressed = ((msg->data[0] >> 2) & 0x03U) == 2U;
     brake_pressed = false;
   }
 
@@ -412,8 +415,10 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // Gear check (DI_torque2: 0x118) — disable controls on leaving Drive
+  // DI brake closes the interval before the slower BrakeMessage arrives.
+  // The same frame also disables controls on leaving Drive.
   if (msg->addr == 0x118U) {
+    preap_di_brake_pressed = ((msg->data[1] >> 7) & 0x01U) != 0U;
     preap_gear = (msg->data[1] >> 4) & 0x07;
     if ((preap_gear_prev == 4) && (preap_gear != 4)) {
       controls_allowed = false;
@@ -509,14 +514,14 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   }
 
   // Pedal interceptor (0x551 GAS_COMMAND): parse ENABLE bit and GAS_COMMAND
-  // value to distinguish authoritative accel commands from driver-passthrough
-  // release commands.
+  // value to distinguish authoritative accel commands from release commands.
   //   DBC: SG_ ENABLE : 39|1@0+  →  bit 7 of data[4]
   //   DBC: SG_ GAS_COMMAND : 7|16@0+  →  bytes 0-1 big-endian (physical 0 = raw 450)
   //
   //   ENABLE=0: openpilot is releasing control. Comma Pedal ignores GAS_COMMAND
-  //   and passes driver's OEM pedal voltage through. NAP's pedal passthrough
-  //   feature sends this during driver gas override for a smooth handoff.
+  //   and passes the driver's OEM pedal voltage through. The controller sends
+  //   one disabled-zero frame when relinquishing active authority or resetting
+  //   faulted firmware, then stays silent.
   //   Defense-in-depth: we still require the GAS_COMMAND raw value to be at or
   //   below the zero point (raw <= 500, which is ~2.5% physical) so a bugged or
   //   malicious ENABLE=0 + high-value message can't sneak through a potential
@@ -531,12 +536,12 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
       int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
       if (pedal_enable) {
-        if (!get_longitudinal_allowed()) {
+        if (!get_longitudinal_allowed() || preap_di_brake_pressed || preap_brake_message_pressed) {
           violation = true;
         }
       } else {
         // ENABLE=0: only allow near-zero GAS_COMMAND values (defense-in-depth).
-        // Legitimate passthrough sends physical 0 = raw 450.
+        // This admits the production raw-zero release and DBC physical zero.
         if (raw_gas_cmd > 500) {
           violation = true;
         }
@@ -590,6 +595,8 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_gear = 4;
   preap_gear_prev = 4;
   preap_doors_open = false;
+  preap_di_brake_pressed = false;
+  preap_brake_message_pressed = false;
   preap_pedal_can = -1;
   preap_radar_status = 0;
   preap_last_radar_signal = 0;

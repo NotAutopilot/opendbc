@@ -7,6 +7,7 @@ feedback-corrected controller for smooth pedal actuation without DAS hardware.
 import json
 import math
 import os
+from enum import Enum, auto
 
 from numpy import clip, interp
 
@@ -16,7 +17,7 @@ from opendbc.car.tesla.preap.constants import (
   VDAS_INNER_K_BP, VDAS_INNER_KP_V, VDAS_INNER_KI_V,
   VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
   VDAS_AEGO_FILTER_RC,
-  VDAS_ACCEL_JERK_MAX, VDAS_DECEL_JERK_MAX,
+  VDAS_ACCEL_JERK_MAX, VDAS_DECEL_JERK_MAX, VDAS_ACCEL_SNAP_MAX,
   VDAS_ZERO_TORQUE_TRANSITION_WIDTH,
   VDAS_EGO_JERK_MAX,
 )
@@ -101,6 +102,11 @@ class GradeEstimator:
     self.pitch_hp._f2.x = 0.0
 
 
+class JerkLimiterState(Enum):
+  IDLE = auto()
+  POSITIVE_TRANSITION = auto()
+
+
 class JerkLimiter:
   """S-curve rate limiter on acceleration commands.
 
@@ -110,24 +116,76 @@ class JerkLimiter:
 
   def __init__(self, j_max: float | None = None, dt: float = 0.02,
                j_accel_max: float = VDAS_ACCEL_JERK_MAX,
-               j_decel_max: float = VDAS_DECEL_JERK_MAX):
+               j_decel_max: float = VDAS_DECEL_JERK_MAX,
+               snap_accel_max: float = VDAS_ACCEL_SNAP_MAX):
     if j_max is not None:
       j_accel_max = j_max
       j_decel_max = j_max
     self.j_accel_max = j_accel_max
     self.j_decel_max = j_decel_max
+    self.snap_accel_max = snap_accel_max
     self.dt = dt
     self.a_limited = 0.0
+    self.j_limited = 0.0
+    self.state = JerkLimiterState.IDLE
+    self.target_accel = 0.0
 
   def update(self, a_cmd: float) -> float:
     da = a_cmd - self.a_limited
-    da_min = -self.j_decel_max * self.dt
-    da_max = self.j_accel_max * self.dt
-    self.a_limited += float(clip(da, da_min, da_max))
+    target_dropped = a_cmd < self.target_accel - 1e-12
+    braking_requested = da < -1e-12 and (
+      self.state is JerkLimiterState.IDLE or target_dropped
+    )
+
+    if braking_requested:
+      self.state = JerkLimiterState.IDLE
+      requested_jerk = max(da / self.dt, -self.j_decel_max)
+      applied_step = max(da, requested_jerk * self.dt)
+      self.a_limited += applied_step
+      self.j_limited = applied_step / self.dt
+    else:
+      if da > 1e-12:
+        self.state = JerkLimiterState.POSITIVE_TRANSITION
+
+      if self.state is JerkLimiterState.POSITIVE_TRANSITION:
+        self._update_positive_transition(a_cmd)
+      else:
+        self.a_limited = a_cmd
+        self.j_limited = 0.0
+
+    self.target_accel = a_cmd
     return self.a_limited
+
+  def _update_positive_transition(self, a_cmd: float):
+    error = a_cmd - self.a_limited
+    snap_step = self.snap_accel_max * self.dt
+    landing_jerk = error / self.dt
+    can_land_on_target = (
+      abs(landing_jerk - self.j_limited) <= snap_step + 1e-12
+      and abs(landing_jerk) <= snap_step + 1e-12
+    )
+    if can_land_on_target:
+      self.a_limited = a_cmd
+      self.j_limited = landing_jerk
+      if abs(landing_jerk) <= 1e-12:
+        self.state = JerkLimiterState.IDLE
+      return
+
+    stopping_jerk_magnitude = (
+      -snap_step
+      + math.sqrt(snap_step * snap_step + 2.0 * self.snap_accel_max * abs(error))
+    )
+    target_jerk = math.copysign(stopping_jerk_magnitude, error) if error != 0.0 else 0.0
+    target_jerk = float(clip(target_jerk, -self.j_decel_max, self.j_accel_max))
+    jerk_step = float(clip(target_jerk - self.j_limited, -snap_step, snap_step))
+    self.j_limited += jerk_step
+    self.a_limited += self.j_limited * self.dt
 
   def reset(self, a_init: float = 0.0):
     self.a_limited = a_init
+    self.j_limited = 0.0
+    self.state = JerkLimiterState.IDLE
+    self.target_accel = a_init
 
 
 class FeedforwardModel:
@@ -337,6 +395,7 @@ class VirtualDAS:
     )
     self.a_ego_filter = FirstOrderFilter(0.0, VDAS_AEGO_FILTER_RC, dt)
     self.prev_a_ego_filtered = 0.0
+    self.a_ego_initialized = False
 
   def update(self, a_cmd: float, v_ego: float, prev_pedal_di: float,
              a_ego: float = 0.0, freeze_integrator: bool = False,
@@ -366,6 +425,7 @@ class VirtualDAS:
     a_ego_corrected = a_ego - grade_accel
 
     a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
+    self.a_ego_initialized = True
     j_ego = float(clip(
       (a_ego_filtered - self.prev_a_ego_filtered) / self.dt,
       -VDAS_EGO_JERK_MAX, VDAS_EGO_JERK_MAX,
@@ -393,13 +453,27 @@ class VirtualDAS:
     self.prev_pedal_di = pedal_di
     return pedal_di
 
-  def reset(self, a_init: float = 0.0, pedal_di_init: float = 0.0):
+  def observe(self, a_ego: float, orientation_ned: list | None = None):
+    """Keep measured acceleration and grade state current without authority."""
+    grade_accel, _ = self.grade_estimator.update(
+      orientation_ned if orientation_ned is not None else [])
+    a_ego_corrected = a_ego - grade_accel
+    a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
+    self.prev_a_ego_filtered = a_ego_filtered
+    self.a_ego_initialized = True
+    self.jerk_limiter.reset(a_ego)
+    self.inner_pid.reset()
+
+  def reset(self, a_init: float = 0.0, pedal_di_init: float = 0.0, preserve_grade: bool = False):
     """Reset all internal state on engage transition."""
     self.jerk_limiter.reset(a_init)
     self.inner_pid.reset()
-    self.grade_estimator.reset()
-    self.a_ego_filter.x = a_init
-    self.prev_a_ego_filtered = a_init
+    if not preserve_grade:
+      self.grade_estimator.reset()
+    if not preserve_grade or not self.a_ego_initialized:
+      self.a_ego_filter.x = a_init
+      self.prev_a_ego_filtered = a_init
+    self.a_ego_initialized = True
     self.prev_pedal_di = pedal_di_init
 
   def _feedforward(self, a_cmd: float, v_ego: float) -> float:

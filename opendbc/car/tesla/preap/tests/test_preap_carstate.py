@@ -84,6 +84,33 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
         CS = CI.update(packets)
         self.assertEqual(CS.turnSignalStalkState, expected)
 
+  def test_internal_brake_signal_ors_both_raw_sources_while_public_signal_stays_suppressed(self):
+    CI = self._make_interface()
+
+    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 1}))
+    self.assertTrue(CI.CS.real_brake_pressed)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
+    self.assertTrue(CI.CS.real_brake_pressed)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
+    self.assertFalse(CI.CS.real_brake_pressed)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 2}))
+    self.assertTrue(CI.CS.real_brake_pressed)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
+    self.assertTrue(CI.CS.real_brake_pressed)
+    self.assertFalse(CS.brakePressed)
+
+    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
+    self.assertFalse(CI.CS.real_brake_pressed)
+    self.assertFalse(CS.brakePressed)
+
 
 if __name__ == "__main__":
   unittest.main()

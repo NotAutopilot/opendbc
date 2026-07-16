@@ -39,8 +39,10 @@ def update_preap(cs, can_parsers):
 
   # Brake pedal
   ret.brake = 0
-  real_brake_pressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
-  ret.brakePressed = real_brake_pressed
+  di_brake_pressed = cp_chassis.vl["DI_torque2"]["DI_brakePedal"] == 1
+  brake_message_pressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
+  cs.real_brake_pressed = di_brake_pressed or brake_message_pressed
+  ret.brakePressed = cs.real_brake_pressed
 
   # Steering wheel
   epas_status = cp_chassis.vl["EPAS_sysStatus"]
@@ -134,7 +136,7 @@ def update_preap(cs, can_parsers):
   button_events = cs.engagement.process_buttons(
     cs.cruise_buttons, cs.prev_cruise_buttons, curr_time_ms,
     ret.vEgo, cs.speed_units, use_pedal, pedal_long_allowed,
-    long_control_allowed, real_brake_pressed, cs.di_cruise_state)
+    long_control_allowed, cs.real_brake_pressed, cs.di_cruise_state)
   # Suppress brakePressed so generic brake-disengage path doesn't kill lateral
   ret.brakePressed = False
   ret.buttonEvents = button_events

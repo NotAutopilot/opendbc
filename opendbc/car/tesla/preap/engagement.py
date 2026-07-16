@@ -57,6 +57,7 @@ class PreAPEngagement:
                       v_ego, speed_units, use_pedal, pedal_long_allowed,
                       long_control_allowed, real_brake_pressed, di_cruise_state="OFF"):
     button_events = []
+    long_control_allowed = long_control_allowed and (not use_pedal or not real_brake_pressed)
 
     # Stalk-spoof intent flags are single-frame events. Clear at the top so
     # downstream consumers (StockCCSpoofer) see them only on the frame they
@@ -79,7 +80,7 @@ class PreAPEngagement:
         self.pending_enable = False
         self.enableLongControl = long_control_allowed
         self.enableJustCC = not long_control_allowed
-        if pedal_long_allowed:
+        if pedal_long_allowed and self.enableLongControl:
           self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
         else:
           self.pedal_speed_kph = 0.0
@@ -97,11 +98,12 @@ class PreAPEngagement:
       if curr_time_ms - self.stalk_pull_time_ms > self.double_pull_window_ms:
         self.pending_enable = False
 
-    # Brake drops longitudinal while keeping lateral (pedal mode only)
-    brake_rising_edge = real_brake_pressed and not self.preap_brake_pressed_prev
+    # Brake drops longitudinal while keeping lateral (pedal mode only).
+    # Use the level so engagement cannot acquire pedal authority under a
+    # brake that was already held before the stalk request.
     if use_pedal:
-      if brake_rising_edge and self.cruiseEnabled and self.enableLongControl:
-        carlog.debug("BRAKE rising edge — dropping longitudinal")
+      if real_brake_pressed and self.cruiseEnabled and self.enableLongControl:
+        carlog.debug("BRAKE held — dropping longitudinal")
         self.enableLongControl = False
         self.enableJustCC = True
         self.pending_enable = False
@@ -137,7 +139,7 @@ class PreAPEngagement:
       self.pending_enable = False
       self.enableLongControl = long_control_allowed
       self.enableJustCC = not long_control_allowed
-      if pedal_long_allowed:
+      if pedal_long_allowed and self.enableLongControl:
         self.longCtrlEvent = "pccEnabled"
         self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
       else:

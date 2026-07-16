@@ -59,12 +59,10 @@ class TestPreAPBrakeDisengage(unittest.TestCase):
     # No change — stock CC handles brake disengage independently
     self.assertTrue(eng.cruiseEnabled)
 
-  def test_brake_only_on_rising_edge(self):
-    # Holding brake should not repeatedly disengage — only rising edge matters.
+  def test_held_brake_cannot_retain_longitudinal(self):
     eng = self._make_engagement()
     self._engage_single_pull(eng, use_pedal=True)
 
-    # Brake held from previous cycle (not a rising edge)
     eng.preap_brake_pressed_prev = True
     eng.process_buttons(
       cruise_buttons=0, prev_cruise_buttons=0,
@@ -72,8 +70,9 @@ class TestPreAPBrakeDisengage(unittest.TestCase):
       use_pedal=True, pedal_long_allowed=True,
       long_control_allowed=True, real_brake_pressed=True)
 
-    # No disengage — brake was already pressed
-    self.assertTrue(eng.enableLongControl)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+    self.assertTrue(eng.enableJustCC)
 
   def test_brake_disengage_then_reengage(self):
     # After brake drops longitudinal, a stalk pull should re-engage everything.

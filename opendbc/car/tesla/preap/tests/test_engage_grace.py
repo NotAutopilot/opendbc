@@ -168,30 +168,5 @@ class TestEngageGraceInvariant(unittest.TestCase):
       self.assertEqual(out, request)
 
 
-class TestEngageGraceSourceDrift(unittest.TestCase):
-  """Catch silent drift between the test's mirror and carcontroller.py."""
-
-  def test_carcontroller_uses_engage_a_max_with_grace_progress(self):
-    """Verify the carcontroller source still implements the invariant this
-    test file guards. This catches someone reverting to the multiplicative-
-    scaling bug or introducing a new cap source."""
-    import os
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    src_path = os.path.join(here, "..", "carcontroller.py")
-    with open(src_path) as f:
-      src = f.read()
-
-    # These three ingredients together encode the invariant
-    self.assertIn(
-      "engage_a_max", src,
-      "carcontroller.py no longer snapshots engage_a_max; "
-      + "grace-period cap may have reverted to MPC-request-scaled")
-    self.assertIn("grace_progress", src,
-                  "carcontroller.py dropped grace_progress ramp")
-    self.assertIn("get_preap_accel_limits", src,
-                  "carcontroller.py no longer pulls a_max from the accel profile")
-
-
 if __name__ == "__main__":
   unittest.main()

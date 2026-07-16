@@ -20,6 +20,8 @@ from opendbc.car.tesla.pedal.controller import (
   PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
 )
 
+COMFORT_SNAP_MAX = 4.0  # m/s^4
+
 
 # --- Phase 1: JerkLimiter ---
 
@@ -32,8 +34,21 @@ class TestJerkLimiter:
     jl.reset()
     negative_step = jl.update(-1.0)
 
-    assert positive_step == pytest.approx(0.02)
+    assert 0.0 < positive_step < 0.02
     assert negative_step == pytest.approx(-0.05)
+
+  def test_positive_acceleration_transition_bounds_jerk_and_snap(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    accelerations = [0.0]
+
+    for _ in range(80):
+      accelerations.append(jl.update(1.0))
+
+    jerks = np.diff(accelerations) / dt
+    snaps = np.diff(np.concatenate(([0.0], jerks))) / dt
+    assert np.max(jerks) <= 1.0 + 1e-9
+    assert np.max(np.abs(snaps)) <= COMFORT_SNAP_MAX + 1e-9
 
   def test_step_response_bounded(self):
     jl = JerkLimiter(j_max=2.5, dt=0.02)
@@ -51,14 +66,21 @@ class TestJerkLimiter:
       out = jl.update(1.5)
     assert abs(out - 1.5) < 1e-6
 
-  def test_ramp_tracking_below_jmax(self):
+  def test_snap_bounded_ramp_tracking_has_bounded_lag(self):
     jl = JerkLimiter(j_max=2.5, dt=0.02)
     slope = 1.0
+    outputs = []
+    lags = []
 
     for i in range(50):
       target = slope * i * 0.02
       out = jl.update(target)
-      assert abs(out - target) < 1e-6, f"Diverged at step {i}: {out} vs {target}"
+      outputs.append(out)
+      lags.append(target - out)
+
+    assert np.all(np.diff(outputs) >= -1e-9)
+    assert min(lags) >= -1e-9
+    assert max(lags) < 0.13
 
   def test_ramp_tracking_above_jmax(self):
     jl = JerkLimiter(j_max=2.5, dt=0.02)
@@ -80,6 +102,142 @@ class TestJerkLimiter:
       out = jl.update(-1.5)
       assert abs(out - prev) <= 2.5 * 0.02 + 1e-9
       prev = out
+
+  def test_negative_target_converges_without_crossing(self):
+    dt = 0.02
+    target = -1.0
+    jl = JerkLimiter(dt=dt)
+    accelerations = [0.0]
+
+    for _ in range(160):
+      accelerations.append(jl.update(target))
+
+    braking_jerks = np.diff(accelerations) / dt
+    assert min(accelerations) >= target - 1e-9
+    assert accelerations[-1] == pytest.approx(target)
+    assert min(braking_jerks) >= -2.5 - 1e-9
+
+  def test_lower_target_during_positive_transition_keeps_immediate_braking_authority(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    for _ in range(10):
+      jl.update(2.0)
+
+    before_braking = jl.a_limited
+    after_braking = jl.update(before_braking - 1.0)
+
+    assert (after_braking - before_braking) / dt == pytest.approx(-2.5)
+
+  def test_negative_to_positive_reversal_remains_bounded(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    jl.reset(a_init=-0.5)
+    accelerations = [-0.5]
+
+    for _ in range(120):
+      accelerations.append(jl.update(1.0))
+
+    jerks = np.diff(accelerations) / dt
+    snaps = np.diff(np.concatenate(([0.0], jerks))) / dt
+    assert max(jerks) <= 1.0 + 1e-9
+    assert np.max(np.abs(snaps)) <= COMFORT_SNAP_MAX + 1e-9
+    assert accelerations[-1] == pytest.approx(1.0)
+
+  def test_positive_jerk_restarts_from_applied_hold_state(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    for _ in range(10):
+      jl.update(2.0)
+
+    near_target = jl.a_limited + 0.001
+    for _ in range(200):
+      jl.update(near_target)
+
+    before_hold = jl.a_limited
+    held = jl.update(near_target)
+    resumed = jl.update(1.0)
+
+    hold_jerk = (held - before_hold) / dt
+    resumed_jerk = (resumed - held) / dt
+    assert held == pytest.approx(near_target)
+    assert hold_jerk == pytest.approx(0.0)
+    assert (resumed_jerk - hold_jerk) / dt <= COMFORT_SNAP_MAX + 1e-9
+
+  def test_closer_positive_target_preserves_applied_snap_bound(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    accelerations = [0.0]
+    for _ in range(10):
+      accelerations.append(jl.update(2.0))
+
+    near_target = accelerations[-1] + 0.001
+    accelerations.append(jl.update(near_target))
+
+    jerks = np.diff(accelerations) / dt
+    clamp_snap = (jerks[-1] - jerks[-2]) / dt
+    assert jerks[-2] == pytest.approx(0.8)
+    assert jerks[-1] <= 1.0 + 1e-9
+    assert abs(clamp_snap) <= COMFORT_SNAP_MAX + 1e-9
+
+  def test_lower_target_after_positive_overshoot_uses_immediate_braking_path(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    for _ in range(10):
+      jl.update(2.0)
+
+    near_target = jl.a_limited + 0.001
+    overshot_accel = jl.update(near_target)
+    lower_target = near_target - 0.001
+    after_braking = jl.update(lower_target)
+    braking_jerk = (after_braking - overshot_accel) / dt
+    expected_immediate_jerk = max((lower_target - overshot_accel) / dt, -2.5)
+
+    assert overshot_accel > near_target
+    assert braking_jerk == pytest.approx(expected_immediate_jerk)
+    assert braking_jerk >= -2.5 - 1e-9
+    assert after_braking >= lower_target - 1e-9
+
+  def test_piecewise_positive_targets_converge_without_runaway_or_oscillation(self):
+    dt = 0.02
+    jl = JerkLimiter(dt=dt)
+    accelerations = [0.0]
+
+    for _ in range(10):
+      accelerations.append(jl.update(2.0))
+
+    first_close_target = jl.a_limited + 0.001
+    first_close_start = len(accelerations) - 1
+    for _ in range(200):
+      accelerations.append(jl.update(first_close_target))
+
+    for _ in range(13):
+      accelerations.append(jl.update(0.8))
+
+    second_close_target = jl.a_limited + 0.003
+    second_close_start = len(accelerations) - 1
+    for _ in range(200):
+      accelerations.append(jl.update(second_close_target))
+
+    jerks = np.diff(accelerations) / dt
+    snaps = np.diff(np.concatenate(([0.0], jerks))) / dt
+    first_close_end = first_close_start + 201
+    first_close_accels = np.array(accelerations[first_close_start:first_close_end])
+    second_close_accels = np.array(accelerations[second_close_start:])
+    first_overshoot = np.max(first_close_accels) - first_close_target
+    second_overshoot = np.max(second_close_accels) - second_close_target
+    first_nonzero_errors = first_close_accels[np.abs(first_close_accels - first_close_target) > 1e-12] - first_close_target
+    second_nonzero_errors = second_close_accels[np.abs(second_close_accels - second_close_target) > 1e-12] - second_close_target
+    first_crossings = np.count_nonzero(np.diff(np.sign(first_nonzero_errors)))
+    second_crossings = np.count_nonzero(np.diff(np.sign(second_nonzero_errors)))
+
+    assert np.max(jerks) <= 1.0 + 1e-9
+    assert np.max(np.abs(snaps)) <= COMFORT_SNAP_MAX + 1e-9
+    assert first_overshoot < 0.1
+    assert second_overshoot < 0.14
+    assert first_crossings <= 1
+    assert second_crossings <= 1
+    assert accelerations[first_close_start + 200] == pytest.approx(first_close_target)
+    assert accelerations[-1] == pytest.approx(second_close_target)
 
   def test_reset(self):
     jl = JerkLimiter(j_max=2.5, dt=0.02)
@@ -154,6 +312,53 @@ class TestVirtualDAS:
       assert di - prev <= PEDAL_RAMP_RATE_UP + 1e-9
       assert prev - di <= PEDAL_RAMP_RATE_DOWN + 1e-9
       prev = di
+
+  def test_lead_expiry_negative_to_positive_target_is_s_curve_shaped_before_di_backstop(self):
+    dt = 0.02
+    vdas = VirtualDAS(dt=dt)
+    v_ego = 15.0
+    regen_target = -0.4
+    departure_target = 0.34
+    previous_di = vdas._feedforward(0.0, v_ego)
+    vdas.reset(a_init=0.0, pedal_di_init=previous_di)
+    braking_accelerations = [vdas.jerk_limiter.a_limited]
+
+    # Model a lead disappearing while regen is still ramping in, rather than
+    # after the requested deceleration has already settled to zero jerk.
+    for _ in range(7):
+      previous_di = vdas.update(
+        regen_target,
+        v_ego=v_ego,
+        prev_pedal_di=previous_di,
+        a_ego=0.0,
+        freeze_integrator=True,
+      )
+      braking_accelerations.append(vdas.jerk_limiter.a_limited)
+
+    pre_departure_jerk = (braking_accelerations[-1] - braking_accelerations[-2]) / dt
+    assert pre_departure_jerk == pytest.approx(-2.5)
+
+    limited_accelerations = [vdas.jerk_limiter.a_limited]
+    pedal_commands = [previous_di]
+    for _ in range(200):
+      previous_di = vdas.update(
+        departure_target,
+        v_ego=v_ego,
+        prev_pedal_di=previous_di,
+        a_ego=limited_accelerations[0],
+        freeze_integrator=True,
+      )
+      limited_accelerations.append(vdas.jerk_limiter.a_limited)
+      pedal_commands.append(previous_di)
+
+    jerks = np.diff(limited_accelerations) / dt
+    snaps = np.diff(np.concatenate(([pre_departure_jerk], jerks))) / dt
+    pedal_steps = np.diff(pedal_commands)
+
+    assert np.max(jerks) <= 1.0 + 1e-9
+    assert np.max(np.abs(snaps)) <= COMFORT_SNAP_MAX + 1e-9
+    assert np.max(pedal_steps) < PEDAL_RAMP_RATE_UP - 1e-6
+    assert limited_accelerations[-1] == pytest.approx(departure_target)
 
   def test_reset_clears_state(self):
     vdas = VirtualDAS(dt=0.02)
@@ -695,5 +900,29 @@ class TestVDASDomainBoundaries:
     monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.nap_conf', controller_conf)
     controller.update(cc, cs, frame=1, tesla_can=None, can_bus_party=0)
 
+    assert controller.vdas.a_ego_filter.x == pytest.approx(0.0)
+    assert controller.vdas.prev_a_ego_filtered == pytest.approx(0.0)
+
+    cc.longActive = True
+    controller.update(cc, cs, frame=3, tesla_can=None, can_bus_party=0)
+
     assert controller.vdas.a_ego_filter.x == pytest.approx(measured_acceleration)
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration)
+
+  def test_preserved_grade_reset_keeps_acceleration_filter_in_corrected_domain(self):
+    import math
+
+    vdas = VirtualDAS(dt=0.02)
+    measured_acceleration = 0.1
+    orientation_ned = [0.0, math.radians(5.0), 0.0]
+    for _ in range(300):
+      vdas.observe(measured_acceleration, orientation_ned)
+
+    corrected_acceleration = vdas.a_ego_filter.x
+    assert corrected_acceleration < -0.7
+
+    vdas.reset(a_init=measured_acceleration, preserve_grade=True)
+
+    assert vdas.a_ego_filter.x == pytest.approx(corrected_acceleration)
+    assert vdas.prev_a_ego_filtered == pytest.approx(corrected_acceleration)
+    assert vdas.jerk_limiter.a_limited == pytest.approx(measured_acceleration)
