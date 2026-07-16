@@ -205,7 +205,7 @@ struct CarState {
   vehicleSensorsInvalid @52 :Bool;  # invalid steering angle readings, etc.
   lowSpeedAlert @56 :Bool;  # lost steering control due to a dynamic min steering speed
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
-  pedalMaxRegen @61 :Bool;  # pedal at max regen, driver should use brake for more decel
+  pedalMaxRegen @61 :Bool;  # regen near limit and sustained decel demand is not being delivered
   pedalLongActive @62 :Bool;  # Pre-AP pedal longitudinal mode is active (enableLongControl)
   teslaCCEngaged @63 :Bool;     # NAP: rising edge of stock Tesla CC engaging (no-pedal mode)
   teslaCCDisengaged @64 :Bool;  # NAP: falling edge of stock Tesla CC

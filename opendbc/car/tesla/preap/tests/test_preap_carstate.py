@@ -50,6 +50,15 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
                   "pedalMaxRegen", "pedalLongActive"):
       self.assertTrue(hasattr(CS, field), f"CarState schema missing {field}")
 
+  def test_regen_brake_prompt_uses_controller_level_state(self):
+    CI = self._make_interface()
+    CI.CS.pedal_brake_required = True
+    self.assertTrue(CI.update([]).pedalMaxRegen)
+
+    CI.CS.pedal_brake_required = False
+    CI.CS.pccEvent = "pedalMaxRegen"
+    self.assertFalse(CI.update([]).pedalMaxRegen)
+
   def test_hands_on_level_two_disengages(self):
     for hands_on_level, should_disengage in ((1, False), (2, True), (3, True)):
       with self.subTest(hands_on_level=hands_on_level):

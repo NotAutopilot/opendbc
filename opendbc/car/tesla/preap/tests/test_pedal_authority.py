@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from opendbc.car.tesla.preap.carcontroller import PreAPLongController
+from opendbc.car.tesla.preap.carcontroller import (
+  REGEN_DECEL_PROMPT_DWELL_UPDATES,
+  PreAPLongController,
+  RegenDecelMonitor,
+)
 from opendbc.car.tesla.preap.engagement import PreAPEngagement
 from opendbc.car.tesla.preap.nap_conf import PEDAL_DI_ZERO, PEDAL_MAX_VALUES
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
@@ -217,3 +221,87 @@ def test_gas_override_timeout_rearm_has_no_launch(controller_env):
   assert first_command.command < PEDAL_RAMP_RATE_UP - 1.0
   assert controller.vdas.jerk_limiter.a_limited < 0.2
   assert controller.vdas.grade_estimator.pitch_lp.x > 0.02
+
+
+def test_max_regen_does_not_prompt_when_requested_decel_is_delivered(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+  cc.actuators.accel = -1.5
+  cs.out.aEgo = -1.5
+
+  max_regen_prompted = False
+  for frame in range(0, 400, 2):
+    # CarController clears edge events before each PreAP controller update.
+    cs.pccEvent = None
+    controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+    max_regen_prompted |= cs.pccEvent == "pedalMaxRegen"
+
+  assert controller.prev_pedal_di < -4.75
+  assert not max_regen_prompted
+
+
+def test_controller_prompts_when_full_regen_under_delivers_while_moving(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+  cc.actuators.accel = -1.5
+  cs.out.aEgo = -0.5
+
+  for frame in range(0, 400, 2):
+    controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+    if cs.pedal_brake_required:
+      break
+
+  assert controller.prev_pedal_di <= -4.5
+  assert controller.regen_decel_monitor.active
+  assert cs.pedal_brake_required
+
+
+def _update_regen_monitor(monitor, *, actual_accel=-0.5, v_ego=15.0,
+                          pedal_di=-5.0, pedal_control_active=True):
+  return monitor.update(
+    pedal_control_active=pedal_control_active,
+    in_engage_grace=False,
+    pedal_di=pedal_di,
+    limited_accel=-1.5,
+    actual_accel=actual_accel,
+    v_ego=v_ego,
+  )
+
+
+def test_regen_prompt_requires_sustained_unmet_decel_while_moving():
+  monitor = RegenDecelMonitor()
+
+  for _ in range(REGEN_DECEL_PROMPT_DWELL_UPDATES - 1):
+    assert not _update_regen_monitor(monitor)
+
+  assert _update_regen_monitor(monitor)
+
+
+def test_regen_prompt_does_not_fire_at_standstill():
+  monitor = RegenDecelMonitor()
+
+  for _ in range(2 * REGEN_DECEL_PROMPT_DWELL_UPDATES):
+    assert not _update_regen_monitor(monitor, v_ego=0.0)
+
+
+def test_regen_prompt_uses_hysteresis_and_clears_when_decel_recovers():
+  monitor = RegenDecelMonitor()
+  for _ in range(REGEN_DECEL_PROMPT_DWELL_UPDATES):
+    _update_regen_monitor(monitor)
+  assert monitor.active
+
+  # These values have crossed back over the trigger thresholds, but remain
+  # inside the clear thresholds so sensor noise cannot chatter the prompt.
+  assert _update_regen_monitor(monitor, actual_accel=-1.25, v_ego=1.5, pedal_di=-4.25)
+
+  assert not _update_regen_monitor(monitor, actual_accel=-1.35)
+  assert not monitor.active
+
+
+def test_regen_prompt_clears_as_soon_as_pedal_control_releases():
+  monitor = RegenDecelMonitor()
+  for _ in range(REGEN_DECEL_PROMPT_DWELL_UPDATES):
+    _update_regen_monitor(monitor)
+  assert monitor.active
+
+  assert not _update_regen_monitor(monitor, pedal_control_active=False)

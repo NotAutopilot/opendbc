@@ -172,7 +172,9 @@ def update_preap(cs, can_parsers):
   cs.das_control = None
   cs.cruise_enabled_prev = ret.cruiseState.enabled
 
-  ret.pedalMaxRegen = cs.pccEvent == "pedalMaxRegen"
+  # Level state from the longitudinal controller: regen is near its limit and
+  # sustained measured deceleration is not meeting the shaped request.
+  ret.pedalMaxRegen = bool(getattr(cs, 'pedal_brake_required', False))
   ret.teslaCCEngaged = cs.pccEvent == "teslaCCEngaged"
   ret.teslaCCDisengaged = cs.pccEvent == "teslaCCDisengaged"
   ret.teslaCCNotArmed = (

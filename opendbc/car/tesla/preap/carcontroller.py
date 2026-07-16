@@ -25,6 +25,62 @@ def init_preap_can(dbc_names, packers):
 # positive accel on frame 1). Inspired by Tinkla's proportional ramp.
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 
+# The pedal controller updates at 50 Hz. Only prompt after the regen rail has
+# been near its physical limit while measured deceleration trails the shaped
+# request for a sustained interval. Trigger and clear thresholds are separated
+# so ordinary acceleration-estimate noise cannot chatter a driver prompt.
+REGEN_DECEL_PROMPT_DWELL_UPDATES = 25  # 0.5s at 50Hz
+REGEN_DECEL_PROMPT_MIN_SPEED = 2.0  # m/s; do not prompt for a stopped/settling car
+REGEN_DECEL_PROMPT_CLEAR_SPEED = 1.0  # m/s
+REGEN_DECEL_SHORTFALL_TRIGGER = 0.4  # m/s²
+REGEN_DECEL_SHORTFALL_CLEAR = 0.2  # m/s²
+REGEN_LIMIT_TRIGGER_DI = PEDAL_DI_MIN + 0.5
+REGEN_LIMIT_CLEAR_DI = PEDAL_DI_MIN + 1.0
+
+
+class RegenDecelMonitor:
+  """Detect when the regen rail cannot deliver the requested deceleration."""
+
+  def __init__(self):
+    self.active = False
+    self.under_delivery_updates = 0
+
+  def reset(self):
+    self.active = False
+    self.under_delivery_updates = 0
+
+  def update(self, *, pedal_control_active, in_engage_grace, pedal_di,
+             limited_accel, actual_accel, v_ego):
+    values_are_finite = all(np.isfinite((pedal_di, limited_accel, actual_accel, v_ego)))
+    decel_shortfall = actual_accel - limited_accel
+    monitoring_allowed = (
+      pedal_control_active
+      and not in_engage_grace
+      and values_are_finite
+      and limited_accel < 0.0
+    )
+
+    if self.active:
+      keep_prompting = (
+        monitoring_allowed
+        and v_ego > REGEN_DECEL_PROMPT_CLEAR_SPEED
+        and pedal_di <= REGEN_LIMIT_CLEAR_DI
+        and decel_shortfall > REGEN_DECEL_SHORTFALL_CLEAR
+      )
+      if not keep_prompting:
+        self.reset()
+      return self.active
+
+    under_delivering = (
+      monitoring_allowed
+      and v_ego >= REGEN_DECEL_PROMPT_MIN_SPEED
+      and pedal_di <= REGEN_LIMIT_TRIGGER_DI
+      and decel_shortfall >= REGEN_DECEL_SHORTFALL_TRIGGER
+    )
+    self.under_delivery_updates = self.under_delivery_updates + 1 if under_delivering else 0
+    self.active = self.under_delivery_updates >= REGEN_DECEL_PROMPT_DWELL_UPDATES
+    return self.active
+
 
 class PedalAuthorityState(Enum):
   INACTIVE = auto()
@@ -99,6 +155,7 @@ class PreAPLongController:
     self.engage_a_max = 0.0
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
+    self.regen_decel_monitor = RegenDecelMonitor()
 
   def update(self, CC, CS, frame, tesla_can, can_bus_party):
     can_sends = []
@@ -110,6 +167,10 @@ class PreAPLongController:
     pedal_factor = float(nap_conf.pedal_factor)
     pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
     pedal_long_allowed = use_pedal and pedal_transform_valid
+    if (not long_active
+        or getattr(CS, 'real_brake_pressed', False)
+        or getattr(CS.out, 'gasPressed', False)):
+      self.regen_decel_monitor.reset()
 
     # --- Engage transition ---
     requested_long_rising = (not self.prev_requested_long) and requested_long
@@ -152,6 +213,7 @@ class PreAPLongController:
       if pedal_action in (PedalCommandAction.RELEASE, PedalCommandAction.RESET):
         can_sends.append(tesla_can.create_pedal_command(0, enable=0))
         self.prev_pedal_di = 0.0
+        self.regen_decel_monitor.reset()
 
       elif pedal_action == PedalCommandAction.ENABLE:
         try:
@@ -170,15 +232,25 @@ class PreAPLongController:
             orientation_ned=list(CC.orientationNED))
           pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
           can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
-
-          if self.prev_pedal_di <= 0.95 * PEDAL_DI_MIN and not in_engage_grace:
-            CS.pccEvent = "pedalMaxRegen"
+          self.regen_decel_monitor.update(
+            pedal_control_active=True,
+            in_engage_grace=in_engage_grace,
+            pedal_di=self.prev_pedal_di,
+            limited_accel=self.vdas.jerk_limiter.a_limited,
+            actual_accel=CS.out.aEgo,
+            v_ego=CS.out.vEgo,
+          )
 
         except Exception:
           carlog.exception("Pre-AP pedal command failed; sending disabled")
           self.pedal_authority.command_failed()
           can_sends.append(tesla_can.create_pedal_command(0, enable=0))
           self.prev_pedal_di = 0.0
+          self.regen_decel_monitor.reset()
+
+      else:
+        self.regen_decel_monitor.reset()
 
     self.prev_preap_long_active = long_active
+    CS.pedal_brake_required = self.regen_decel_monitor.active
     return can_sends
