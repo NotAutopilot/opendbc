@@ -199,16 +199,20 @@ class PreAPLongController:
     self.prev_requested_long = requested_long
 
     if frame % 2 == 0:
-      # Update zero-torque learning
-      if use_pedal:
-        get_zero_torque().update(CS.pedal.torque_level, self.prev_pedal_di, CS.out.vEgo)
-
       if use_pedal and not long_active:
         self.vdas.observe(CS.out.aEgo, list(CC.orientationNED))
 
       brake_pressed = getattr(CS, 'real_brake_pressed', False)
       authority_requested = pedal_long_allowed and long_active and not brake_pressed and not CS.out.gasPressed
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
+      if use_pedal:
+        get_zero_torque().update(
+          CS.pedal.torque_level,
+          self.prev_pedal_di,
+          CS.out.vEgo,
+          control_active=pedal_action == PedalCommandAction.ENABLE,
+          accel_command=self.vdas.jerk_limiter.a_limited,
+        )
 
       if pedal_action in (PedalCommandAction.RELEASE, PedalCommandAction.RESET):
         can_sends.append(tesla_can.create_pedal_command(0, enable=0))

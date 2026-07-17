@@ -1,9 +1,11 @@
+from math import isfinite
+
 from numpy import interp, clip
 
 from opendbc.car.tesla.preap.nap_conf import (
   nap_conf,
   PEDAL_DI_MIN, PEDAL_DI_ZERO,
-  PEDAL_BP, PEDAL_MAX_VALUES,
+  PEDAL_BP,
   ACCEL_MAX, REGEN_MAX,
 )
 from opendbc.car.common.conversions import Conversions as CV
@@ -27,6 +29,8 @@ PEDAL_HYST_GAP = 1.0  # DI units
 TORQUE_LEVEL_ACC = 0.0    # upper torque bound for zero-torque detection
 TORQUE_LEVEL_DECEL = -30.0  # lower bound — below this is real braking
 ZERO_TORQUE_MIN_SPEED = 10.0 * CV.MPH_TO_MS  # only learn above 10 mph
+ZERO_TORQUE_SETTLE_UPDATES = 25  # 0.5s at 50 Hz, longer than the configured 0.4s actuator delay
+ZERO_TORQUE_ADAPT_RATE = 0.1  # DI per update
 
 
 class PedalZeroTorque:
@@ -34,19 +38,42 @@ class PedalZeroTorque:
 
   def __init__(self):
     self.value = PEDAL_DI_ZERO  # start at coast, refine from real data
+    self._target = PEDAL_DI_ZERO
     self._best_torque = TORQUE_LEVEL_DECEL
+    self._settled_updates = 0
 
-  def update(self, torque_level: float, current_pedal_di: float, v_ego: float):
+  def update(self, torque_level: float, current_pedal_di: float, v_ego: float, *,
+             control_active: bool, accel_command: float):
     """Call every pedal frame with the current motor torque and pedal position."""
-    if v_ego < ZERO_TORQUE_MIN_SPEED:
-      return
+    observation_valid = (
+      control_active
+      and all(isfinite(value) for value in (torque_level, current_pedal_di, v_ego, accel_command))
+      and v_ego >= ZERO_TORQUE_MIN_SPEED
+      and abs(accel_command) < ACCEL_DEADBAND
+    )
+    if observation_valid:
+      self._settled_updates += 1
+    else:
+      self._settled_updates = 0
+      self._best_torque = TORQUE_LEVEL_DECEL
 
     # If torque is between decel and accel thresholds and closer to zero
     # than the best we've seen, this pedal position is near zero-torque
-    if (TORQUE_LEVEL_DECEL < torque_level < TORQUE_LEVEL_ACC
+    if (self._settled_updates >= ZERO_TORQUE_SETTLE_UPDATES
+        and TORQUE_LEVEL_DECEL < torque_level < TORQUE_LEVEL_ACC
         and abs(torque_level) < abs(self._best_torque)):
-      self.value = current_pedal_di
+      self._target = current_pedal_di
       self._best_torque = torque_level
+
+    # A previously accepted target cannot move the live feedforward anchor
+    # across an authority or command boundary. Resume only after the new
+    # coast observation has independently settled.
+    if self._settled_updates >= ZERO_TORQUE_SETTLE_UPDATES:
+      self.value = float(clip(
+        self._target,
+        self.value - ZERO_TORQUE_ADAPT_RATE,
+        self.value + ZERO_TORQUE_ADAPT_RATE,
+      ))
 
   def get(self, v_ego: float) -> float:
     """Returns the zero-torque DI value. Falls back to DI=0 at low speed."""

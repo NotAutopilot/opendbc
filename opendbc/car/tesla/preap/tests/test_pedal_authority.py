@@ -11,7 +11,10 @@ from opendbc.car.tesla.preap.engagement import PreAPEngagement
 from opendbc.car.tesla.preap.nap_conf import PEDAL_DI_ZERO, PEDAL_MAX_VALUES
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
 from opendbc.car.tesla.preap.teslacan import GAS_COMMAND_ID, PEDAL_D, PEDAL_M1, TeslaCANPreAP
-from opendbc.car.tesla.pedal.controller import PEDAL_RAMP_RATE_UP
+from opendbc.car.tesla.pedal.controller import (
+  PEDAL_RAMP_RATE_UP,
+  PedalZeroTorque,
+)
 
 
 def _pedal_conf():
@@ -26,7 +29,7 @@ def _pedal_conf():
 def _zero_torque():
   return SimpleNamespace(
     get=lambda _v_ego: PEDAL_DI_ZERO,
-    update=lambda *_args: None,
+    update=lambda *_args, **_kwargs: None,
   )
 
 
@@ -192,6 +195,37 @@ def test_engage_grace_starts_on_actual_long_active_rising(controller_env):
   assert controller.preap_long_engage_frame == 460
 
 
+@pytest.mark.parametrize("engage_a_max", (0.8, 0.9, 1.0))
+def test_non_timeout_gas_override_release_has_no_launch(controller_env, monkeypatch, engage_a_max):
+  controller, cc, cs, tesla_can = controller_env
+  monkeypatch.setattr(
+    'opendbc.car.tesla.preap.carcontroller.get_preap_accel_limits',
+    lambda _v_ego: (-1.5, engage_a_max),
+  )
+  _start_gas_override(cc, cs)
+  _hold_gas_override(controller, cc, cs, tesla_can)
+
+  cs.out.gasPressed = False
+  cs.out.aEgo = 0.1
+  cc.longActive = True
+  cc.actuators.accel = 0.67
+
+  release_commands = []
+  for frame in range(460, 510, 2):
+    commands = controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+    release_commands.extend(_decode_pedal_command(command) for command in commands)
+
+  assert release_commands
+  assert all(command.enabled for command in release_commands)
+  command_steps = [
+    current.command - previous.command
+    for previous, current in zip(release_commands, release_commands[1:], strict=False)
+  ]
+  assert max(command.command for command in release_commands) < 2.0 * PEDAL_RAMP_RATE_UP
+  assert max(command_steps) < 1.0
+  assert controller.vdas.jerk_limiter.a_limited < 0.25
+
+
 def test_gas_override_timeout_rearm_has_no_launch(controller_env):
   controller, cc, cs, tesla_can = controller_env
   _start_gas_override(cc, cs)
@@ -221,6 +255,128 @@ def test_gas_override_timeout_rearm_has_no_launch(controller_env):
   assert first_command.command < PEDAL_RAMP_RATE_UP - 1.0
   assert controller.vdas.jerk_limiter.a_limited < 0.2
   assert controller.vdas.grade_estimator.pitch_lp.x > 0.02
+
+
+def test_zero_torque_anchor_converges_without_a_command_step():
+  zero_torque = PedalZeroTorque()
+
+  # Bookmark 3 spans roughly one configured actuator delay between the command
+  # transition and vehicle response, so no candidate may be accepted in 0.48s.
+  for _ in range(24):
+    zero_torque.update(
+      torque_level=-0.5,
+      current_pedal_di=6.0,
+      v_ego=17.0,
+      control_active=True,
+      accel_command=0.0,
+    )
+  assert zero_torque.value == pytest.approx(PEDAL_DI_ZERO)
+
+  zero_torque.update(
+    torque_level=-0.5,
+    current_pedal_di=6.0,
+    v_ego=17.0,
+    control_active=True,
+    accel_command=0.0,
+  )
+  assert zero_torque.value == pytest.approx(0.1)
+
+  for _ in range(100):
+    zero_torque.update(
+      torque_level=-0.5,
+      current_pedal_di=6.0,
+      v_ego=17.0,
+      control_active=True,
+      accel_command=0.0,
+    )
+  assert zero_torque.value == pytest.approx(6.0)
+
+
+def test_zero_torque_anchor_ignores_inactive_pedal_feedback():
+  zero_torque = PedalZeroTorque()
+
+  for _ in range(100):
+    zero_torque.update(
+      torque_level=-0.5,
+      current_pedal_di=6.0,
+      v_ego=17.0,
+      control_active=False,
+      accel_command=0.0,
+    )
+
+  assert zero_torque.value == pytest.approx(PEDAL_DI_ZERO)
+
+
+@pytest.mark.parametrize(
+  ("control_active", "accel_command"),
+  ((False, 0.0), (True, 0.3)),
+)
+def test_zero_torque_anchor_freezes_across_invalid_observations(control_active, accel_command):
+  zero_torque = PedalZeroTorque()
+
+  for _ in range(25):
+    zero_torque.update(
+      torque_level=-0.5,
+      current_pedal_di=6.0,
+      v_ego=17.0,
+      control_active=True,
+      accel_command=0.0,
+    )
+  frozen_value = zero_torque.value
+  assert frozen_value == pytest.approx(0.1)
+
+  for _ in range(100):
+    zero_torque.update(
+      torque_level=-0.5,
+      current_pedal_di=6.0,
+      v_ego=17.0,
+      control_active=control_active,
+      accel_command=accel_command,
+    )
+  assert zero_torque.value == pytest.approx(frozen_value)
+
+  # A newly valid observation must settle again before adaptation resumes.
+  for _ in range(24):
+    zero_torque.update(
+      torque_level=-0.5,
+      current_pedal_di=6.0,
+      v_ego=17.0,
+      control_active=True,
+      accel_command=0.0,
+    )
+  assert zero_torque.value == pytest.approx(frozen_value)
+
+  zero_torque.update(
+    torque_level=-0.5,
+    current_pedal_di=6.0,
+    v_ego=17.0,
+    control_active=True,
+    accel_command=0.0,
+  )
+  assert zero_torque.value == pytest.approx(frozen_value + 0.1)
+
+
+def test_acceleration_trace_cannot_reanchor_zero_torque_or_hit_backstop(controller_env, monkeypatch):
+  controller, cc, cs, tesla_can = controller_env
+  zero_torque = PedalZeroTorque()
+  monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.get_zero_torque', lambda: zero_torque)
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.get_zero_torque', lambda: zero_torque)
+
+  _activate_longitudinal(cc, cs)
+  cc.actuators.accel = 0.31
+  commands = []
+  for update_index, frame in enumerate(range(0, 360, 2)):
+    cs.pedal.torque_level = -0.5 if update_index == 150 else -20.0
+    sent = controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
+    commands.extend(_decode_pedal_command(command).command for command in sent)
+
+  command_steps = [current - previous for previous, current in zip(commands, commands[1:], strict=False)]
+  consecutive_backstop_steps = any(
+    first >= PEDAL_RAMP_RATE_UP - 0.1 and second >= PEDAL_RAMP_RATE_UP - 0.1
+    for first, second in zip(command_steps, command_steps[1:], strict=False)
+  )
+  assert zero_torque.value == pytest.approx(PEDAL_DI_ZERO)
+  assert not consecutive_backstop_steps
 
 
 def test_max_regen_does_not_prompt_when_requested_decel_is_delivered(controller_env):
