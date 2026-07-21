@@ -461,18 +461,23 @@ class VirtualDAS:
     a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
     self.prev_a_ego_filtered = a_ego_filtered
     self.a_ego_initialized = True
-    self.jerk_limiter.reset(a_ego)
     self.inner_pid.reset()
 
-  def reset(self, a_init: float = 0.0, pedal_di_init: float = 0.0, preserve_grade: bool = False):
-    """Reset all internal state on engage transition."""
-    self.jerk_limiter.reset(a_init)
+  def reset(self, measured_accel: float = 0.0, commanded_accel: float = 0.0,
+            pedal_di_init: float = 0.0, preserve_grade: bool = False):
+    """Reset estimator and command state independently on engage transition.
+
+    The measured acceleration seeds only the feedback estimator. The commanded
+    acceleration seeds only the jerk limiter, so vehicle motion cannot be
+    replayed as a fresh pedal request.
+    """
+    self.jerk_limiter.reset(commanded_accel)
     self.inner_pid.reset()
     if not preserve_grade:
       self.grade_estimator.reset()
     if not preserve_grade or not self.a_ego_initialized:
-      self.a_ego_filter.x = a_init
-      self.prev_a_ego_filtered = a_init
+      self.a_ego_filter.x = measured_accel
+      self.prev_a_ego_filtered = measured_accel
     self.a_ego_initialized = True
     self.prev_pedal_di = pedal_di_init
 

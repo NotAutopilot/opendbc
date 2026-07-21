@@ -320,7 +320,7 @@ class TestVirtualDAS:
     regen_target = -0.4
     departure_target = 0.34
     previous_di = vdas._feedforward(0.0, v_ego)
-    vdas.reset(a_init=0.0, pedal_di_init=previous_di)
+    vdas.reset(measured_accel=0.0, commanded_accel=0.0, pedal_di_init=previous_di)
     braking_accelerations = [vdas.jerk_limiter.a_limited]
 
     # Model a lead disappearing while regen is still ramping in, rather than
@@ -365,10 +365,63 @@ class TestVirtualDAS:
     for _ in range(50):
       vdas.update(2.0, v_ego=20.0, prev_pedal_di=vdas.prev_pedal_di)
 
-    vdas.reset(a_init=0.0, pedal_di_init=5.0)
+    vdas.reset(measured_accel=0.0, commanded_accel=0.0, pedal_di_init=5.0)
     assert vdas.jerk_limiter.a_limited == 0.0
     assert vdas.prev_pedal_di == 5.0
     assert vdas.inner_pid.i == 0.0
+
+  @pytest.mark.parametrize("measured_accel", [-0.176, 2.041])
+  def test_reset_neutral_command_does_not_replay_measured_acceleration(self, measured_accel):
+    vdas = VirtualDAS(dt=0.02)
+
+    vdas.reset(measured_accel=measured_accel, commanded_accel=0.0)
+    first_limited_accel = vdas.jerk_limiter.update(0.0)
+
+    assert vdas.a_ego_filter.x == pytest.approx(measured_accel)
+    assert vdas.prev_a_ego_filtered == pytest.approx(measured_accel)
+    assert first_limited_accel == pytest.approx(0.0)
+
+  def test_observe_does_not_mutate_commanded_jerk_state(self):
+    vdas = VirtualDAS(dt=0.02)
+    for _ in range(10):
+      vdas.jerk_limiter.update(1.0)
+    state_before_observation = (
+      vdas.jerk_limiter.a_limited,
+      vdas.jerk_limiter.j_limited,
+      vdas.jerk_limiter.state,
+      vdas.jerk_limiter.target_accel,
+    )
+
+    vdas.observe(-0.8)
+
+    assert (
+      vdas.jerk_limiter.a_limited,
+      vdas.jerk_limiter.j_limited,
+      vdas.jerk_limiter.state,
+      vdas.jerk_limiter.target_accel,
+    ) == state_before_observation
+
+  def test_positive_measurement_does_not_make_first_negative_command_positive(self):
+    vdas = VirtualDAS(dt=0.02)
+    vdas.reset(measured_accel=2.041, commanded_accel=0.0)
+
+    vdas.update(
+      -0.487,
+      v_ego=15.0,
+      prev_pedal_di=vdas.prev_pedal_di,
+      a_ego=2.041,
+      freeze_integrator=True,
+    )
+
+    assert vdas.jerk_limiter.a_limited < 0.0
+
+  def test_reset_preserves_pedal_coast_seed(self):
+    vdas = VirtualDAS(dt=0.02)
+    coast_pedal_di = 3.25
+
+    vdas.reset(measured_accel=-0.176, commanded_accel=0.0, pedal_di_init=coast_pedal_di)
+
+    assert vdas.prev_pedal_di == pytest.approx(coast_pedal_di)
 
   def test_small_accel_near_zero(self):
     """Small accel produces a small positive DI near zero-torque (smooth interp, no cliff)."""
@@ -878,6 +931,8 @@ class TestVDASDomainBoundaries:
 
   def test_engage_reset_starts_estimator_from_measured_acceleration(self, monkeypatch):
     from opendbc.car.tesla.preap.carcontroller import PreAPLongController
+    from opendbc.car.tesla.preap.engagement import PreAPEngagement
+    from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 
     controller = PreAPLongController()
     measured_acceleration = 0.7
@@ -889,25 +944,37 @@ class TestVDASDomainBoundaries:
     cs = SimpleNamespace(
       cruiseEnabled=True,
       enableLongControl=True,
-      out=SimpleNamespace(vEgo=15.0, aEgo=measured_acceleration),
+      enableJustCC=False,
+      engagement=PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750),
+      real_brake_pressed=False,
+      out=SimpleNamespace(vEgo=15.0, aEgo=measured_acceleration, gasPressed=False),
       pedal_interceptor_value=0.0,
       cruise_buttons=0,
       prev_cruise_buttons=0,
+      pedal=SimpleNamespace(available=True, interceptor_state=0, idx=1, torque_level=0.0),
       pedal_timeout=False,
+      preap_cc_cancel_needed=False,
     )
 
-    controller_conf = SimpleNamespace(use_pedal=False, pedal_factor=1.0)
+    zero_torque = SimpleNamespace(get=lambda _v_ego: PEDAL_DI_ZERO, update=lambda *_args, **_kwargs: None)
+    controller_conf = SimpleNamespace(
+      use_pedal=True,
+      pedal_factor=1.0,
+      di_to_pedal=lambda pedal_di: pedal_di,
+    )
     monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.nap_conf', controller_conf)
+    monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.get_zero_torque', lambda: zero_torque)
     controller.update(cc, cs, frame=1, tesla_can=None, can_bus_party=0)
 
     assert controller.vdas.a_ego_filter.x == pytest.approx(0.0)
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(0.0)
 
     cc.longActive = True
-    controller.update(cc, cs, frame=3, tesla_can=None, can_bus_party=0)
+    controller.update(cc, cs, frame=2, tesla_can=TeslaCANPreAP({}), can_bus_party=0)
 
     assert controller.vdas.a_ego_filter.x == pytest.approx(measured_acceleration)
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration)
+    assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.0)
 
   def test_preserved_grade_reset_keeps_acceleration_filter_in_corrected_domain(self):
     import math
@@ -921,8 +988,8 @@ class TestVDASDomainBoundaries:
     corrected_acceleration = vdas.a_ego_filter.x
     assert corrected_acceleration < -0.7
 
-    vdas.reset(a_init=measured_acceleration, preserve_grade=True)
+    vdas.reset(measured_accel=measured_acceleration, commanded_accel=0.0, preserve_grade=True)
 
     assert vdas.a_ego_filter.x == pytest.approx(corrected_acceleration)
     assert vdas.prev_a_ego_filtered == pytest.approx(corrected_acceleration)
-    assert vdas.jerk_limiter.a_limited == pytest.approx(measured_acceleration)
+    assert vdas.jerk_limiter.a_limited == pytest.approx(0.0)

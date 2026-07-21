@@ -68,6 +68,14 @@ class CarState(CarStateBase):
       self.pedal_interceptor_value = 0.0
       self.pedal_timeout = True
       self.pccEvent = None
+      self.pedal_authority_requested = False
+      self.pedal_authority_active = False
+      self.pedal_authority_state = 0
+      self.pedal_authority_action = 0
+      self.pedal_command_counter = 0
+      self.pedal_first_enabled_mono_time = 0
+      self.vdas_limited_accel = 0.0
+      self.pedal_command_di = 0.0
 
   def update_button_enable(self, buttonEvents):
     # Pre-AP engagement is managed entirely by the PreAPEngagement FSM.
@@ -335,7 +343,10 @@ class CarState(CarStateBase):
           ap_pt_messages,
           ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain
         ),
-        Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], chassis_messages, CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
+        Bus.chassis: CANParser(
+          DBC[CP.carFingerprint][Bus.chassis], chassis_messages,
+          CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party,
+        ),
       }
 
     return {

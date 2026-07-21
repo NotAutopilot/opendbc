@@ -46,7 +46,7 @@ class CarController(CarControllerBase):
 
   def update(self, CC, CS, now_nanos):
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
-      return self._update_preap(CC, CS)
+      return self._update_preap(CC, CS, now_nanos)
 
     actuators = CC.actuators
     can_sends = []
@@ -89,7 +89,7 @@ class CarController(CarControllerBase):
     self.frame += 1
     return new_actuators, can_sends
 
-  def _update_preap(self, CC, CS):
+  def _update_preap(self, CC, CS, now_nanos):
     actuators = CC.actuators
     can_sends = []
 
@@ -112,7 +112,7 @@ class CarController(CarControllerBase):
     # (i.e. Comma Pedal present). May write CS.preap_cc_cancel_needed when
     # pedal mode wants to drop a running stock CC — consumed by stock_cc below.
     if self.CP.openpilotLongitudinalControl:
-      can_sends.extend(self.preap_long.update(CC, CS, self.frame, self.tesla_can, CANBUS.party))
+      can_sends.extend(self.preap_long.update(CC, CS, self.frame, self.tesla_can, CANBUS.party, now_nanos))
 
     # Stock-CC stalk spoofs (CANCEL / SET_ACCEL). Independent of op-long —
     # the engagement FSM publishes its intent through CarState flags and the

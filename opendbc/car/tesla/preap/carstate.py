@@ -183,7 +183,17 @@ def update_preap(cs, can_parsers):
     and cs.enableLongControl
     and cs.di_cruise_state not in ("STANDBY", "ENABLED")
   )
-  ret.pedalLongActive = cs.enableLongControl and nap_conf.use_pedal
+  ret.pedalLongActive = bool(getattr(cs, 'pedal_authority_active', False)) and nap_conf.use_pedal
+  ret.pedalAuthorityRequested = bool(getattr(cs, 'pedal_authority_requested', False))
+  ret.pedalAuthorityState = int(getattr(cs, 'pedal_authority_state', 0)) & 0xFF
+  ret.pedalAuthorityAction = int(getattr(cs, 'pedal_authority_action', 0)) & 0xFF
+  ret.pedalCommandCounter = int(getattr(cs, 'pedal_command_counter', 0)) & 0xFF
+  ret.pedalFeedbackState = int(cs.pedal.interceptor_state) & 0xFF
+  ret.pedalFeedbackCounter = int(cs.pedal.idx) & 0xFF
+  ret.pedalFirstEnabledMonoTime = max(0, int(getattr(cs, 'pedal_first_enabled_mono_time', 0)))
+  ret.vdasLimitedAccel = float(getattr(cs, 'vdas_limited_accel', 0.0))
+  ret.pedalCommandDi = float(getattr(cs, 'pedal_command_di', 0.0))
+  ret.pedalAuthorityFailed = bool(cs.engagement.pedal_unavailable)
 
   return ret
 

@@ -1,4 +1,4 @@
-from enum import Enum, auto
+from enum import IntEnum
 
 import numpy as np
 
@@ -82,60 +82,82 @@ class RegenDecelMonitor:
     return self.active
 
 
-class PedalAuthorityState(Enum):
-  INACTIVE = auto()
-  ACTIVE = auto()
-  WAITING_FOR_FEEDBACK = auto()
+class PedalAuthorityState(IntEnum):
+  INACTIVE = 0
+  ACQUIRING = 1
+  ACTIVE = 2
+  FAILED = 3
 
 
-class PedalCommandAction(Enum):
-  NONE = auto()
-  ENABLE = auto()
-  RELEASE = auto()
-  RESET = auto()
+class PedalCommandAction(IntEnum):
+  NONE = 0
+  RESET = 1
+  ACQUIRE = 2
+  ENABLE = 3
+  RELEASE = 4
+  FAILURE = 5
 
 
 class PedalAuthority:
   """Owns the pedal command-authority lifecycle."""
 
+  MAX_RESET_ATTEMPTS = 4
+
   def __init__(self):
     self.state = PedalAuthorityState.INACTIVE
     self.reset_feedback_counter = None
+    self.reset_attempts = 0
+
+  def _clear_acquisition(self):
+    self.reset_feedback_counter = None
+    self.reset_attempts = 0
+
+  def _start_acquisition(self, feedback):
+    self.state = PedalAuthorityState.ACQUIRING
+    self.reset_feedback_counter = feedback.idx
+    self.reset_attempts = 1
+    return PedalCommandAction.RESET
 
   def update(self, authority_requested, feedback):
     if not authority_requested:
       action = PedalCommandAction.RELEASE if self.state == PedalAuthorityState.ACTIVE else PedalCommandAction.NONE
       self.state = PedalAuthorityState.INACTIVE
-      self.reset_feedback_counter = None
+      self._clear_acquisition()
       return action
+
+    if self.state == PedalAuthorityState.FAILED:
+      return PedalCommandAction.NONE
 
     feedback_healthy = feedback.available and feedback.interceptor_state == 0
     if self.state == PedalAuthorityState.ACTIVE:
       if feedback_healthy:
         return PedalCommandAction.ENABLE
-      self.state = PedalAuthorityState.WAITING_FOR_FEEDBACK
-      self.reset_feedback_counter = feedback.idx
-      return PedalCommandAction.RESET
+      return self._start_acquisition(feedback)
 
-    if self.state == PedalAuthorityState.WAITING_FOR_FEEDBACK:
+    if self.state == PedalAuthorityState.ACQUIRING:
       feedback_advanced = feedback.idx != self.reset_feedback_counter
       if feedback_healthy and feedback_advanced:
         self.state = PedalAuthorityState.ACTIVE
-        self.reset_feedback_counter = None
-        return PedalCommandAction.ENABLE
-      return PedalCommandAction.NONE
+        self._clear_acquisition()
+        return PedalCommandAction.ACQUIRE
+
+      if self.reset_attempts < self.MAX_RESET_ATTEMPTS:
+        self.reset_attempts += 1
+        return PedalCommandAction.RESET
+
+      self.state = PedalAuthorityState.FAILED
+      self._clear_acquisition()
+      return PedalCommandAction.FAILURE
 
     if feedback_healthy:
       self.state = PedalAuthorityState.ACTIVE
-      return PedalCommandAction.ENABLE
+      return PedalCommandAction.ACQUIRE
 
-    self.state = PedalAuthorityState.WAITING_FOR_FEEDBACK
-    self.reset_feedback_counter = feedback.idx
-    return PedalCommandAction.RESET
+    return self._start_acquisition(feedback)
 
   def command_failed(self):
-    self.state = PedalAuthorityState.INACTIVE
-    self.reset_feedback_counter = None
+    self.state = PedalAuthorityState.FAILED
+    self._clear_acquisition()
 
 
 class PreAPLongController:
@@ -148,7 +170,6 @@ class PreAPLongController:
   def __init__(self):
     self.prev_pedal_di = 0.0
     self.prev_requested_long = False
-    self.prev_preap_long_active = False
     self.preap_long_engage_frame = -1000000
     # Snapshot of max-accel-at-engage-speed; used as the deterministic
     # ceiling for the grace-period ramp. Set fresh on each engage rising edge.
@@ -157,7 +178,28 @@ class PreAPLongController:
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
 
-  def update(self, CC, CS, frame, tesla_can, can_bus_party):
+  @staticmethod
+  def _handle_pedal_unavailable(CS):
+    engagement = getattr(CS, 'engagement', None)
+    if engagement is None:
+      carlog.error("Pre-AP pedal authority failed without engagement state")
+      return
+
+    engagement.handle_pedal_unavailable()
+    # Keep the controller-facing bridge coherent immediately. CarState will
+    # refresh these fields from engagement again on its next update.
+    CS.cruiseEnabled = engagement.cruiseEnabled
+    CS.enableLongControl = engagement.enableLongControl
+    CS.enableJustCC = engagement.enableJustCC
+    CS.pedal_speed_kph = engagement.pedal_speed_kph
+    CS.longCtrlEvent = engagement.longCtrlEvent
+
+  @staticmethod
+  def _append_pedal_command(can_sends, CS, command):
+    can_sends.append(command)
+    CS.pedal_command_counter = command[1][4] & 0x0F
+
+  def update(self, CC, CS, frame, tesla_can, can_bus_party, now_nanos=0):
     can_sends = []
     actuators = CC.actuators
 
@@ -172,18 +214,15 @@ class PreAPLongController:
         or getattr(CS.out, 'gasPressed', False)):
       self.regen_decel_monitor.reset()
 
-    # --- Engage transition ---
     requested_long_rising = (not self.prev_requested_long) and requested_long
-    long_active_rising = (not self.prev_preap_long_active) and long_active
-    if long_active_rising:
-      self.preap_long_engage_frame = frame
+    if requested_long_rising:
+      # Seed the disabled acquisition frames at coast, but do not initialize
+      # command dynamics until feedback proves the pedal accepted authority.
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
-      self.vdas.reset(a_init=CS.out.aEgo, pedal_di_init=self.prev_pedal_di, preserve_grade=True)
-      _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
-
-    engage_elapsed_frames = frame - self.preap_long_engage_frame
-    in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
+      CS.pedal_first_enabled_mono_time = 0
+    elif not hasattr(CS, 'pedal_first_enabled_mono_time'):
+      CS.pedal_first_enabled_mono_time = 0
 
     # --- Stock CC cancel triggers from pedal mode ---
     # Engage / disengage / button-press in pedal mode all need to drop stock
@@ -199,28 +238,48 @@ class PreAPLongController:
     self.prev_requested_long = requested_long
 
     if frame % 2 == 0:
-      if use_pedal and not long_active:
-        self.vdas.observe(CS.out.aEgo, list(CC.orientationNED))
-
       brake_pressed = getattr(CS, 'real_brake_pressed', False)
       authority_requested = pedal_long_allowed and long_active and not brake_pressed and not CS.out.gasPressed
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
+      in_engage_grace = False
+
+      if pedal_action == PedalCommandAction.ACQUIRE:
+        self.preap_long_engage_frame = frame
+        zero_torque_di = get_zero_torque().get(CS.out.vEgo)
+        self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
+        self.vdas.reset(
+          measured_accel=CS.out.aEgo,
+          commanded_accel=0.0,
+          pedal_di_init=self.prev_pedal_di,
+          preserve_grade=True,
+        )
+        _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
+
+      if use_pedal and pedal_action not in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
+        self.vdas.observe(CS.out.aEgo, list(CC.orientationNED))
+
       if use_pedal:
         get_zero_torque().update(
           CS.pedal.torque_level,
           self.prev_pedal_di,
           CS.out.vEgo,
-          control_active=pedal_action == PedalCommandAction.ENABLE,
+          control_active=pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE),
           accel_command=self.vdas.jerk_limiter.a_limited,
         )
 
-      if pedal_action in (PedalCommandAction.RELEASE, PedalCommandAction.RESET):
-        can_sends.append(tesla_can.create_pedal_command(0, enable=0))
+      if pedal_action == PedalCommandAction.RESET:
+        self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
+        self.regen_decel_monitor.reset()
+
+      elif pedal_action == PedalCommandAction.RELEASE:
+        self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
         self.prev_pedal_di = 0.0
         self.regen_decel_monitor.reset()
 
-      elif pedal_action == PedalCommandAction.ENABLE:
+      elif pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
         try:
+          engage_elapsed_frames = frame - self.preap_long_engage_frame
+          in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
           accel_request = float(actuators.accel)
           if in_engage_grace:
             # Cap at grace_progress * engage_a_max so the ceiling is the
@@ -235,7 +294,10 @@ class PreAPLongController:
             a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
             orientation_ned=list(CC.orientationNED))
           pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
-          can_sends.append(tesla_can.create_pedal_command(pedal_cmd, enable=1))
+          command = tesla_can.create_pedal_command(pedal_cmd, enable=1)
+          self._append_pedal_command(can_sends, CS, command)
+          if pedal_action == PedalCommandAction.ACQUIRE and CS.pedal_first_enabled_mono_time == 0:
+            CS.pedal_first_enabled_mono_time = now_nanos
           self.regen_decel_monitor.update(
             pedal_control_active=True,
             in_engage_grace=in_engage_grace,
@@ -248,13 +310,33 @@ class PreAPLongController:
         except Exception:
           carlog.exception("Pre-AP pedal command failed; sending disabled")
           self.pedal_authority.command_failed()
-          can_sends.append(tesla_can.create_pedal_command(0, enable=0))
+          self._handle_pedal_unavailable(CS)
+          self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
           self.prev_pedal_di = 0.0
           self.regen_decel_monitor.reset()
+          pedal_action = PedalCommandAction.FAILURE
+
+      elif pedal_action == PedalCommandAction.FAILURE:
+        carlog.error("Pre-AP pedal authority acquisition failed")
+        self._handle_pedal_unavailable(CS)
+        self.regen_decel_monitor.reset()
 
       else:
         self.regen_decel_monitor.reset()
 
-    self.prev_preap_long_active = long_active
+      CS.pedal_authority_requested = authority_requested
+      CS.pedal_authority_active = (
+        self.pedal_authority.state == PedalAuthorityState.ACTIVE
+        and not CS.engagement.pedal_unavailable
+      )
+      # State and action remain live. The separate engagement-owned failure
+      # field is latched so a 10 Hz qlog sample cannot miss the incident.
+      CS.pedal_authority_state = int(self.pedal_authority.state)
+      CS.pedal_authority_action = int(pedal_action)
+
+    CS.vdas_limited_accel = float(self.vdas.jerk_limiter.a_limited)
+    # This is the controller's DI-domain command/seed. RESET preserves the
+    # coast seed even though its disabled wire command carries zero.
+    CS.pedal_command_di = float(self.prev_pedal_di)
     CS.pedal_brake_required = self.regen_decel_monitor.active
     return can_sends

@@ -206,11 +206,21 @@ struct CarState {
   lowSpeedAlert @56 :Bool;  # lost steering control due to a dynamic min steering speed
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
   pedalMaxRegen @61 :Bool;  # regen near limit and sustained decel demand is not being delivered
-  pedalLongActive @62 :Bool;  # Pre-AP pedal longitudinal mode is active (enableLongControl)
+  pedalLongActive @62 :Bool;  # Pre-AP pedal firmware has accepted longitudinal authority
   teslaCCEngaged @63 :Bool;     # NAP: rising edge of stock Tesla CC engaging (no-pedal mode)
   teslaCCDisengaged @64 :Bool;  # NAP: falling edge of stock Tesla CC
   teslaCCNotArmed @65 :Bool;    # NAP: lateral engaged but DI_cruiseState != STANDBY/ENABLED
   turnSignalStalkState @66 :UInt8;  # NAP: physical turn-signal lever, 0=idle, 1=left, 2=right
+  pedalAuthorityRequested @67 :Bool;  # NAP: pedal command authority is currently requested
+  pedalAuthorityState @68 :UInt8;  # NAP: PedalAuthorityState numeric value
+  pedalAuthorityAction @69 :UInt8;  # NAP: most recent PedalCommandAction numeric value
+  pedalCommandCounter @70 :UInt8;  # NAP: counter from the most recently transmitted pedal command
+  pedalFeedbackState @71 :UInt8;  # NAP: Comma Pedal firmware state
+  pedalFeedbackCounter @72 :UInt8;  # NAP: Comma Pedal feedback counter
+  pedalFirstEnabledMonoTime @73 :UInt64;  # NAP: monotonic timestamp of first enabled command for this request
+  vdasLimitedAccel @74 :Float32;  # NAP: jerk-limited VDAS acceleration command
+  pedalCommandDi @75 :Float32;  # NAP: controller DI-domain command/seed; RESET wire frames carry zero
+  pedalAuthorityFailed @76 :Bool;  # NAP: bounded pedal authority acquisition failed
 
   # cruise state
   cruiseState @10 :CruiseState;

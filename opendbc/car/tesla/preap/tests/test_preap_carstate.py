@@ -7,11 +7,9 @@ These writes look like ordinary Python assignment but silently require the
 schema to agree; the first update call crashes card with AttributeError, which
 leaves the panda in elm327 safe mode and surfaces as 'Unknown Vehicle Variant'
 (canError) in the UI.
-
-See vault/lessons/agent-failure-modes/capnp-schema-write-without-field.md
-and the regression report d0cdc986c5d023f5|4a5ffc1c21 (2026-04-20).
 """
 import unittest
+from unittest.mock import patch
 
 from opendbc.can import CANPacker
 from opendbc.car import CanData
@@ -47,7 +45,10 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CI = self._make_interface()
     CS = CI.update([])
     for field in ("teslaCCEngaged", "teslaCCDisengaged", "teslaCCNotArmed",
-                  "pedalMaxRegen", "pedalLongActive"):
+                  "pedalMaxRegen", "pedalLongActive", "pedalAuthorityRequested",
+                  "pedalAuthorityState", "pedalAuthorityAction", "pedalCommandCounter",
+                  "pedalFeedbackState", "pedalFeedbackCounter", "pedalFirstEnabledMonoTime",
+                  "vdasLimitedAccel", "pedalCommandDi", "pedalAuthorityFailed"):
       self.assertTrue(hasattr(CS, field), f"CarState schema missing {field}")
 
   def test_regen_brake_prompt_uses_controller_level_state(self):
@@ -58,6 +59,44 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CI.CS.pedal_brake_required = False
     CI.CS.pccEvent = "pedalMaxRegen"
     self.assertFalse(CI.update([]).pedalMaxRegen)
+
+  def test_pedal_authority_diagnostics_publish_owned_state(self):
+    CI = self._make_interface()
+    CI.CS.pedal_authority_requested = True
+    CI.CS.pedal_authority_state = 2
+    CI.CS.pedal_authority_action = 3
+    CI.CS.pedal_command_counter = 14
+    CI.CS.pedal_first_enabled_mono_time = 123456789
+    CI.CS.vdas_limited_accel = -0.25
+    CI.CS.pedal_command_di = 3.5
+    CI.CS.pedal.interceptor_state = 5
+    CI.CS.pedal.idx = 11
+    CI.CS.engagement.pedal_unavailable = True
+
+    with patch.object(CI.CS.pedal, "update"):
+      CS = CI.update([])
+
+    self.assertTrue(CS.pedalAuthorityRequested)
+    self.assertEqual(CS.pedalAuthorityState, 2)
+    self.assertEqual(CS.pedalAuthorityAction, 3)
+    self.assertEqual(CS.pedalCommandCounter, 14)
+    self.assertEqual(CS.pedalFeedbackState, 5)
+    self.assertEqual(CS.pedalFeedbackCounter, 11)
+    self.assertEqual(CS.pedalFirstEnabledMonoTime, 123456789)
+    self.assertAlmostEqual(CS.vdasLimitedAccel, -0.25)
+    self.assertAlmostEqual(CS.pedalCommandDi, 3.5)
+    self.assertTrue(CS.pedalAuthorityFailed)
+
+  def test_pedal_long_active_reports_accepted_authority_not_request_intent(self):
+    CI = self._make_interface()
+    CI.CS.engagement.cruiseEnabled = True
+    CI.CS.engagement.enableLongControl = True
+    CI.CS.pedal_authority_active = False
+
+    self.assertFalse(CI.update([]).pedalLongActive)
+
+    CI.CS.pedal_authority_active = True
+    self.assertTrue(CI.update([]).pedalLongActive)
 
   def test_hands_on_level_two_disengages(self):
     for hands_on_level, should_disengage in ((1, False), (2, True), (3, True)):

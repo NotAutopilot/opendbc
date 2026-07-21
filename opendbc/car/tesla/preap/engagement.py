@@ -27,6 +27,7 @@ class PreAPEngagement:
 
     self.pedal_speed_kph = 0.0
     self.longCtrlEvent = None
+    self.pedal_unavailable = False
 
     self.preap_cc_cancel_needed = False
     self.preap_cc_engage_needed = False
@@ -36,6 +37,24 @@ class PreAPEngagement:
     self.preap_brake_pressed_prev = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
+
+  def _drop_longitudinal_keep_lateral(self):
+    was_long_active = self.enableLongControl
+    if self.cruiseEnabled:
+      self.enableLongControl = False
+      self.enableJustCC = True
+      self.pending_enable = False
+      self.pedal_speed_kph = 0.0
+      if was_long_active:
+        self.longCtrlEvent = "pccDisabled"
+
+  def _clear_pedal_unavailable(self):
+    self.pedal_unavailable = False
+
+  def handle_pedal_unavailable(self):
+    """Drop pedal longitudinal, keep lateral, and latch a publishable fault."""
+    self.pedal_unavailable = True
+    self._drop_longitudinal_keep_lateral()
 
   def handle_steering_disengage(self, steering_disengage):
     """Reset engagement on steering disengage rising edge."""
@@ -49,6 +68,7 @@ class PreAPEngagement:
       self.stalk_pull_time_ms = 0
       self.prev_stalk_pull_time_ms = -1000
       self.pending_cancel_at_ms = 0
+      self._clear_pedal_unavailable()
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
     self.prev_steering_disengage = steering_disengage
@@ -81,6 +101,8 @@ class PreAPEngagement:
         self.enableLongControl = long_control_allowed
         self.enableJustCC = not long_control_allowed
         if pedal_long_allowed and self.enableLongControl:
+          self._clear_pedal_unavailable()
+        if pedal_long_allowed and self.enableLongControl:
           self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
         else:
           self.pedal_speed_kph = 0.0
@@ -104,11 +126,7 @@ class PreAPEngagement:
     if use_pedal:
       if real_brake_pressed and self.cruiseEnabled and self.enableLongControl:
         carlog.debug("BRAKE held — dropping longitudinal")
-        self.enableLongControl = False
-        self.enableJustCC = True
-        self.pending_enable = False
-        self.pedal_speed_kph = 0.0
-        self.longCtrlEvent = "pccDisabled"
+        self._drop_longitudinal_keep_lateral()
     self.preap_brake_pressed_prev = real_brake_pressed
 
     return button_events
@@ -123,6 +141,7 @@ class PreAPEngagement:
       self.enableLongControl = False
       self.enableJustCC = False
       self.pending_enable = False
+      self._clear_pedal_unavailable()
     return can_engage
 
   def _handle_double_pull(self, curr_time_ms, v_ego, speed_units,
@@ -139,6 +158,8 @@ class PreAPEngagement:
       self.pending_enable = False
       self.enableLongControl = long_control_allowed
       self.enableJustCC = not long_control_allowed
+      if pedal_long_allowed and self.enableLongControl:
+        self._clear_pedal_unavailable()
       if pedal_long_allowed and self.enableLongControl:
         self.longCtrlEvent = "pccEnabled"
         self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
@@ -203,6 +224,7 @@ class PreAPEngagement:
         self.stalk_pull_time_ms = 0
         self.prev_stalk_pull_time_ms = -1000
         self.pending_cancel_at_ms = 0
+        self._clear_pedal_unavailable()
         if was_long_active:
           self.longCtrlEvent = "pccDisabled"
       else:
