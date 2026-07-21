@@ -12,8 +12,7 @@ Invariant this guards against:
 
   Origin: drive d0cdc986c5d023f5 (drive-3) reported a pedal stab pulling
   away from a stop at v=6.59 m/s. MPC commanded 0.934 m/s² on engage.
-  On a P85 at low speed that's a sharp launch. See
-  vault/lessons/agent-failure-modes/engage-grace-upper-bound.md.
+  On a P85 at low speed that's a sharp launch.
 """
 
 import unittest

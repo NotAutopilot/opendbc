@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - 'nap-*'
   pull_request:
 
 jobs:
@@ -24,6 +25,32 @@ jobs:
       with:
         timeout: ${{ github.repository == 'commaai/opendbc' && (steps.cache.outputs.cache-hit == 'true' && '60' || '90') || '999' }}
     - run: ./test.sh
+
+  tesla_preap_longitudinal_regression:
+    name: Tesla Pre-AP longitudinal regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check workflow contract
+      run: python3 .github/ci/test_tests_workflow.py
+    - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+    - name: Install test dependencies
+      run: uv sync --extra testing
+    - name: Run focused longitudinal tests
+      run: |
+        source .venv/bin/activate
+        pytest -q -n 0 \
+          opendbc/car/tesla/preap/tests/test_pedal_authority.py \
+          opendbc/car/tesla/preap/tests/test_virtual_das.py \
+          opendbc/car/tesla/preap/tests/test_accel_limits.py \
+          opendbc/car/tesla/preap/tests/test_engage_grace.py
+    - name: Run historical mutation checks
+      run: |
+        source .venv/bin/activate
+        python .github/ci/tesla_preap_longitudinal_mutations.py
 
   safety_tests:
     name: safety

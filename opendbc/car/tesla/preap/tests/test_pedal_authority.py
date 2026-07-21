@@ -99,16 +99,16 @@ def _feedback(*, state, idx, available=None):
 
 
 class _FirmwarePedalModel:
-  """Minimal command-counter behavior from the field pedal firmware."""
+  """Minimal command-counter behavior of the pedal firmware."""
 
-  def __init__(self, feedback):
+  def __init__(self, feedback, initial_command_idx=0):
     self.feedback = feedback
     self.state = 5
     self.feedback_idx = 0
     # A command is accepted only when it follows the last observed counter.
-    # The field failure begins with the firmware expecting 1, so command 0 is
-    # rejected but becomes the new reference for command 1.
-    self.last_command_idx = 0
+    # Rejected commands are still remembered, allowing the next consecutive
+    # counter to restore synchronization from any initial value.
+    self.last_command_idx = initial_command_idx
     self.enabled = False
     self._publish(0)
 
@@ -137,25 +137,131 @@ class _FirmwarePedalModel:
     }, curr_time_ms)
 
 
-def test_counter_zero_rejection_recovers_with_consecutive_resets(controller_env):
+@pytest.mark.parametrize("initial_command_idx", range(16))
+def test_all_initial_firmware_command_counters_recover(controller_env, initial_command_idx):
   controller, cc, cs, tesla_can = controller_env
-  firmware = _FirmwarePedalModel(cs.pedal)
+  firmware = _FirmwarePedalModel(cs.pedal, initial_command_idx=initial_command_idx)
   _activate_longitudinal(cc, cs)
 
   commands = []
   acceptances = []
-  for frame in range(0, 6, 2):
+  for frame in range(0, 8, 2):
     sent = controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
     assert len(sent) == 1
     decoded, accepted = firmware.apply(sent[0], curr_time_ms=(frame + 2) * 10)
     commands.append(decoded)
     acceptances.append(accepted)
+    if firmware.enabled:
+      break
 
-  assert [command.idx for command in commands] == [0, 1, 2]
-  assert [command.enabled for command in commands] == [False, False, True]
-  assert acceptances == [False, True, True]
+  expected_counters = [0, 1] if initial_command_idx == 15 else [0, 1, 2]
+  assert [command.idx for command in commands] == expected_counters
+  assert [command.enabled for command in commands] == [False] * (len(commands) - 1) + [True]
+  assert acceptances[-1]
   assert firmware.enabled
   assert controller.pedal_authority.state == PedalAuthorityState.ACTIVE
+
+
+def test_controller_wire_counter_wraps_from_fifteen_to_zero(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  tesla_can.pedal_idx = 15
+  _activate_longitudinal(cc, cs)
+
+  first = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+  second = controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0)
+
+  assert [_decode_pedal_command(command[0]).idx for command in (first, second)] == [15, 0]
+  assert all(_decode_pedal_command(command[0]).enabled for command in (first, second))
+
+
+def test_pedal_authority_reachable_states_obey_transition_invariants():
+  feedback_inputs = (
+    (False, _feedback(state=0, idx=0)),
+    (True, _feedback(state=0, idx=0)),
+    (True, _feedback(state=0, idx=1)),
+    (True, _feedback(state=0, idx=15)),
+    (True, _feedback(state=5, idx=0)),
+    (True, _feedback(state=5, idx=1)),
+    (True, _feedback(state=5, idx=15)),
+    (True, _feedback(state=0, idx=1, available=False)),
+  )
+  frontier = {(PedalAuthorityState.INACTIVE, None, 0)}
+
+  for _depth in range(7):
+    next_frontier = set()
+    for state, reset_counter, reset_attempts in frontier:
+      for requested, feedback in feedback_inputs:
+        authority = PedalAuthority()
+        authority.state = state
+        authority.reset_feedback_counter = reset_counter
+        authority.reset_attempts = reset_attempts
+        feedback_healthy = feedback.available and feedback.interceptor_state == 0
+
+        action = authority.update(requested, feedback)
+
+        if not requested:
+          expected_action = PedalCommandAction.RELEASE if state == PedalAuthorityState.ACTIVE else PedalCommandAction.NONE
+          assert action == expected_action
+          assert authority.state == PedalAuthorityState.INACTIVE
+        elif state == PedalAuthorityState.FAILED:
+          assert action == PedalCommandAction.NONE
+          assert authority.state == PedalAuthorityState.FAILED
+        elif state == PedalAuthorityState.ACTIVE:
+          expected_action = PedalCommandAction.ENABLE if feedback_healthy else PedalCommandAction.RESET
+          assert action == expected_action
+          assert authority.state == (PedalAuthorityState.ACTIVE if feedback_healthy else PedalAuthorityState.ACQUIRING)
+        elif state == PedalAuthorityState.ACQUIRING:
+          feedback_advanced = feedback.idx != reset_counter
+          if feedback_healthy and feedback_advanced:
+            assert action == PedalCommandAction.ACQUIRE
+            assert authority.state == PedalAuthorityState.ACTIVE
+          elif reset_attempts < PedalAuthority.MAX_RESET_ATTEMPTS:
+            assert action == PedalCommandAction.RESET
+            assert authority.state == PedalAuthorityState.ACQUIRING
+            assert authority.reset_attempts == reset_attempts + 1
+          else:
+            assert action == PedalCommandAction.FAILURE
+            assert authority.state == PedalAuthorityState.FAILED
+        elif feedback_healthy:
+          assert action == PedalCommandAction.ACQUIRE
+          assert authority.state == PedalAuthorityState.ACTIVE
+        else:
+          assert action == PedalCommandAction.RESET
+          assert authority.state == PedalAuthorityState.ACQUIRING
+
+        next_frontier.add((authority.state, authority.reset_feedback_counter, authority.reset_attempts))
+    frontier = next_frontier
+
+
+@pytest.mark.parametrize(
+  ("feedback_trace", "expected_actions"),
+  (
+    pytest.param(
+      [(5, 0), (5, 1), (5, 2), (5, 3), (5, 4)],
+      [PedalCommandAction.RESET] * 4 + [PedalCommandAction.FAILURE],
+      id="advancing-counter-does-not-mask-fault",
+    ),
+    pytest.param(
+      [(5, 7), (0, 7), (0, 8)],
+      [PedalCommandAction.RESET, PedalCommandAction.RESET, PedalCommandAction.ACQUIRE],
+      id="healthy-feedback-must-advance",
+    ),
+    pytest.param(
+      [(5, 4), (5, 4), (5, 4), (5, 4), (0, 5)],
+      [PedalCommandAction.RESET] * 4 + [PedalCommandAction.ACQUIRE],
+      id="accepted-feedback-on-deadline-acquires",
+    ),
+  ),
+)
+def test_pedal_firmware_feedback_traces(feedback_trace, expected_actions):
+  authority = PedalAuthority()
+
+  actions = [
+    authority.update(True, _feedback(state=state, idx=idx))
+    for state, idx in feedback_trace
+  ]
+
+  assert actions == expected_actions
 
 
 def test_acquisition_sends_four_resets_then_fails_on_next_update():
