@@ -349,12 +349,14 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
                        f"Control type {control_type} should {'pass' if should_tx else 'block'}")
 
   def test_epas_control_type(self):
-    self.safety.set_controls_allowed(True)
-    for mode in range(8):
-      msg = self.packer.make_can_msg_safety("EPB_epasControl", 0, {"EPB_epasEACAllow": mode})
-      should_tx = mode <= 1
-      self.assertEqual(should_tx, self._tx(msg),
-                       f"EPB mode {mode} should {'pass' if should_tx else 'block'}")
+    for controls_allowed in (False, True):
+      for mode in range(8):
+        with self.subTest(controls_allowed=controls_allowed, mode=mode):
+          self.safety.set_controls_allowed(controls_allowed)
+          msg = self.packer.make_can_msg_safety("EPB_epasControl", 0, {"EPB_epasEACAllow": mode})
+          should_tx = mode == 0 or (controls_allowed and mode == 1)
+          self.assertEqual(should_tx, self._tx(msg),
+                           f"EPB mode {mode} should {'pass' if should_tx else 'block'}")
 
   def test_no_aeb(self):
     self.safety.set_controls_allowed(True)
@@ -847,6 +849,7 @@ class TeslaPreAPRadarVinTestMixin(TeslaPreAPTestMixin):
 
     self.safety.set_controls_allowed(True)
     self.assertFalse(self._tx(self._angle_cmd_msg(0, 1)))
+    self.safety.set_controls_allowed(True)
     self.assertFalse(self._tx(self._epas_control_msg(1)))
     self.assertFalse(self._tx(self._das_control_msg()))
     self.assertFalse(self._tx(self._body_control_msg()))

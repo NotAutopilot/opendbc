@@ -1012,7 +1012,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   // EPB_epasControl (0x214): only allow valid EAC modes (0=disable, 1=enable)
   if (msg->addr == 0x214U) {
     int epas_control_type = msg->data[0] & 0x07U;  // EPB_epasEACAllow: bits 2:0 of byte 0
-    if ((epas_control_type > 1) || (diagnostic_latched && (epas_control_type != 0))) {
+    if ((epas_control_type > 1) || ((!controls_allowed || diagnostic_latched) && (epas_control_type != 0))) {
       violation = true;
     }
   }

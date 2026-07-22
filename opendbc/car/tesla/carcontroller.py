@@ -100,7 +100,7 @@ class CarController(CarControllerBase):
                                                           lat_active, CarControllerParams, self.VM)
       cntr = (self.frame // 2) % 16
       can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lat_active))
-      can_sends.append(self.tesla_can.create_epas_control(cntr, 1))
+      can_sends.append(self.tesla_can.create_epas_control(cntr, int(lat_active)))
 
     # Reset pccEvent each tick so it expresses one-frame edge events. Without
     # this, the previous frame's value sticks (preap_long resets it, but only
