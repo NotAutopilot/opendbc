@@ -325,6 +325,8 @@ struct RadarData @0x888ad6581cf0aacb {
     radarVinInvalid @4 :Bool;
     radarEspInputError @5 :Bool;
     radarEcuError @6 :Bool;
+    radarVinLearning @7 :Bool;
+    radarVinLearnFailed @8 :Bool;
   }
 
   # similar to LiveTracks

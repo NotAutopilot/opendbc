@@ -2,7 +2,7 @@ import math
 from types import SimpleNamespace
 
 from opendbc.can.parser import CANParser
-from opendbc.car import Bus
+from opendbc.car import Bus, CanData, structs
 from opendbc.car.tesla.values import CANBUS, CAR, DBC
 import pytest
 
@@ -12,6 +12,7 @@ from opendbc.car.tesla import radar_interface as radar_interface_module
 BOSCH_POINT_A_ADDRESS = 0x310
 BOSCH_POINT_B_ADDRESS = 0x311
 BOSCH_TRIGGER_ADDRESS = 0x36E
+PREAP_ALERT_MATRIX_ADDRESS = 0x501
 MAX_TRACK_DISTANCE_DELTA_M = 10.0
 MAX_TRACK_VELOCITY_DELTA_MPS = 10.0
 
@@ -73,8 +74,23 @@ def _make_bosch_interface(car_fingerprint=CAR.TESLA_MODEL_S_HW1):
   radar.pts = {}
   if hasattr(radar_interface_module, "BoschTrackLifecycle"):
     radar.bosch_tracks = radar_interface_module.BoschTrackLifecycle()
+  if hasattr(radar_interface_module, "PreAPRadarAlertHealth"):
+    radar.preap_alert_health = radar_interface_module.PreAPRadarAlertHealth(vin_invalid=False, esp_input_error=False)
+    radar.preap_alert_health_samples = ()
   radar.rcp = FakeRadarParser()
   return radar
+
+
+def _alert_matrix_data(*, esp_input_error=False, vin_invalid=False, unrelated=False):
+  dat = bytearray(8)
+  dat[0] = int(unrelated)
+  dat[1] = int(esp_input_error) << 3
+  dat[4] = int(vin_invalid) << 4
+  return bytes(dat)
+
+
+def _can_batch(*frames):
+  return [(1, list(frames))]
 
 
 def _run_cycle(radar, *, tracked=True, d_rel=40.0, v_rel=-2.0, slot_updated=True):
@@ -83,7 +99,19 @@ def _run_cycle(radar, *, tracked=True, d_rel=40.0, v_rel=-2.0, slot_updated=True
   radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
   if slot_updated:
     radar.rcp.updated_addresses.update((BOSCH_POINT_A_ADDRESS, BOSCH_POINT_B_ADDRESS))
-  return radar.update([])
+  alert_matrix = radar.rcp.vl["TeslaRadarAlertMatrix"]
+  can_msgs = []
+  if any(alert_matrix.values()):
+    can_msgs.append(CanData(
+      PREAP_ALERT_MATRIX_ADDRESS,
+      _alert_matrix_data(
+        esp_input_error=bool(alert_matrix["RADC_a012_espMIA"]),
+        vin_invalid=bool(alert_matrix["RADC_a037_vinValidity"]),
+        unrelated=bool(alert_matrix["RADC_a001_ecuInternalPerf"]),
+      ),
+      CANBUS.radar,
+    ))
+  return radar.update(_can_batch(*can_msgs) if can_msgs else [])
 
 
 class TestBoschSlotLifecycle:
@@ -177,6 +205,128 @@ class TestBoschHealth:
 
 
 class TestBoschPreAPHealth:
+  @pytest.mark.parametrize(
+    ("dat", "vin_invalid", "esp_input_error"),
+    (
+      (_alert_matrix_data(), False, False),
+      (_alert_matrix_data(vin_invalid=True), True, False),
+      (_alert_matrix_data(esp_input_error=True), False, True),
+      (_alert_matrix_data(vin_invalid=True, esp_input_error=True), True, True),
+      (_alert_matrix_data(unrelated=True), False, False),
+    ),
+  )
+  def test_raw_alert_matrix_health(self, dat, vin_invalid, esp_input_error):
+    health = radar_interface_module.parse_preap_radar_alert_matrix(dat)
+
+    assert health.vin_invalid is vin_invalid
+    assert health.esp_input_error is esp_input_error
+
+  def test_raw_alert_matrix_health_matches_dbc(self):
+    parser = CANParser(
+      DBC[CAR.TESLA_MODEL_S_PREAP][Bus.radar],
+      [("TeslaRadarAlertMatrix", math.nan)],
+      CANBUS.radar,
+    )
+    dat = _alert_matrix_data(vin_invalid=True, esp_input_error=True)
+
+    parser.update(_can_batch(CanData(PREAP_ALERT_MATRIX_ADDRESS, dat, CANBUS.radar)))
+    health = radar_interface_module.parse_preap_radar_alert_matrix(dat)
+
+    assert health.vin_invalid is bool(parser.vl["TeslaRadarAlertMatrix"]["RADC_a037_vinValidity"])
+    assert health.esp_input_error is bool(parser.vl["TeslaRadarAlertMatrix"]["RADC_a012_espMIA"])
+
+  @pytest.mark.parametrize("length", (0, 7, 9))
+  def test_raw_alert_matrix_requires_eight_bytes(self, length):
+    with pytest.raises(ValueError):
+      radar_interface_module.parse_preap_radar_alert_matrix(bytes(length))
+
+  def test_schema_exposes_learning_health(self):
+    errors = structs.RadarData().errors
+
+    assert errors.radarVinLearning is False
+    assert errors.radarVinLearnFailed is False
+    errors.radarVinLearning = True
+    errors.radarVinLearnFailed = True
+    assert errors.radarVinLearning is True
+    assert errors.radarVinLearnFailed is True
+
+  def test_current_alert_samples_use_shared_parser_in_order(self, monkeypatch):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    first = _alert_matrix_data(vin_invalid=True)
+    second = _alert_matrix_data(esp_input_error=True)
+    real_parser = radar_interface_module.parse_preap_radar_alert_matrix
+    parsed = []
+
+    def recording_parser(dat):
+      parsed.append(dat)
+      return real_parser(dat)
+
+    monkeypatch.setattr(radar_interface_module, "parse_preap_radar_alert_matrix", recording_parser)
+    result = radar.update(_can_batch(
+      CanData(PREAP_ALERT_MATRIX_ADDRESS, first, CANBUS.radar),
+      CanData(PREAP_ALERT_MATRIX_ADDRESS + 1, first, CANBUS.radar),
+      CanData(PREAP_ALERT_MATRIX_ADDRESS, first, CANBUS.radar + 1),
+      CanData(PREAP_ALERT_MATRIX_ADDRESS, first[:-1], CANBUS.radar),
+      CanData(PREAP_ALERT_MATRIX_ADDRESS, second, CANBUS.radar),
+    ))
+
+    assert result is None
+    assert parsed == [first, second]
+    assert radar.preap_alert_health_samples == (
+      radar_interface_module.PreAPRadarAlertHealth(vin_invalid=True, esp_input_error=False),
+      radar_interface_module.PreAPRadarAlertHealth(vin_invalid=False, esp_input_error=True),
+    )
+
+  def test_cached_health_does_not_repeat_as_current_sample(self):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    fault = _alert_matrix_data(vin_invalid=True)
+
+    first = radar.update(_can_batch(CanData(PREAP_ALERT_MATRIX_ADDRESS, fault, CANBUS.radar)))
+    radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+    cached = radar.update([])
+
+    assert first is None
+    assert cached.errors.radarVinInvalid is True
+    assert cached.errors.radarFault is True
+    assert radar.preap_alert_health_samples == ()
+
+  def test_new_clear_sample_replaces_cached_fault(self):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    radar.update(_can_batch(CanData(
+      PREAP_ALERT_MATRIX_ADDRESS,
+      _alert_matrix_data(vin_invalid=True),
+      CANBUS.radar,
+    )))
+    radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+
+    cleared = radar.update(_can_batch(CanData(
+      PREAP_ALERT_MATRIX_ADDRESS,
+      _alert_matrix_data(),
+      CANBUS.radar,
+    )))
+
+    assert cleared.errors.radarVinInvalid is False
+    assert cleared.errors.radarFault is False
+    assert radar.preap_alert_health_samples == (
+      radar_interface_module.PreAPRadarAlertHealth(vin_invalid=False, esp_input_error=False),
+    )
+
+  def test_non_preap_interface_does_not_consume_alert_samples(self, monkeypatch):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_HW1)
+
+    def unexpected_parser(_dat):
+      raise AssertionError("non-Pre-AP radar must not classify the alert matrix")
+
+    monkeypatch.setattr(radar_interface_module, "parse_preap_radar_alert_matrix", unexpected_parser)
+    result = radar.update(_can_batch(CanData(
+      PREAP_ALERT_MATRIX_ADDRESS,
+      _alert_matrix_data(vin_invalid=True),
+      CANBUS.radar,
+    )))
+
+    assert result is None
+    assert radar.preap_alert_health_samples == ()
+
   def test_alert_matrix_uses_nan_ignore_alive(self, monkeypatch):
     created_messages = []
 

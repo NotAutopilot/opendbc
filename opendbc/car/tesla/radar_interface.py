@@ -18,6 +18,27 @@ BOSCH_POINT_ADDRESS_STRIDE = 3
 BOSCH_TRACK_MAX_MISSED_CYCLES = 2
 BOSCH_TRACK_MAX_DISTANCE_DELTA_M = 10.0
 BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
+PREAP_ALERT_MATRIX_ADDRESS = 0x501
+PREAP_ESP_MIA_BYTE = 1
+PREAP_ESP_MIA_MASK = 1 << 3
+PREAP_VIN_VALIDITY_BYTE = 4
+PREAP_VIN_VALIDITY_MASK = 1 << 4
+
+
+@dataclass(frozen=True)
+class PreAPRadarAlertHealth:
+  vin_invalid: bool
+  esp_input_error: bool
+
+
+def parse_preap_radar_alert_matrix(dat: bytes) -> PreAPRadarAlertHealth:
+  if len(dat) != 8:
+    raise ValueError(f"expected 8-byte radar alert matrix, got {len(dat)} bytes")
+
+  return PreAPRadarAlertHealth(
+    vin_invalid=bool(dat[PREAP_VIN_VALIDITY_BYTE] & PREAP_VIN_VALIDITY_MASK),
+    esp_input_error=bool(dat[PREAP_ESP_MIA_BYTE] & PREAP_ESP_MIA_MASK),
+  )
 
 
 @dataclass(frozen=True)
@@ -123,6 +144,8 @@ class RadarInterface(RadarInterfaceBase):
     self.updated_messages = set()
     self.track_id = 0
     self.bosch_tracks = BoschTrackLifecycle()
+    self.preap_alert_health = PreAPRadarAlertHealth(vin_invalid=False, esp_input_error=False)
+    self.preap_alert_health_samples: tuple[PreAPRadarAlertHealth, ...] = ()
     # Keep parity with Tinkla radar lateral alignment behavior.
     # For behind-nosecone installs, users can configure horizontal offset in meters.
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
@@ -131,6 +154,16 @@ class RadarInterface(RadarInterfaceBase):
       self.radar_offset = 0.0
 
   def update(self, can_msgs):
+    self.preap_alert_health_samples = ()
+    if self.preap_radar:
+      self.preap_alert_health_samples = tuple(
+        parse_preap_radar_alert_matrix(dat)
+        for _, frames in can_msgs
+        for address, dat, src in frames
+        if src == CANBUS.radar and address == PREAP_ALERT_MATRIX_ADDRESS and len(dat) == 8
+      )
+      if self.preap_alert_health_samples:
+        self.preap_alert_health = self.preap_alert_health_samples[-1]
 
     if self.radar_off_can or (self.rcp is None):
       return super().update(None)
@@ -161,9 +194,8 @@ class RadarInterface(RadarInterfaceBase):
     elif self.bosch_radar:
       radar_status = self.rcp.vl['TeslaRadarSguInfo']
       if self.preap_radar:
-        alert_matrix = self.rcp.vl['TeslaRadarAlertMatrix']
-        ret.errors.radarVinInvalid = bool(alert_matrix.get('RADC_a037_vinValidity', 0))
-        ret.errors.radarEspInputError = bool(alert_matrix.get('RADC_a012_espMIA', 0))
+        ret.errors.radarVinInvalid = self.preap_alert_health.vin_invalid
+        ret.errors.radarEspInputError = self.preap_alert_health.esp_input_error
         ret.errors.radarEcuError = bool(radar_status.get('RADC_HWFail', 0)) or (
           bool(radar_status.get('RADC_SGUFail', 0)) and not (ret.errors.radarVinInvalid or ret.errors.radarEspInputError)
         )

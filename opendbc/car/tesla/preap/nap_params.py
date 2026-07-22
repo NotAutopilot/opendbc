@@ -26,6 +26,12 @@ class NAPParamKeys:
   RADAR_ENABLED = "NAPRadarEnabled"
   RADAR_BEHIND_NOSECONE = "NAPRadarBehindNosecone"
   RADAR_OFFSET = "NAPRadarOffset"
+  RADAR_VIN_LEARN_REQUEST = "NAPRadarVinLearnRequest"
+  RADAR_VIN_LEARN_PENDING = "NAPRadarVinLearnPending"
+  RADAR_VIN_LEARN_ATTEMPTED = "NAPRadarVinLearnAttempted"
+  RADAR_VIN_LEARN_AWAITING_VERIFICATION = "NAPRadarVinLearnAwaitingVerification"
+  RADAR_VIN_LEARN_FAILED = "NAPRadarVinLearnFailed"
+  RADAR_VIN_LEARN_CLEANUP_REQUIRED = "NAPRadarVinLearnCleanupRequired"
 
   # iBooster / Braking
   IBOOSTER_ENABLED = "NAPiBoosterEnabled"
@@ -50,6 +56,12 @@ DEFAULTS = {
   NAPParamKeys.RADAR_ENABLED: False,
   NAPParamKeys.RADAR_BEHIND_NOSECONE: False,
   NAPParamKeys.RADAR_OFFSET: 0.0,
+  NAPParamKeys.RADAR_VIN_LEARN_REQUEST: False,
+  NAPParamKeys.RADAR_VIN_LEARN_PENDING: False,
+  NAPParamKeys.RADAR_VIN_LEARN_ATTEMPTED: False,
+  NAPParamKeys.RADAR_VIN_LEARN_AWAITING_VERIFICATION: False,
+  NAPParamKeys.RADAR_VIN_LEARN_FAILED: False,
+  NAPParamKeys.RADAR_VIN_LEARN_CLEANUP_REQUIRED: False,
   NAPParamKeys.IBOOSTER_ENABLED: False,
   NAPParamKeys.BRAKE_FACTOR: 1.0,
   NAPParamKeys.FORCE_PRE_AP: False,
