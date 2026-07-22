@@ -225,13 +225,40 @@ MUTATIONS = (
     ),
   ),
   HistoricalMutation(
-    name="orientation-dropout-zeroes-grade-effort",
+    name="orientation-dropout-skips-short-hold",
     source_path="opendbc/car/tesla/preap/virtual_das.py",
-    original=b"      return self._steady_grade_compensation(), 0.0\n",
-    replacement=b"      return 0.0, 0.0\n",
+    original=(
+      b"    dropout_decay_elapsed_s = self.missing_orientation_elapsed_s - " +
+      b"ORIENTATION_DROPOUT_HOLD_S\n"
+    ),
+    replacement=b"    dropout_decay_elapsed_s = self.missing_orientation_elapsed_s\n",
     test_node=(
       "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestGradeEstimator::" +
-      "test_orientation_dropout_holds_filtered_steady_grade"
+      "test_orientation_dropout_holds_then_decays_steady_grade[0.5-1.0]"
+    ),
+  ),
+  HistoricalMutation(
+    name="orientation-dropout-disables-bounded-decay",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    self.pitch_lp.x = self.pitch_before_dropout_rad * dropout_grade_scale\n",
+    replacement=b"    self.pitch_lp.x = self.pitch_before_dropout_rad\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestGradeEstimator::" +
+      "test_orientation_dropout_holds_then_decays_steady_grade[4.64-0.0]"
+    ),
+  ),
+  HistoricalMutation(
+    name="orientation-dropout-reset-retains-stale-state",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    self._clear_high_pass_state()\n" +
+      b"    self.missing_orientation_elapsed_s = 0.0\n" +
+      b"    self.pitch_before_dropout_rad = 0.0\n"
+    ),
+    replacement=b"",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestGradeEstimator::" +
+      "test_reset_clears_grade"
     ),
   ),
   HistoricalMutation(

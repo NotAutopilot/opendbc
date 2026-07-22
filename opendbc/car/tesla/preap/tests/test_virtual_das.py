@@ -993,6 +993,55 @@ class TestGradeEstimator:
     assert dropout_grade == pytest.approx(steady_grade)
     assert dropout_transient == 0.0
 
+  @pytest.mark.parametrize(("dropout_duration_s", "expected_grade_scale"), [
+    (0.10, 1.0),
+    (0.50, 1.0),
+    (1.25, 0.5),
+    (2.00, 0.0),
+    (4.64, 0.0),
+  ])
+  def test_orientation_dropout_holds_then_decays_steady_grade(
+    self, dropout_duration_s, expected_grade_scale,
+  ):
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    dt = 0.02
+    settled_pitch = math.radians(4.45)
+    ge = GradeEstimator(dt=dt)
+
+    for _ in range(500):
+      ge.update([0.0, settled_pitch, 0.0])
+
+    for _ in range(round(dropout_duration_s / dt)):
+      dropout_grade, dropout_transient = ge.update([])
+      assert dropout_transient == 0.0
+
+    expected_grade = math.sin(settled_pitch) * 9.81 * expected_grade_scale
+    assert dropout_grade == pytest.approx(expected_grade, abs=0.02)
+
+  def test_crest_reacquisition_after_long_dropout_uses_new_grade_sign(self):
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    dt = 0.02
+    ge = GradeEstimator(dt=dt)
+
+    for _ in range(500):
+      ge.update([0.0, math.radians(4.45), 0.0])
+    for _ in range(round(4.64 / dt)):
+      dropout_grade, dropout_transient = ge.update([])
+
+    assert abs(dropout_grade + dropout_transient) < 0.02
+
+    grade, transient = ge.update([0.0, math.radians(-3.0), 0.0])
+    first_reacquired_compensation = grade + transient
+    assert -0.25 <= first_reacquired_compensation < 0.0
+
+    for _ in range(round(1.50 / dt) - 1):
+      grade, transient = ge.update([0.0, math.radians(-3.0), 0.0])
+
+    assert grade == pytest.approx(math.sin(math.radians(-3.0)) * 9.81, abs=0.05)
+    assert abs(transient) < 0.15
+
   def test_grade_does_not_change_net_acceleration_feedback(self, mock_nap_conf, mock_zero_torque):
     """Wheel-speed acceleration and planner targets remain in the net domain."""
     import math
@@ -1012,8 +1061,12 @@ class TestGradeEstimator:
     for _ in range(100):
       ge.update([0.0, math.radians(5.0), 0.0])
     assert abs(ge.pitch_lp.x) > 0.01
+    ge.update([])
+
     ge.reset()
-    assert ge.pitch_lp.x == 0.0
+
+    assert ge.update([]) == (0.0, 0.0)
+    assert ge.update([0.0, 0.0, 0.0]) == (0.0, 0.0)
 
 
 class TestVDASDomainBoundaries:

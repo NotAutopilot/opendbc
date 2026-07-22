@@ -53,6 +53,8 @@ PITCH_HP_RC2 = 1.0  # high-pass outer RC
 MAX_PITCH_COMPENSATION = 1.5  # m/s² — clamp transient compensation
 MAX_STEADY_GRADE_COMPENSATION = 1.5  # m/s² — reject implausible sustained pitch
 TRANSIENT_GRADE_GAIN = 0.4
+ORIENTATION_DROPOUT_HOLD_S = 0.50
+ORIENTATION_DROPOUT_DECAY_S = 1.50
 
 
 class GradeEstimator:
@@ -67,8 +69,11 @@ class GradeEstimator:
   """
 
   def __init__(self, dt: float = 0.02):
+    self.dt = dt
     self.pitch_lp = FirstOrderFilter(0.0, PITCH_LP_RC, dt)
     self.pitch_hp = HighPassFilter(0.0, PITCH_HP_RC1, PITCH_HP_RC2, dt)
+    self.missing_orientation_elapsed_s = 0.0
+    self.pitch_before_dropout_rad = 0.0
 
   def update(self, orientation_ned: list) -> tuple:
     """Update filters with current pitch.
@@ -84,7 +89,9 @@ class GradeEstimator:
         pitch_compensation: transient feedforward bump for grade changes (m/s²).
     """
     if len(orientation_ned) < 2:
-      return self._steady_grade_compensation(), 0.0
+      return self._update_for_missing_orientation()
+
+    self.missing_orientation_elapsed_s = 0.0
 
     maximum_pitch = math.asin(MAX_STEADY_GRADE_COMPENSATION / GRAVITY)
     pitch = float(clip(orientation_ned[1], -maximum_pitch, maximum_pitch))
@@ -98,6 +105,24 @@ class GradeEstimator:
 
     return grade_accel, pitch_compensation
 
+  def _update_for_missing_orientation(self) -> tuple[float, float]:
+    if self.missing_orientation_elapsed_s == 0.0:
+      self.pitch_before_dropout_rad = self.pitch_lp.x
+
+    self.missing_orientation_elapsed_s += self.dt
+    dropout_decay_elapsed_s = self.missing_orientation_elapsed_s - ORIENTATION_DROPOUT_HOLD_S
+    dropout_grade_scale = float(clip(
+      1.0 - dropout_decay_elapsed_s / ORIENTATION_DROPOUT_DECAY_S,
+      0.0,
+      1.0,
+    ))
+    self.pitch_lp.x = self.pitch_before_dropout_rad * dropout_grade_scale
+
+    if dropout_grade_scale == 0.0:
+      self._clear_high_pass_state()
+
+    return self._steady_grade_compensation(), 0.0
+
   def _steady_grade_compensation(self) -> float:
     return float(clip(
       math.sin(self.pitch_lp.x) * GRAVITY,
@@ -107,6 +132,11 @@ class GradeEstimator:
 
   def reset(self):
     self.pitch_lp.x = 0.0
+    self._clear_high_pass_state()
+    self.missing_orientation_elapsed_s = 0.0
+    self.pitch_before_dropout_rad = 0.0
+
+  def _clear_high_pass_state(self):
     self.pitch_hp.x = 0.0
     self.pitch_hp._f1.x = 0.0
     self.pitch_hp._f2.x = 0.0
