@@ -78,6 +78,7 @@ void can_set_checksum(CANPacket_t *packet);
 #define PREAP_FLAG_ENABLE_PEDAL         1U
 #define PREAP_FLAG_RADAR_EMULATION      2U
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
+#define PREAP_FLAG_RADAR_VIN_LEARN      8U
 #define PREAP_HANDS_ON_DISENGAGE_LEVEL  2
 
 // ============================================
@@ -87,6 +88,7 @@ void can_set_checksum(CANPacket_t *packet);
 static bool preap_enable_pedal = false;
 static bool preap_radar_emulation = false;
 static bool preap_radar_behind_nosecone = false;
+static bool preap_radar_vin_learn = false;
 
 static int preap_pedal_can = -1;
 
@@ -106,6 +108,491 @@ static int preap_radar_status = 0;
 static uint32_t preap_last_radar_signal = 0;
 static int preap_radar_epas_type = 0;
 static int preap_radar_position = 0;
+
+typedef enum {
+  PREAP_DIAG_IDLE,
+  PREAP_DIAG_AWAIT_TESTER,
+  PREAP_DIAG_INITIAL_DEFAULT,
+  PREAP_DIAG_AWAIT_INITIAL_DEFAULT,
+  PREAP_DIAG_EXTENDED,
+  PREAP_DIAG_AWAIT_EXTENDED,
+  PREAP_DIAG_READINESS,
+  PREAP_DIAG_AWAIT_READINESS,
+  PREAP_DIAG_PRE_VIN,
+  PREAP_DIAG_AWAIT_PRE_VIN,
+  PREAP_DIAG_SEED,
+  PREAP_DIAG_AWAIT_SEED,
+  PREAP_DIAG_KEY,
+  PREAP_DIAG_AWAIT_KEY,
+  PREAP_DIAG_START,
+  PREAP_DIAG_AWAIT_START,
+  PREAP_DIAG_STOP,
+  PREAP_DIAG_AWAIT_STOP,
+  PREAP_DIAG_RESULTS,
+  PREAP_DIAG_AWAIT_RESULTS,
+  PREAP_DIAG_FINAL_VIN,
+  PREAP_DIAG_AWAIT_FINAL_VIN,
+  PREAP_DIAG_FINAL_CLEANUP,
+  PREAP_DIAG_CLEANUP_PENDING,
+  PREAP_DIAG_POISONED,
+} PreAPDiagnosticPhase;
+
+static PreAPDiagnosticPhase preap_diag_phase = PREAP_DIAG_IDLE;
+static uint32_t preap_diag_last_activity_us = 0U;
+static uint8_t preap_diag_readiness_tx_count = 0U;
+static uint8_t preap_diag_stop_attempts = 0U;
+static uint8_t preap_diag_stop_tx_count = 0U;
+static uint8_t preap_diag_successful_stops = 0U;
+static bool preap_diag_attempt_consumed = false;
+static bool preap_diag_rx_in_progress = false;
+static bool preap_diag_flow_control_allowed = false;
+static uint16_t preap_diag_rx_length = 0U;
+static uint16_t preap_diag_rx_received = 0U;
+static uint8_t preap_diag_rx_sequence = 1U;
+
+#define PREAP_DIAG_TIMEOUT_US 30000000U
+
+static bool preap_diag_latched(void) {
+  return preap_diag_phase != PREAP_DIAG_IDLE;
+}
+
+static void preap_diag_reset_rx(void) {
+  preap_diag_rx_in_progress = false;
+  preap_diag_flow_control_allowed = false;
+  preap_diag_rx_length = 0U;
+  preap_diag_rx_received = 0U;
+  preap_diag_rx_sequence = 1U;
+}
+
+static void preap_diag_set_phase(PreAPDiagnosticPhase phase) {
+  preap_diag_phase = phase;
+  preap_diag_reset_rx();
+}
+
+static void preap_diag_poison(void) {
+  if (preap_diag_latched()) {
+    preap_diag_set_phase(PREAP_DIAG_POISONED);
+    controls_allowed = false;
+  }
+}
+
+static void preap_diag_note_activity(void) {
+  preap_diag_last_activity_us = microsecond_timer_get();
+}
+
+static void preap_diag_guard(void) {
+  if (preap_diag_latched()) {
+    if (controls_allowed) {
+      preap_diag_poison();
+    }
+    controls_allowed = false;
+
+    uint32_t elapsed = microsecond_timer_get() - preap_diag_last_activity_us;
+    if (elapsed >= PREAP_DIAG_TIMEOUT_US) {
+      preap_diag_poison();
+    }
+  }
+}
+
+static bool preap_diag_payload_matches(const CANPacket_t *msg, const uint8_t expected[8]) {
+  bool matches = true;
+  for (int i = 0; i < 8; i++) {
+    matches &= msg->data[i] == expected[i];
+  }
+  return matches;
+}
+
+static bool preap_diag_key_matches(const CANPacket_t *msg) {
+  return (msg->data[0] == 0x06U) && (msg->data[1] == 0x27U) && (msg->data[2] == 0x12U) &&
+         (msg->data[7] == 0x00U);
+}
+
+static bool preap_diag_phase_awaits_response(void) {
+  return (preap_diag_phase == PREAP_DIAG_AWAIT_TESTER) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_INITIAL_DEFAULT) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_EXTENDED) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_READINESS) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_PRE_VIN) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_SEED) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_KEY) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_START) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_STOP) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_RESULTS) ||
+         (preap_diag_phase == PREAP_DIAG_AWAIT_FINAL_VIN) ||
+         (preap_diag_phase == PREAP_DIAG_CLEANUP_PENDING);
+}
+
+static bool preap_diag_expected_prefix(const uint8_t *payload, uint16_t length) {
+  bool matches = false;
+  switch (preap_diag_phase) {
+    case PREAP_DIAG_AWAIT_TESTER:
+    case PREAP_DIAG_AWAIT_READINESS:
+      matches = (length >= 2U) && (payload[0] == 0x7EU) && (payload[1] == 0x00U);
+      break;
+    case PREAP_DIAG_AWAIT_INITIAL_DEFAULT:
+    case PREAP_DIAG_CLEANUP_PENDING:
+      matches = (length >= 2U) && (payload[0] == 0x50U) && (payload[1] == 0x01U);
+      break;
+    case PREAP_DIAG_AWAIT_EXTENDED:
+      matches = (length >= 2U) && (payload[0] == 0x50U) && (payload[1] == 0x03U);
+      break;
+    case PREAP_DIAG_AWAIT_PRE_VIN:
+    case PREAP_DIAG_AWAIT_FINAL_VIN:
+      matches = (length >= 3U) && (payload[0] == 0x62U) && (payload[1] == 0xF1U) && (payload[2] == 0x90U);
+      break;
+    case PREAP_DIAG_AWAIT_SEED:
+      matches = (length >= 2U) && (payload[0] == 0x67U) && (payload[1] == 0x11U);
+      break;
+    case PREAP_DIAG_AWAIT_KEY:
+      matches = (length >= 2U) && (payload[0] == 0x67U) && (payload[1] == 0x12U);
+      break;
+    case PREAP_DIAG_AWAIT_START:
+      matches = (length >= 4U) && (payload[0] == 0x71U) && (payload[1] == 0x01U) &&
+                (payload[2] == 0x0AU) && (payload[3] == 0x03U);
+      break;
+    case PREAP_DIAG_AWAIT_STOP:
+      matches = (length >= 4U) && (payload[0] == 0x71U) && (payload[1] == 0x02U) &&
+                (payload[2] == 0x0AU) && (payload[3] == 0x03U);
+      break;
+    case PREAP_DIAG_AWAIT_RESULTS:
+      matches = (length >= 4U) && (payload[0] == 0x71U) && (payload[1] == 0x03U) &&
+                (payload[2] == 0x0AU) && (payload[3] == 0x03U);
+      break;
+    default:
+      break;
+  }
+  return matches;
+}
+
+static bool preap_diag_positive_length_valid(uint16_t length) {
+  bool valid = false;
+  switch (preap_diag_phase) {
+    case PREAP_DIAG_AWAIT_TESTER:
+    case PREAP_DIAG_AWAIT_READINESS:
+    case PREAP_DIAG_AWAIT_KEY:
+      valid = length == 2U;
+      break;
+    case PREAP_DIAG_AWAIT_INITIAL_DEFAULT:
+    case PREAP_DIAG_AWAIT_EXTENDED:
+    case PREAP_DIAG_CLEANUP_PENDING:
+      valid = length >= 2U;
+      break;
+    case PREAP_DIAG_AWAIT_PRE_VIN:
+    case PREAP_DIAG_AWAIT_FINAL_VIN:
+      valid = length == 20U;
+      break;
+    case PREAP_DIAG_AWAIT_SEED:
+      valid = length == 6U;
+      break;
+    case PREAP_DIAG_AWAIT_START:
+    case PREAP_DIAG_AWAIT_STOP:
+    case PREAP_DIAG_AWAIT_RESULTS:
+      valid = length >= 4U;
+      break;
+    default:
+      break;
+  }
+  return valid;
+}
+
+static uint8_t preap_diag_expected_request_sid(void) {
+  uint8_t sid = 0U;
+  switch (preap_diag_phase) {
+    case PREAP_DIAG_AWAIT_TESTER:
+    case PREAP_DIAG_AWAIT_READINESS:
+      sid = 0x3EU;
+      break;
+    case PREAP_DIAG_AWAIT_INITIAL_DEFAULT:
+    case PREAP_DIAG_AWAIT_EXTENDED:
+    case PREAP_DIAG_CLEANUP_PENDING:
+      sid = 0x10U;
+      break;
+    case PREAP_DIAG_AWAIT_PRE_VIN:
+    case PREAP_DIAG_AWAIT_FINAL_VIN:
+      sid = 0x22U;
+      break;
+    case PREAP_DIAG_AWAIT_SEED:
+    case PREAP_DIAG_AWAIT_KEY:
+      sid = 0x27U;
+      break;
+    case PREAP_DIAG_AWAIT_START:
+    case PREAP_DIAG_AWAIT_STOP:
+    case PREAP_DIAG_AWAIT_RESULTS:
+      sid = 0x31U;
+      break;
+    default:
+      break;
+  }
+  return sid;
+}
+
+static void preap_diag_finish_positive_response(uint16_t length) {
+  if (!preap_diag_positive_length_valid(length)) {
+    preap_diag_poison();
+    return;
+  }
+
+  switch (preap_diag_phase) {
+    case PREAP_DIAG_AWAIT_TESTER:
+      preap_diag_set_phase(PREAP_DIAG_INITIAL_DEFAULT);
+      break;
+    case PREAP_DIAG_AWAIT_INITIAL_DEFAULT:
+      preap_diag_set_phase(PREAP_DIAG_EXTENDED);
+      break;
+    case PREAP_DIAG_AWAIT_EXTENDED:
+      preap_diag_readiness_tx_count = 0U;
+      preap_diag_set_phase(PREAP_DIAG_READINESS);
+      break;
+    case PREAP_DIAG_AWAIT_READINESS:
+      preap_diag_set_phase(PREAP_DIAG_PRE_VIN);
+      break;
+    case PREAP_DIAG_AWAIT_PRE_VIN:
+      preap_diag_set_phase(PREAP_DIAG_SEED);
+      break;
+    case PREAP_DIAG_AWAIT_SEED:
+      preap_diag_set_phase(PREAP_DIAG_KEY);
+      break;
+    case PREAP_DIAG_AWAIT_KEY:
+      preap_diag_set_phase(PREAP_DIAG_START);
+      break;
+    case PREAP_DIAG_AWAIT_START:
+      preap_diag_stop_attempts = 0U;
+      preap_diag_set_phase(PREAP_DIAG_STOP);
+      break;
+    case PREAP_DIAG_AWAIT_STOP:
+      preap_diag_successful_stops++;
+      preap_diag_stop_attempts = 0U;
+      preap_diag_set_phase((preap_diag_successful_stops >= 2U) ? PREAP_DIAG_RESULTS : PREAP_DIAG_STOP);
+      break;
+    case PREAP_DIAG_AWAIT_RESULTS:
+      preap_diag_set_phase(PREAP_DIAG_FINAL_VIN);
+      break;
+    case PREAP_DIAG_AWAIT_FINAL_VIN:
+      preap_diag_set_phase(PREAP_DIAG_FINAL_CLEANUP);
+      break;
+    case PREAP_DIAG_CLEANUP_PENDING:
+      preap_diag_set_phase(PREAP_DIAG_IDLE);
+      break;
+    default:
+      preap_diag_poison();
+      break;
+  }
+}
+
+static void preap_diag_handle_payload(const uint8_t *payload, uint16_t length) {
+  if ((length == 3U) && (payload[0] == 0x7FU)) {
+    bool service_matches = payload[1] == preap_diag_expected_request_sid();
+    if (service_matches && (payload[2] == 0x78U)) {
+      preap_diag_note_activity();
+    } else if (service_matches && (preap_diag_phase == PREAP_DIAG_AWAIT_STOP) &&
+               (preap_diag_stop_attempts < 3U)) {
+      preap_diag_set_phase(PREAP_DIAG_STOP);
+      preap_diag_note_activity();
+    } else {
+      preap_diag_poison();
+    }
+    return;
+  }
+
+  if (!preap_diag_expected_prefix(payload, length)) {
+    preap_diag_poison();
+    return;
+  }
+
+  preap_diag_note_activity();
+  preap_diag_finish_positive_response(length);
+}
+
+static void preap_diag_rx_frame(const CANPacket_t *msg) {
+  if (!preap_diag_latched()) {
+    return;
+  }
+
+  if (!preap_diag_phase_awaits_response()) {
+    preap_diag_poison();
+    return;
+  }
+
+  uint8_t frame_type = msg->data[0] >> 4;
+  if (frame_type == 0U) {
+    uint8_t length = msg->data[0] & 0x0FU;
+    bool valid = !preap_diag_rx_in_progress && (length > 0U) && (length <= 7U);
+    for (int i = length + 1; i < 8; i++) {
+      valid &= msg->data[i] == 0U;
+    }
+    if (!valid) {
+      preap_diag_poison();
+      return;
+    }
+    preap_diag_handle_payload(&msg->data[1], length);
+  } else if (frame_type == 1U) {
+    uint16_t length = (((uint16_t)msg->data[0] & 0x0FU) << 8) | msg->data[1];
+    if (preap_diag_rx_in_progress || (length <= 7U) || !preap_diag_positive_length_valid(length) ||
+        !preap_diag_expected_prefix(&msg->data[2], 6U)) {
+      preap_diag_poison();
+      return;
+    }
+    preap_diag_rx_in_progress = true;
+    preap_diag_flow_control_allowed = true;
+    preap_diag_rx_length = length;
+    preap_diag_rx_received = 6U;
+    preap_diag_rx_sequence = 1U;
+    preap_diag_note_activity();
+  } else if (frame_type == 2U) {
+    uint8_t sequence = msg->data[0] & 0x0FU;
+    if (!preap_diag_rx_in_progress || preap_diag_flow_control_allowed || (sequence != preap_diag_rx_sequence)) {
+      preap_diag_poison();
+      return;
+    }
+
+    uint16_t remaining = preap_diag_rx_length - preap_diag_rx_received;
+    uint16_t copied = (remaining < 7U) ? remaining : 7U;
+    if (copied < 7U) {
+      for (int i = copied + 1; i < 8; i++) {
+        if (msg->data[i] != 0U) {
+          preap_diag_poison();
+          return;
+        }
+      }
+    }
+    preap_diag_rx_received += copied;
+    preap_diag_rx_sequence = (preap_diag_rx_sequence + 1U) & 0x0FU;
+    preap_diag_note_activity();
+    if (preap_diag_rx_received >= preap_diag_rx_length) {
+      uint16_t length = preap_diag_rx_length;
+      preap_diag_reset_rx();
+      preap_diag_finish_positive_response(length);
+    }
+  } else {
+    preap_diag_poison();
+  }
+}
+
+static bool preap_diag_tx_frame(const CANPacket_t *msg) {
+  static const uint8_t TESTER_PRESENT[8] = {0x02U, 0x3EU, 0x00U, 0U, 0U, 0U, 0U, 0U};
+  static const uint8_t DEFAULT_SESSION[8] = {0x02U, 0x10U, 0x01U, 0U, 0U, 0U, 0U, 0U};
+  static const uint8_t EXTENDED_SESSION[8] = {0x02U, 0x10U, 0x03U, 0U, 0U, 0U, 0U, 0U};
+  static const uint8_t REQUEST_SEED[8] = {0x02U, 0x27U, 0x11U, 0U, 0U, 0U, 0U, 0U};
+  static const uint8_t START_ROUTINE[8] = {0x04U, 0x31U, 0x01U, 0x0AU, 0x03U, 0U, 0U, 0U};
+  static const uint8_t STOP_ROUTINE[8] = {0x04U, 0x31U, 0x02U, 0x0AU, 0x03U, 0U, 0U, 0U};
+  static const uint8_t REQUEST_RESULTS[8] = {0x04U, 0x31U, 0x03U, 0x0AU, 0x03U, 0U, 0U, 0U};
+  static const uint8_t READ_VIN[8] = {0x03U, 0x22U, 0xF1U, 0x90U, 0U, 0U, 0U, 0U};
+  static const uint8_t FLOW_CONTROL[8] = {0x30U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+
+  bool is_default_session = preap_diag_payload_matches(msg, DEFAULT_SESSION);
+  if (preap_diag_latched() && is_default_session && (preap_diag_phase != PREAP_DIAG_INITIAL_DEFAULT)) {
+    preap_diag_set_phase(PREAP_DIAG_CLEANUP_PENDING);
+    preap_diag_note_activity();
+    return true;
+  }
+
+  if ((preap_diag_phase == PREAP_DIAG_AWAIT_READINESS) && !preap_diag_rx_in_progress &&
+      (preap_diag_readiness_tx_count < 10U) && preap_diag_payload_matches(msg, TESTER_PRESENT)) {
+    preap_diag_readiness_tx_count++;
+    controls_allowed = false;
+    preap_diag_note_activity();
+    return true;
+  }
+
+  bool allowed = false;
+  switch (preap_diag_phase) {
+    case PREAP_DIAG_IDLE:
+      if (!controls_allowed && !preap_diag_attempt_consumed && preap_diag_payload_matches(msg, TESTER_PRESENT)) {
+        preap_diag_attempt_consumed = true;
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_TESTER);
+        allowed = true;
+      } else if (!controls_allowed && is_default_session) {
+        preap_diag_set_phase(PREAP_DIAG_CLEANUP_PENDING);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_INITIAL_DEFAULT:
+      if (is_default_session) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_INITIAL_DEFAULT);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_EXTENDED:
+      if (preap_diag_payload_matches(msg, EXTENDED_SESSION)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_EXTENDED);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_READINESS:
+      if ((preap_diag_readiness_tx_count < 10U) && preap_diag_payload_matches(msg, TESTER_PRESENT)) {
+        preap_diag_readiness_tx_count++;
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_READINESS);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_PRE_VIN:
+      if (preap_diag_payload_matches(msg, READ_VIN)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_PRE_VIN);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_SEED:
+      if (preap_diag_payload_matches(msg, REQUEST_SEED)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_SEED);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_KEY:
+      if (preap_diag_key_matches(msg)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_KEY);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_START:
+      if (preap_diag_payload_matches(msg, START_ROUTINE)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_START);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_STOP:
+      if (preap_diag_payload_matches(msg, STOP_ROUTINE) && (preap_diag_stop_attempts < 3U) &&
+          (preap_diag_stop_tx_count < 6U)) {
+        preap_diag_stop_attempts++;
+        preap_diag_stop_tx_count++;
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_STOP);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_RESULTS:
+      if (preap_diag_payload_matches(msg, REQUEST_RESULTS) && (preap_diag_successful_stops == 2U)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_RESULTS);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_FINAL_VIN:
+      if (preap_diag_payload_matches(msg, READ_VIN)) {
+        preap_diag_set_phase(PREAP_DIAG_AWAIT_FINAL_VIN);
+        allowed = true;
+      }
+      break;
+    case PREAP_DIAG_FINAL_CLEANUP:
+      if (is_default_session) {
+        preap_diag_set_phase(PREAP_DIAG_CLEANUP_PENDING);
+        allowed = true;
+      }
+      break;
+    default:
+      if (preap_diag_payload_matches(msg, FLOW_CONTROL) && preap_diag_rx_in_progress &&
+          preap_diag_flow_control_allowed) {
+        preap_diag_flow_control_allowed = false;
+        allowed = true;
+      }
+      break;
+  }
+
+  if (allowed) {
+    controls_allowed = false;
+    preap_diag_note_activity();
+  } else if (preap_diag_latched()) {
+    preap_diag_poison();
+  }
+  return allowed;
+}
 
 // ============================================
 // Checksum and counter (for EPAS validation)
@@ -219,6 +706,15 @@ static uint8_t preap_byte_sum_checksum(const CANPacket_t *pkt) {
 static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
   int bus_num = GET_BUS(to_fwd);
   int addr = GET_ADDR(to_fwd);
+
+  preap_diag_guard();
+  if ((addr == 0x651) && preap_diag_latched()) {
+    if ((bus_num == 1) && (GET_LEN(to_fwd) == 8)) {
+      preap_diag_rx_frame(to_fwd);
+    } else {
+      preap_diag_poison();
+    }
+  }
 
   if (bus_num == 0 && preap_radar_emulation) {
     // Group A: Simple re-addresses
@@ -336,6 +832,9 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
 // ============================================
 
 static void tesla_preap_rx_hook(const CANPacket_t *msg) {
+  preap_diag_guard();
+  bool diagnostic_latched = preap_diag_latched();
+
   // Pedal interceptor (0x552) — may arrive on bus 0 OR bus 2 depending on wiring.
   // Must be handled BEFORE the bus-0-only bailout below.
   // Whitelisted on both bus 0 and bus 2 in preap_rx_checks; the framework has
@@ -441,7 +940,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   }
 
   // Stalk engagement (STW_ACTN_RQ: 0x45) with echo-filtered cancel
-  if (msg->addr == 0x45U) {
+  if ((msg->addr == 0x45U) && !diagnostic_latched) {
     int lever = msg->data[0] & 0x3FU;
     if (lever == 2) {  // RWD = pull toward driver = enable
       if ((preap_gear == 4) && !preap_doors_open) {
@@ -455,6 +954,10 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
       }
     }
   }
+
+  if (diagnostic_latched) {
+    controls_allowed = false;
+  }
 }
 
 // ============================================
@@ -462,6 +965,12 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
 // ============================================
 
 static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
+  preap_diag_guard();
+  if (msg->addr == 0x641U) {
+    return preap_radar_vin_learn && preap_diag_tx_frame(msg);
+  }
+  bool diagnostic_latched = preap_diag_latched();
+
   const AngleSteeringLimits PREAP_STEERING_LIMITS = {
     .max_angle = 3600,  // 360 deg, EPAS faults above this
     .angle_deg_to_can = 10,
@@ -495,12 +1004,15 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     if ((steer_control_type != 0) && (steer_control_type != 1)) {
       violation = true;
     }
+    if (diagnostic_latched && steer_control_enabled) {
+      violation = true;
+    }
   }
 
   // EPB_epasControl (0x214): only allow valid EAC modes (0=disable, 1=enable)
   if (msg->addr == 0x214U) {
     int epas_control_type = msg->data[0] & 0x07U;  // EPB_epasEACAllow: bits 2:0 of byte 0
-    if (epas_control_type > 1) {
+    if ((epas_control_type > 1) || (diagnostic_latched && (epas_control_type != 0))) {
       violation = true;
     }
   }
@@ -508,7 +1020,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   // DAS_control (0x2B9): no AEB events from openpilot
   if (msg->addr == 0x2B9U) {
     int aeb_event = msg->data[2] & 0x03U;
-    if (aeb_event != 0) {
+    if ((aeb_event != 0) || diagnostic_latched) {
       violation = true;
     }
   }
@@ -536,7 +1048,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
       int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
       if (pedal_enable) {
-        if (!get_longitudinal_allowed() || preap_di_brake_pressed || preap_brake_message_pressed) {
+        if (diagnostic_latched || !get_longitudinal_allowed() || preap_di_brake_pressed || preap_brake_message_pressed) {
           violation = true;
         }
       } else {
@@ -560,9 +1072,13 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     if (turn_req > 3) {
       violation = true;
     }
-    if (!controls_allowed) {
+    if (!controls_allowed || diagnostic_latched) {
       violation = true;
     }
+  }
+
+  if ((msg->addr == 0x45U) && diagnostic_latched) {
+    violation = true;
   }
 
   if (violation) {
@@ -576,6 +1092,7 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
 // ============================================
 
 static bool tesla_preap_fwd_hook(int bus_num, int addr) {
+  preap_diag_guard();
   (void)bus_num;
   (void)addr;
   // Pre-AP has no AP ECU on bus 2. Block default 0↔2 forwarding to avoid
@@ -589,7 +1106,8 @@ static bool tesla_preap_fwd_hook(int bus_num, int addr) {
 
 static safety_config tesla_preap_init(uint16_t param) {
   preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
-  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
+  preap_radar_vin_learn = GET_FLAG(param, PREAP_FLAG_RADAR_VIN_LEARN);
+  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION) || preap_radar_vin_learn;
   preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
 
   preap_gear = 4;
@@ -602,6 +1120,14 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_last_radar_signal = 0;
   preap_last_stalk_engage_us = 0;
   preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+  preap_diag_phase = PREAP_DIAG_IDLE;
+  preap_diag_last_activity_us = 0U;
+  preap_diag_readiness_tx_count = 0U;
+  preap_diag_stop_attempts = 0U;
+  preap_diag_stop_tx_count = 0U;
+  preap_diag_successful_stops = 0U;
+  preap_diag_attempt_consumed = false;
+  preap_diag_reset_rx();
 
   // TX whitelist — no harness relay on Pre-AP
   static const CanMsg PREAP_TX_MSGS[] = {
@@ -612,6 +1138,17 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
     {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
     {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
+  };
+
+  static const CanMsg PREAP_TX_MSGS_WITH_RADAR_VIN[] = {
+    {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x2B9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_control
+    {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},  // EPB_epasControl
+    {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 0
+    {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
+    {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
+    {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
+    {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // Radar diagnostics
   };
 
   // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
@@ -646,8 +1183,12 @@ static safety_config tesla_preap_init(uint16_t param) {
              {0x552, 2, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR
   };
 
-  return preap_enable_pedal ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS)
-                            : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
+  if (preap_enable_pedal) {
+    return preap_radar_vin_learn ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS_WITH_RADAR_VIN)
+                                 : BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS);
+  }
+  return preap_radar_vin_learn ? BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_WITH_RADAR_VIN)
+                               : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
 }
 
 // ============================================

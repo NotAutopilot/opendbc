@@ -1,13 +1,9 @@
 import numpy as np
 
-from opendbc.car import get_safety_config, structs, STD_CARGO_KG
+from opendbc.car import get_safety_config, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.tesla.preap.nap_conf import nap_conf
-
-# Safety param flags matching tesla_preap.h (renumbered — LONG_CONTROL removed as dead code)
-PREAP_FLAG_ENABLE_PEDAL = 1
-PREAP_FLAG_RADAR_EMULATION = 2
-PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
+from opendbc.car.tesla.preap.safety_flags import TeslaPreAPSafetyFlags
 from opendbc.car.tesla.preap.constants import (
   ACCEL_PREAP_BP, ACCEL_PREAP_PROFILES,
   PEDAL_LONG_K_BP, PEDAL_LONG_KP_V, PEDAL_LONG_KI_V,
@@ -34,7 +30,7 @@ def get_preap_accel_limits(current_speed):
 
 def get_preap_params(ret, fingerprint):
   # Build safety param flags for the standalone Pre-AP safety mode
-  flags = 0
+  flags = TeslaPreAPSafetyFlags(0)
   use_pedal = nap_conf.use_pedal
   radar_enabled = nap_conf.radar_enabled
   radar_behind_nosecone = nap_conf.radar_behind_nosecone
@@ -42,11 +38,11 @@ def get_preap_params(ret, fingerprint):
               use_pedal, radar_enabled, radar_behind_nosecone)
 
   if use_pedal:
-    flags |= PREAP_FLAG_ENABLE_PEDAL
+    flags |= TeslaPreAPSafetyFlags.ENABLE_PEDAL
   if radar_enabled:
-    flags |= PREAP_FLAG_RADAR_EMULATION
+    flags |= TeslaPreAPSafetyFlags.RADAR_EMULATION | TeslaPreAPSafetyFlags.RADAR_VIN_LEARN
   if radar_behind_nosecone:
-    flags |= PREAP_FLAG_RADAR_BEHIND_NOSECONE
+    flags |= TeslaPreAPSafetyFlags.RADAR_BEHIND_NOSECONE
 
   ret.safetyConfigs = [
     get_safety_config(structs.CarParams.SafetyModel.teslaPreap, int(flags)),

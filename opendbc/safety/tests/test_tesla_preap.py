@@ -2,6 +2,7 @@
 import unittest
 
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
+from opendbc.car.tesla.preap.safety_flags import TeslaPreAPSafetyFlags
 from opendbc.car.tesla.values import CarControllerParams
 from opendbc.car.structs import CarParams
 from opendbc.car.vehicle_model import VehicleModel
@@ -9,14 +10,26 @@ from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
 from opendbc.safety.tests.common import CANPackerSafety
 
-# Safety param flags matching tesla_preap.h (LONG_CONTROL removed — dead code)
-PREAP_FLAG_ENABLE_PEDAL = 1
-PREAP_FLAG_RADAR_EMULATION = 2
-PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
-
 # Stalk lever positions from tesla_preap.h
 STALK_FWD_CANCEL = 1
 STALK_RWD_ENGAGE = 2
+
+RADAR_DIAG_TX_ADDR = 0x641
+RADAR_DIAG_RX_ADDR = 0x651
+RADAR_DIAG_BUS = 1
+
+TESTER_PRESENT = b"\x02\x3e\x00\x00\x00\x00\x00\x00"
+DEFAULT_SESSION = b"\x02\x10\x01\x00\x00\x00\x00\x00"
+EXTENDED_SESSION = b"\x02\x10\x03\x00\x00\x00\x00\x00"
+REQUEST_SEED = b"\x02\x27\x11\x00\x00\x00\x00\x00"
+SEND_KEY = b"\x06\x27\x12\x12\x34\x56\x78\x00"
+START_ROUTINE = b"\x04\x31\x01\x0a\x03\x00\x00\x00"
+STOP_ROUTINE = b"\x04\x31\x02\x0a\x03\x00\x00\x00"
+REQUEST_RESULTS = b"\x04\x31\x03\x0a\x03\x00\x00\x00"
+READ_VIN = b"\x03\x22\xf1\x90\x00\x00\x00\x00"
+FLOW_CONTROL = b"\x30\x00\x00\x00\x00\x00\x00\x00"
+
+SYNTHETIC_VIN_RESPONSE = b"\x62\xf1\x90" + b"A" * 17
 
 
 def _fix_epas_checksum(msg):
@@ -458,7 +471,7 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
     self._setup_safety_hooks()
 
   def _setup_safety_hooks(self):
-    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, PREAP_FLAG_ENABLE_PEDAL)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, int(TeslaPreAPSafetyFlags.ENABLE_PEDAL))
     self.safety.init_tests()
 
   # Pedal interceptor (0x552) values are raw 16-bit integers read by the panda as
@@ -670,6 +683,646 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
                                                  {"GAS_COMMAND": 100, "ENABLE": 0})
     self.assertFalse(self._tx(attack_msg),
                      "ENABLE=0 with high GAS_COMMAND must be blocked (defense-in-depth)")
+
+
+class TeslaPreAPRadarVinTestMixin(TeslaPreAPTestMixin):
+  __test__ = False
+
+  REQUEST_STAGES = (
+    ("tester", TESTER_PRESENT, frozenset()),
+    ("default", DEFAULT_SESSION, frozenset()),
+    ("extended", EXTENDED_SESSION, frozenset()),
+    ("readiness", TESTER_PRESENT, frozenset()),
+    ("read_vin", READ_VIN, frozenset()),
+    ("seed", REQUEST_SEED, frozenset()),
+    ("key", SEND_KEY, frozenset((3, 4, 5, 6))),
+    ("start", START_ROUTINE, frozenset()),
+    ("stop", STOP_ROUTINE, frozenset()),
+    ("results", REQUEST_RESULTS, frozenset()),
+    ("final_vin", READ_VIN, frozenset()),
+    ("cleanup", DEFAULT_SESSION, frozenset()),
+  )
+
+  AWAIT_CASES = (
+    ("tester", TESTER_PRESENT, 0x3E, b"\x7e\x00", DEFAULT_SESSION),
+    ("default", DEFAULT_SESSION, 0x10, b"\x50\x01", EXTENDED_SESSION),
+    ("extended", EXTENDED_SESSION, 0x10, b"\x50\x03", TESTER_PRESENT),
+    ("readiness", TESTER_PRESENT, 0x3E, b"\x7e\x00", READ_VIN),
+    ("read_vin", READ_VIN, 0x22, SYNTHETIC_VIN_RESPONSE, REQUEST_SEED),
+    ("seed", REQUEST_SEED, 0x27, b"\x67\x11\x01\x02\x03\x04", SEND_KEY),
+    ("key", SEND_KEY, 0x27, b"\x67\x12", START_ROUTINE),
+    ("start", START_ROUTINE, 0x31, b"\x71\x01\x0a\x03", STOP_ROUTINE),
+    ("stop", STOP_ROUTINE, 0x31, b"\x71\x02\x0a\x03", STOP_ROUTINE),
+    ("results", REQUEST_RESULTS, 0x31, b"\x71\x03\x0a\x03", READ_VIN),
+    ("final_vin", READ_VIN, 0x22, SYNTHETIC_VIN_RESPONSE, DEFAULT_SESSION),
+    ("cleanup", DEFAULT_SESSION, 0x10, b"\x50\x01", None),
+  )
+
+  def _setup_safety_hooks(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, int(TeslaPreAPSafetyFlags.RADAR_VIN_LEARN))
+    self.safety.init_tests()
+
+  def _diag_tx(self, data, addr=RADAR_DIAG_TX_ADDR, bus=RADAR_DIAG_BUS):
+    return self._tx(libsafety_py.make_CANPacket(addr, bus, data))
+
+  def _diag_rx(self, data, addr=RADAR_DIAG_RX_ADDR, bus=RADAR_DIAG_BUS):
+    return self._rx(libsafety_py.make_CANPacket(addr, bus, data))
+
+  def _single_response(self, payload):
+    assert len(payload) <= 7
+    self._diag_rx(bytes([len(payload)]) + payload + bytes(7 - len(payload)))
+
+  @staticmethod
+  def _first_frame(payload_prefix, declared_length):
+    assert 7 < declared_length <= 0xFFF
+    assert len(payload_prefix) <= 6
+    return bytes([0x10 | (declared_length >> 8), declared_length & 0xFF]) + payload_prefix + bytes(6 - len(payload_prefix))
+
+  def _multiframe_response(self, payload):
+    assert 7 < len(payload) <= 0xFFF
+    self._diag_rx(self._first_frame(payload[:6], len(payload)))
+    self.assertTrue(self._diag_tx(FLOW_CONTROL))
+
+    offset = 6
+    sequence = 1
+    while offset < len(payload):
+      chunk = payload[offset:offset + 7]
+      frame = bytes([0x20 | sequence]) + chunk + bytes(7 - len(chunk))
+      self._diag_rx(frame)
+      offset += len(chunk)
+      sequence = (sequence + 1) & 0xF
+
+  def _positive_response(self, payload):
+    if len(payload) <= 7:
+      self._single_response(payload)
+    else:
+      self._multiframe_response(payload)
+
+  def _request_and_single_response(self, request, response):
+    self.assertTrue(self._diag_tx(request))
+    self._single_response(response)
+
+  def _prepare_stage(self, stage):
+    self._setup_safety_hooks()
+    if stage == "tester":
+      return
+
+    self._request_and_single_response(TESTER_PRESENT, b"\x7e\x00")
+    if stage == "default":
+      return
+
+    self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+    if stage == "extended":
+      return
+
+    self._request_and_single_response(EXTENDED_SESSION, b"\x50\x03")
+    if stage == "readiness":
+      return
+
+    self._request_and_single_response(TESTER_PRESENT, b"\x7e\x00")
+    if stage == "read_vin":
+      return
+
+    self.assertTrue(self._diag_tx(READ_VIN))
+    self._multiframe_response(SYNTHETIC_VIN_RESPONSE)
+    if stage == "seed":
+      return
+
+    self._request_and_single_response(REQUEST_SEED, b"\x67\x11\x01\x02\x03\x04")
+    if stage == "key":
+      return
+
+    self._request_and_single_response(SEND_KEY, b"\x67\x12")
+    if stage == "start":
+      return
+
+    self._request_and_single_response(START_ROUTINE, b"\x71\x01\x0a\x03")
+    if stage == "stop":
+      return
+
+    self._request_and_single_response(STOP_ROUTINE, b"\x71\x02\x0a\x03")
+    self._request_and_single_response(STOP_ROUTINE, b"\x71\x02\x0a\x03")
+    if stage == "results":
+      return
+
+    self._request_and_single_response(REQUEST_RESULTS, b"\x71\x03\x0a\x03")
+    if stage == "final_vin":
+      return
+
+    self.assertTrue(self._diag_tx(READ_VIN))
+    self._multiframe_response(SYNTHETIC_VIN_RESPONSE)
+    if stage == "cleanup":
+      return
+
+    raise AssertionError(f"unknown diagnostic stage: {stage}")
+
+  def _epas_control_msg(self, mode):
+    return self.packer.make_can_msg_safety("EPB_epasControl", 0, {"EPB_epasEACAllow": mode})
+
+  def _das_control_msg(self):
+    return self.packer.make_can_msg_safety("DAS_control", 0, {"DAS_aebEvent": 0})
+
+  def _body_control_msg(self):
+    return self.packer.make_can_msg_safety("DAS_bodyControls", 0, {"DAS_turnIndicatorRequest": 1})
+
+  def _stalk_tx_msg(self):
+    return self.packer.make_can_msg_safety("STW_ACTN_RQ", 0, {"SpdCtrlLvr_Stat": STALK_RWD_ENGAGE})
+
+  def _enter_latched_state(self, state):
+    self._setup_safety_hooks()
+    if state == "active":
+      self.assertTrue(self._diag_tx(TESTER_PRESENT))
+    elif state == "poisoned":
+      self.assertTrue(self._diag_tx(TESTER_PRESENT))
+      self.assertFalse(self._diag_tx(REQUEST_SEED))
+    elif state == "cleanup_pending":
+      self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+    else:
+      raise AssertionError(f"unknown latch state: {state}")
+
+  def _assert_non_pedal_release_policy(self):
+    self._rx(self._angle_meas_msg(0))
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, 0)))
+    self.assertTrue(self._tx(self._epas_control_msg(0)))
+
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._angle_cmd_msg(0, 1)))
+    self.assertFalse(self._tx(self._epas_control_msg(1)))
+    self.assertFalse(self._tx(self._das_control_msg()))
+    self.assertFalse(self._tx(self._body_control_msg()))
+    self.assertFalse(self._tx(self._stalk_tx_msg()))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_capability_whitelists_only_exact_diagnostic_address_bus_and_length(self):
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+
+    for addr in (RADAR_DIAG_TX_ADDR - 1, RADAR_DIAG_TX_ADDR + 1):
+      self._setup_safety_hooks()
+      self.assertFalse(self._diag_tx(TESTER_PRESENT, addr=addr))
+    for bus in (0, 2, 3):
+      self._setup_safety_hooks()
+      self.assertFalse(self._diag_tx(TESTER_PRESENT, bus=bus))
+    for length in range(9):
+      if length == 8:
+        continue
+      self._setup_safety_hooks()
+      self.assertFalse(self._diag_tx(TESTER_PRESENT[:length]))
+
+    for flags in (TeslaPreAPSafetyFlags(0), TeslaPreAPSafetyFlags.RADAR_EMULATION):
+      self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, int(flags))
+      self.safety.init_tests()
+      for _, request, _ in self.REQUEST_STAGES:
+        self.assertFalse(self._diag_tx(request))
+
+  def test_exact_happy_path_and_normal_behavior_after_cleanup(self):
+    self._prepare_stage("tester")
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._request_and_single_response(TESTER_PRESENT, b"\x7e\x00")
+    self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01\x00\x32\x01\xf4")
+    self._request_and_single_response(EXTENDED_SESSION, b"\x50\x03")
+    self._request_and_single_response(TESTER_PRESENT, b"\x7e\x00")
+
+    self.assertTrue(self._diag_tx(READ_VIN))
+    self._multiframe_response(SYNTHETIC_VIN_RESPONSE)
+    self._request_and_single_response(REQUEST_SEED, b"\x67\x11\x01\x02\x03\x04")
+    self._request_and_single_response(SEND_KEY, b"\x67\x12")
+    self._request_and_single_response(START_ROUTINE, b"\x71\x01\x0a\x03")
+    self._request_and_single_response(STOP_ROUTINE, b"\x71\x02\x0a\x03")
+    self._request_and_single_response(STOP_ROUTINE, b"\x71\x02\x0a\x03")
+    self._request_and_single_response(REQUEST_RESULTS, b"\x71\x03\x0a\x03")
+    self.assertTrue(self._diag_tx(READ_VIN))
+    self._multiframe_response(SYNTHETIC_VIN_RESPONSE)
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+    self._single_response(b"\x50\x01")
+
+    self.assertFalse(self._diag_tx(REQUEST_SEED))
+    self.safety.set_controls_allowed(True)
+    self._rx(self._angle_meas_msg(0))
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, 1)))
+    self.assertTrue(self._tx(self._epas_control_msg(1)))
+    self.assertTrue(self._tx(self._das_control_msg()))
+    self.assertTrue(self._tx(self._body_control_msg()))
+    self.assertFalse(self._diag_tx(DEFAULT_SESSION))
+
+  def test_every_fixed_request_bit_is_required(self):
+    for stage, request, wildcard_indexes in self.REQUEST_STAGES:
+      for byte_index in range(len(request)):
+        if byte_index in wildcard_indexes:
+          continue
+        for bit in range(8):
+          self._prepare_stage(stage)
+          mutated = bytearray(request)
+          mutated[byte_index] ^= 1 << bit
+          if bytes(mutated) == DEFAULT_SESSION:
+            continue
+          self.assertFalse(self._diag_tx(bytes(mutated)), (stage, byte_index, bit))
+
+  def test_all_wrong_services_subfunctions_and_identifiers_are_rejected(self):
+    fields = (
+      ("tester", TESTER_PRESENT, 1, 0x3E),
+      ("tester", TESTER_PRESENT, 2, 0x00),
+      ("default", DEFAULT_SESSION, 1, 0x10),
+      ("default", DEFAULT_SESSION, 2, 0x01),
+      ("extended", EXTENDED_SESSION, 1, 0x10),
+      ("extended", EXTENDED_SESSION, 2, 0x03),
+      ("read_vin", READ_VIN, 1, 0x22),
+      ("read_vin", READ_VIN, 2, 0xF1),
+      ("read_vin", READ_VIN, 3, 0x90),
+      ("seed", REQUEST_SEED, 1, 0x27),
+      ("seed", REQUEST_SEED, 2, 0x11),
+      ("key", SEND_KEY, 1, 0x27),
+      ("key", SEND_KEY, 2, 0x12),
+      ("start", START_ROUTINE, 1, 0x31),
+      ("start", START_ROUTINE, 2, 0x01),
+      ("start", START_ROUTINE, 3, 0x0A),
+      ("start", START_ROUTINE, 4, 0x03),
+      ("stop", STOP_ROUTINE, 1, 0x31),
+      ("stop", STOP_ROUTINE, 2, 0x02),
+      ("stop", STOP_ROUTINE, 3, 0x0A),
+      ("stop", STOP_ROUTINE, 4, 0x03),
+      ("results", REQUEST_RESULTS, 1, 0x31),
+      ("results", REQUEST_RESULTS, 2, 0x03),
+      ("results", REQUEST_RESULTS, 3, 0x0A),
+      ("results", REQUEST_RESULTS, 4, 0x03),
+    )
+    for stage, request, byte_index, expected in fields:
+      for value in range(256):
+        if value == expected:
+          continue
+        self._prepare_stage(stage)
+        mutated = bytearray(request)
+        mutated[byte_index] = value
+        if bytes(mutated) == DEFAULT_SESSION:
+          continue
+        self.assertFalse(self._diag_tx(bytes(mutated)), (stage, byte_index, value))
+
+  def test_key_data_bytes_are_arbitrary_but_key_is_one_shot(self):
+    self._prepare_stage("key")
+    self.assertTrue(self._diag_tx(b"\x06\x27\x12\x00\xff\x5a\xa5\x00"))
+    self.assertFalse(self._diag_tx(SEND_KEY))
+    self._single_response(b"\x67\x12")
+    self.assertFalse(self._diag_tx(SEND_KEY))
+
+  def test_readiness_tester_present_can_be_polled_until_response(self):
+    self._prepare_stage("readiness")
+    for _ in range(10):
+      self.assertTrue(self._diag_tx(TESTER_PRESENT))
+      self.assertFalse(self.safety.get_controls_allowed())
+    self._single_response(b"\x7e\x00")
+    self.assertTrue(self._diag_tx(READ_VIN))
+
+    self._prepare_stage("readiness")
+    for _ in range(10):
+      self.assertTrue(self._diag_tx(TESTER_PRESENT))
+    self.assertFalse(self._diag_tx(TESTER_PRESENT))
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_out_of_order_requests_host_multiframe_and_flow_control_are_rejected(self):
+    premature = (EXTENDED_SESSION, REQUEST_SEED, SEND_KEY, START_ROUTINE, STOP_ROUTINE,
+                 REQUEST_RESULTS, READ_VIN, FLOW_CONTROL, b"\x10\x08\x31\x01\x0a\x03\x00\x00",
+                 b"\x21\x00\x00\x00\x00\x00\x00\x00")
+    for request in premature:
+      with self.subTest(request=request):
+        self._setup_safety_hooks()
+        self.assertFalse(self._diag_tx(request))
+
+    self._prepare_stage("stop")
+    self._request_and_single_response(STOP_ROUTINE, b"\x71\x02\x0a\x03")
+    self.assertFalse(self._diag_tx(REQUEST_RESULTS))
+
+  def test_stop_retries_are_bounded_per_successful_stage(self):
+    self._prepare_stage("stop")
+    for _stage in range(2):
+      for _ in range(2):
+        self.assertTrue(self._diag_tx(STOP_ROUTINE))
+        self._single_response(b"\x7f\x31\x22")
+      self.assertTrue(self._diag_tx(STOP_ROUTINE))
+      self._single_response(b"\x71\x02\x0a\x03")
+
+    self.assertTrue(self._diag_tx(REQUEST_RESULTS))
+    self.assertFalse(self._diag_tx(STOP_ROUTINE))
+
+    self._prepare_stage("stop")
+    for _ in range(3):
+      self.assertTrue(self._diag_tx(STOP_ROUTINE))
+      self._single_response(b"\x7f\x31\x22")
+    self.assertFalse(self._diag_tx(STOP_ROUTINE))
+    self.assertFalse(self._diag_tx(REQUEST_RESULTS))
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_response_pending_keeps_only_the_current_request_alive(self):
+    self._prepare_stage("stop")
+    self.assertTrue(self._diag_tx(STOP_ROUTINE))
+    self._single_response(b"\x7f\x31\x78")
+    self.assertFalse(self._diag_tx(STOP_ROUTINE))
+    self.assertFalse(self._diag_tx(REQUEST_RESULTS))
+    self._single_response(b"\x71\x02\x0a\x03")
+    self.assertFalse(self._diag_tx(REQUEST_RESULTS))
+
+  def test_matching_response_pending_keeps_every_await_phase_alive(self):
+    for stage, request, request_sid, positive, next_request in self.AWAIT_CASES:
+      with self.subTest(stage=stage):
+        self._prepare_stage(stage)
+        self.assertTrue(self._diag_tx(request))
+        self.safety.set_timer(29999999)
+        self._single_response(bytes([0x7F, request_sid, 0x78]))
+        self.assertFalse(self.safety.get_controls_allowed())
+
+        self.safety.set_timer(59999998)
+        self._positive_response(positive)
+        if stage == "tester":
+          self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+          self.assertTrue(self._diag_tx(EXTENDED_SESSION))
+        elif stage == "cleanup":
+          self.safety.set_controls_allowed(True)
+          self._rx(self._angle_meas_msg(0))
+          self.assertTrue(self._tx(self._angle_cmd_msg(0, 1)))
+        else:
+          self.assertTrue(self._diag_tx(next_request))
+
+  def test_wrong_response_pending_sid_and_non_pending_nrc_poison(self):
+    for stage, request, request_sid, positive, next_request in self.AWAIT_CASES:
+      bad_responses = [bytes([0x7F, (request_sid + 1) & 0xFF, 0x78])]
+      if stage != "stop":
+        bad_responses.append(bytes([0x7F, request_sid, 0x22]))
+
+      for bad_response in bad_responses:
+        with self.subTest(stage=stage, response=bad_response):
+          self._prepare_stage(stage)
+          self.assertTrue(self._diag_tx(request))
+          self._single_response(bad_response)
+
+          if len(positive) > 7:
+            self._diag_rx(self._first_frame(positive[:6], len(positive)))
+            self.assertFalse(self._diag_tx(FLOW_CONTROL))
+          elif stage == "tester":
+            self._single_response(positive)
+            self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+            self.assertFalse(self._diag_tx(EXTENDED_SESSION))
+          elif stage == "cleanup":
+            self._single_response(positive)
+            self.safety.set_controls_allowed(True)
+            self._rx(self._angle_meas_msg(0))
+            self.assertFalse(self._tx(self._angle_cmd_msg(0, 1)))
+          else:
+            self._single_response(positive)
+            self.assertFalse(self._diag_tx(next_request))
+
+          self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_completed_attempt_cannot_restart_before_safety_reinitialization(self):
+    self._prepare_stage("cleanup")
+    self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+
+    self.assertFalse(self._diag_tx(TESTER_PRESENT))
+    self.assertFalse(self._diag_tx(REQUEST_SEED))
+    self.assertFalse(self._diag_tx(SEND_KEY))
+    self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+    self.assertFalse(self._diag_tx(TESTER_PRESENT))
+
+    self._setup_safety_hooks()
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+
+  def test_failed_key_attempt_cannot_restart_after_cleanup(self):
+    self._prepare_stage("key")
+    invalid_key = SEND_KEY[:-1] + b"\x01"
+    self.assertFalse(self._diag_tx(invalid_key))
+    self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+
+    self.assertFalse(self._diag_tx(TESTER_PRESENT))
+    self.assertFalse(self._diag_tx(REQUEST_SEED))
+    self.assertFalse(self._diag_tx(SEND_KEY))
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+    self._setup_safety_hooks()
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+
+  def test_cleanup_only_bootstrap_does_not_consume_an_attempt(self):
+    self._setup_safety_hooks()
+    self._request_and_single_response(DEFAULT_SESSION, b"\x50\x01")
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+
+  def test_multiframe_prefix_and_one_shot_flow_control(self):
+    cases = (
+      ("default", DEFAULT_SESSION, b"\x50\x01" + b"\x00" * 6, 2),
+      ("extended", EXTENDED_SESSION, b"\x50\x03" + b"\x00" * 6, 2),
+      ("start", START_ROUTINE, b"\x71\x01\x0a\x03" + b"\x00" * 4, 4),
+      ("stop", STOP_ROUTINE, b"\x71\x02\x0a\x03" + b"\x00" * 4, 4),
+      ("results", REQUEST_RESULTS, b"\x71\x03\x0a\x03" + b"\x00" * 4, 4),
+      ("read_vin", READ_VIN, SYNTHETIC_VIN_RESPONSE, 3),
+      ("final_vin", READ_VIN, SYNTHETIC_VIN_RESPONSE, 3),
+      ("cleanup", DEFAULT_SESSION, b"\x50\x01" + b"\x00" * 6, 2),
+    )
+    for stage, request, response, prefix_length in cases:
+      with self.subTest(stage=stage):
+        self._prepare_stage(stage)
+        self.assertTrue(self._diag_tx(request))
+        self._diag_rx(self._first_frame(response[:6], len(response)))
+        self.assertTrue(self._diag_tx(FLOW_CONTROL))
+        self.assertFalse(self._diag_tx(FLOW_CONTROL))
+
+      for prefix_index in range(prefix_length):
+        with self.subTest(stage=stage, invalid_prefix=prefix_index):
+          self._prepare_stage(stage)
+          self.assertTrue(self._diag_tx(request))
+          invalid = bytearray(response)
+          invalid[prefix_index] ^= 1
+          self._diag_rx(self._first_frame(bytes(invalid[:6]), len(invalid)))
+          self.assertFalse(self._diag_tx(FLOW_CONTROL))
+          self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_first_frame_length_is_validated_before_flow_control(self):
+    cases = (
+      ("tester", TESTER_PRESENT, b"\x7e\x00", 8),
+      ("readiness", TESTER_PRESENT, b"\x7e\x00", 8),
+      ("seed", REQUEST_SEED, b"\x67\x11\x01\x02\x03\x04", 8),
+      ("key", SEND_KEY, b"\x67\x12", 8),
+      ("read_vin", READ_VIN, SYNTHETIC_VIN_RESPONSE[:6], 19),
+      ("read_vin", READ_VIN, SYNTHETIC_VIN_RESPONSE[:6], 21),
+      ("final_vin", READ_VIN, SYNTHETIC_VIN_RESPONSE[:6], 19),
+      ("final_vin", READ_VIN, SYNTHETIC_VIN_RESPONSE[:6], 21),
+    )
+    for stage, request, prefix, declared_length in cases:
+      with self.subTest(stage=stage, declared_length=declared_length):
+        self._prepare_stage(stage)
+        self.assertTrue(self._diag_tx(request))
+        self._diag_rx(self._first_frame(prefix, declared_length))
+        self.assertFalse(self._diag_tx(FLOW_CONTROL))
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_multiframe_sequence_and_completion_are_required(self):
+    self._prepare_stage("read_vin")
+    self.assertTrue(self._diag_tx(READ_VIN))
+    response = SYNTHETIC_VIN_RESPONSE
+    first_frame = bytes([0x10, len(response)]) + response[:6]
+    self._diag_rx(first_frame)
+    self.assertTrue(self._diag_tx(FLOW_CONTROL))
+    self.assertFalse(self._diag_tx(REQUEST_SEED))
+    self._diag_rx(b"\x22" + response[6:13])
+    self.assertFalse(self._diag_tx(REQUEST_SEED))
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_response_address_bus_length_padding_and_pci_are_strict(self):
+    self._prepare_stage("default")
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+    self._diag_rx(b"\x02\x50\x01\x00\x00\x00\x00\x00", addr=RADAR_DIAG_RX_ADDR - 1)
+    self._single_response(b"\x50\x01")
+    self.assertTrue(self._diag_tx(EXTENDED_SESSION))
+
+    malformed = (
+      (b"\x02\x50\x01\x00\x00\x00\x00\x00", RADAR_DIAG_BUS + 1),
+      (b"\x02\x50\x01\x00\x00\x00\x00", RADAR_DIAG_BUS),
+      (b"\x02\x50\x01\x01\x00\x00\x00\x00", RADAR_DIAG_BUS),
+      (b"\x30\x00\x00\x00\x00\x00\x00\x00", RADAR_DIAG_BUS),
+    )
+    for response, bus in malformed:
+      with self.subTest(response=response, bus=bus):
+        self._prepare_stage("default")
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self._diag_rx(response, bus=bus)
+        self.assertFalse(self._diag_tx(EXTENDED_SESSION))
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_drive_state_and_stalk_cannot_cancel_or_enable_diagnostics(self):
+    self._prepare_stage("default")
+    for msg in (self._gear_msg(4), self._gear_msg(0), self._speed_msg(30),
+                self._di_brake_msg(True), self._di_brake_msg(False),
+                self._user_brake_msg(True), self._user_brake_msg(False),
+                self._pcm_status_msg(True)):
+      self._rx(msg)
+      self.assertFalse(self.safety.get_controls_allowed())
+
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_release_frames_only_in_every_latched_state(self):
+    for state in ("active", "poisoned", "cleanup_pending"):
+      with self.subTest(state=state):
+        self._enter_latched_state(state)
+        self._assert_non_pedal_release_policy()
+
+  def test_poison_conditions_remain_fail_closed_until_matching_cleanup(self):
+    poisoners = ("out_of_order", "unexpected_response", "controls", "timeout")
+    for poisoner in poisoners:
+      with self.subTest(poisoner=poisoner):
+        self._setup_safety_hooks()
+        self.assertTrue(self._diag_tx(TESTER_PRESENT))
+        if poisoner == "out_of_order":
+          self.assertFalse(self._diag_tx(REQUEST_SEED))
+        elif poisoner == "unexpected_response":
+          self._single_response(b"\x67\x11\x01\x02\x03\x04")
+        elif poisoner == "controls":
+          self.safety.set_controls_allowed(True)
+          self.assertTrue(self._tx(self._epas_control_msg(0)))
+          self.assertFalse(self.safety.get_controls_allowed())
+        else:
+          self.safety.set_timer(30000000)
+          self.assertFalse(self._diag_tx(EXTENDED_SESSION))
+
+        self.assertFalse(self._diag_tx(START_ROUTINE))
+        self.safety.set_controls_allowed(True)
+        self.assertFalse(self._tx(self._angle_cmd_msg(0, 1)))
+        self.assertFalse(self.safety.get_controls_allowed())
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self._single_response(b"\x50\x03")
+        self.assertFalse(self._diag_tx(TESTER_PRESENT))
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self._single_response(b"\x50\x01")
+
+        self.safety.set_controls_allowed(True)
+        self._rx(self._angle_meas_msg(0))
+        self.assertTrue(self._tx(self._angle_cmd_msg(0, 1)))
+
+  def test_inactivity_timeout_boundary_is_exact_and_wrap_safe(self):
+    self._setup_safety_hooks()
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+    self._single_response(b"\x7e\x00")
+    self.safety.set_timer(29999999)
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+    self._setup_safety_hooks()
+    self.safety.set_timer(0xFFFFFF00)
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+    self.safety.set_timer((0xFFFFFF00 + 30000000) & 0xFFFFFFFF)
+    self.assertFalse(self._diag_tx(EXTENDED_SESSION))
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_cleanup_is_available_from_each_protocol_stage(self):
+    for stage, _, _ in self.REQUEST_STAGES:
+      if stage == "default":
+        continue
+      with self.subTest(stage=stage):
+        self._prepare_stage(stage)
+        if stage == "tester":
+          self.assertTrue(self._diag_tx(TESTER_PRESENT))
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self._single_response(b"\x50\x01")
+        self.safety.set_controls_allowed(True)
+        self._rx(self._angle_meas_msg(0))
+        self.assertTrue(self._tx(self._angle_cmd_msg(0, 1)))
+
+  def test_reinitialization_exposes_cleanup_only_bootstrap_from_each_stage(self):
+    for stage, _, _ in self.REQUEST_STAGES:
+      with self.subTest(stage=stage):
+        self._prepare_stage(stage)
+        self._setup_safety_hooks()
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self.assertFalse(self._diag_tx(TESTER_PRESENT))
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self._single_response(b"\x50\x01")
+        self.safety.set_controls_allowed(True)
+        self._rx(self._angle_meas_msg(0))
+        self.assertTrue(self._tx(self._angle_cmd_msg(0, 1)))
+
+  def test_cleanup_only_bootstrap_rejects_every_other_diagnostic_request(self):
+    for request in (TESTER_PRESENT, EXTENDED_SESSION, REQUEST_SEED, SEND_KEY,
+                    START_ROUTINE, STOP_ROUTINE, REQUEST_RESULTS, READ_VIN, FLOW_CONTROL):
+      with self.subTest(request=request):
+        self._setup_safety_hooks()
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self.assertFalse(self._diag_tx(request))
+        self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+        self._single_response(b"\x50\x01")
+
+
+class TestTeslaPreAPRadarVin(TeslaPreAPRadarVinTestMixin, unittest.TestCase):
+  __test__ = True
+
+  def setUp(self):
+    super().setUp()
+    self._setup_safety_hooks()
+
+
+class TestTeslaPreAPRadarVinWithPedal(TestTeslaPreAPWithPedal):
+  __test__ = True
+
+  def _setup_safety_hooks(self):
+    flags = TeslaPreAPSafetyFlags.ENABLE_PEDAL | TeslaPreAPSafetyFlags.RADAR_VIN_LEARN
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, int(flags))
+    self.safety.init_tests()
+
+  def _diag_tx(self, data):
+    return self._tx(libsafety_py.make_CANPacket(RADAR_DIAG_TX_ADDR, RADAR_DIAG_BUS, data))
+
+  def test_diagnostic_latch_allows_only_released_pedal_command(self):
+    for state in ("active", "poisoned", "cleanup_pending"):
+      with self.subTest(state=state):
+        self._setup_safety_hooks()
+        if state == "active":
+          self.assertTrue(self._diag_tx(TESTER_PRESENT))
+        elif state == "poisoned":
+          self.assertTrue(self._diag_tx(TESTER_PRESENT))
+          self.assertFalse(self._diag_tx(REQUEST_SEED))
+        else:
+          self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+        released = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 0})
+        high_release = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 100, "ENABLE": 0})
+        enabled = self.packer.make_can_msg_safety("GAS_COMMAND", 0, {"GAS_COMMAND": 0, "ENABLE": 1})
+        self.assertTrue(self._tx(released))
+        self.assertFalse(self._tx(high_release))
+        self.safety.set_controls_allowed(True)
+        self.assertFalse(self._tx(enabled))
+        self.assertFalse(self.safety.get_controls_allowed())
 
 
 if __name__ == "__main__":
