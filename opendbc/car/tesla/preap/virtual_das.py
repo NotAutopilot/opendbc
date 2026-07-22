@@ -51,15 +51,17 @@ PITCH_LP_RC = 0.5   # low-pass filter RC for steady-state grade (seconds)
 PITCH_HP_RC1 = 0.1  # high-pass inner RC for transient grade detection
 PITCH_HP_RC2 = 1.0  # high-pass outer RC
 MAX_PITCH_COMPENSATION = 1.5  # m/s² — clamp transient compensation
+MAX_STEADY_GRADE_COMPENSATION = 1.5  # m/s² — reject implausible sustained pitch
+TRANSIENT_GRADE_GAIN = 0.4
 
 
 class GradeEstimator:
   """Estimates road grade from IMU pitch and compensates the controller.
 
   Uses a low-pass filter on pitch for the steady-state grade component
-  (subtracted from a_ego so the inner PID doesn't fight gravity) and
-  a high-pass filter for transient grade changes (added to feedforward
-  so the controller anticipates crests and dips).
+  and a high-pass filter for transient grade changes. Both components are
+  added to actuator effort so planner targets and measured acceleration stay
+  in the same net-acceleration domain.
 
   Follows the same pattern as Toyota's carcontroller.py lines 68-69, 204-235.
   """
@@ -78,22 +80,30 @@ class GradeEstimator:
     Returns:
       (grade_accel, pitch_compensation):
         grade_accel: steady-state gravitational component along road (m/s²).
-                     Positive = downhill (gravity accelerates the car).
+                     Positive = uphill (gravity resists the car).
         pitch_compensation: transient feedforward bump for grade changes (m/s²).
     """
     if len(orientation_ned) < 2:
-      return 0.0, 0.0
+      return self._steady_grade_compensation(), 0.0
 
-    pitch = orientation_ned[1]
+    maximum_pitch = math.asin(MAX_STEADY_GRADE_COMPENSATION / GRAVITY)
+    pitch = float(clip(orientation_ned[1], -maximum_pitch, maximum_pitch))
     self.pitch_lp.update(pitch)
     self.pitch_hp.update(pitch)
 
-    grade_accel = math.sin(self.pitch_lp.x) * GRAVITY
+    grade_accel = self._steady_grade_compensation()
     pitch_compensation = float(clip(
-      math.sin(self.pitch_hp.x) * GRAVITY,
+      math.sin(self.pitch_hp.x) * GRAVITY * TRANSIENT_GRADE_GAIN,
       -MAX_PITCH_COMPENSATION, MAX_PITCH_COMPENSATION))
 
     return grade_accel, pitch_compensation
+
+  def _steady_grade_compensation(self) -> float:
+    return float(clip(
+      math.sin(self.pitch_lp.x) * GRAVITY,
+      -MAX_STEADY_GRADE_COMPENSATION,
+      MAX_STEADY_GRADE_COMPENSATION,
+    ))
 
   def reset(self):
     self.pitch_lp.x = 0.0
@@ -397,10 +407,13 @@ class VirtualDAS:
     self.a_ego_filter = FirstOrderFilter(0.0, VDAS_AEGO_FILTER_RC, dt)
     self.prev_a_ego_filtered = 0.0
     self.a_ego_initialized = False
+    self.pedal_ramp_limited_up = False
 
   def update(self, a_cmd: float, v_ego: float, prev_pedal_di: float,
              a_ego: float = 0.0, freeze_integrator: bool = False,
-             orientation_ned: list | None = None) -> float:
+             orientation_ned: list | None = None,
+             accel_effort_limits: tuple[float, float] | None = None,
+             pedal_ramp_rate_up: float = PEDAL_RAMP_RATE_UP) -> float:
     """Compute pedal DI from acceleration command.
 
     Args:
@@ -410,25 +423,29 @@ class VirtualDAS:
       a_ego: measured longitudinal acceleration in m/s²
       freeze_integrator: True during engage grace period
       orientation_ned: [roll, pitch, yaw] from CC.orientationNED, or None
+      accel_effort_limits: optional lower and upper acceleration-effort bounds
+      pedal_ramp_rate_up: maximum positive pedal DI change for this update
 
     Returns:
       pedal_di: output in DI units (caller converts to voltage via di_to_pedal)
     """
     a_limited = self.jerk_limiter.update(a_cmd)
 
-    grade_accel, pitch_compensation = self.grade_estimator.update(
+    steady_grade_compensation, transient_pitch_compensation = self.grade_estimator.update(
       orientation_ned if orientation_ned is not None else [])
+    effort_min, effort_max = accel_effort_limits or (REGEN_MAX, ACCEL_MAX)
+    if not REGEN_MAX <= effort_min <= effort_max <= ACCEL_MAX:
+      raise ValueError("acceleration-effort limits exceed the physical control range")
+    if not 0.0 <= pedal_ramp_rate_up <= PEDAL_RAMP_RATE_UP:
+      raise ValueError("pedal ramp limit exceeds the physical control range")
 
     base_accel_effort = float(clip(
-      a_limited + pitch_compensation,
-      REGEN_MAX,
-      ACCEL_MAX,
+      a_limited + steady_grade_compensation + transient_pitch_compensation,
+      effort_min,
+      effort_max,
     ))
 
-    # Subtract grade from a_ego so the PID doesn't fight gravity
-    a_ego_corrected = a_ego - grade_accel
-
-    a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
+    a_ego_filtered = self.a_ego_filter.update(a_ego)
     self.a_ego_initialized = True
     j_ego = float(clip(
       (a_ego_filtered - self.prev_a_ego_filtered) / self.dt,
@@ -444,9 +461,9 @@ class VirtualDAS:
       error = 0.0
 
     # Keep residual control in acceleration space. The PID can use only the
-    # authority left after the desired acceleration and transient grade term.
-    self.inner_pid.neg_limit = REGEN_MAX - base_accel_effort
-    self.inner_pid.pos_limit = ACCEL_MAX - base_accel_effort
+    # authority left after desired acceleration and grade compensation.
+    self.inner_pid.neg_limit = effort_min - base_accel_effort
+    self.inner_pid.pos_limit = effort_max - base_accel_effort
     self.inner_pid.i = float(clip(
       self.inner_pid.i,
       self.inner_pid.neg_limit,
@@ -457,8 +474,8 @@ class VirtualDAS:
       error, speed=v_ego, freeze_integrator=freeze_integrator))
     accel_effort = float(clip(
       base_accel_effort + accel_trim,
-      REGEN_MAX,
-      ACCEL_MAX,
+      effort_min,
+      effort_max,
     ))
 
     pedal_di_unclipped = self._feedforward(accel_effort, v_ego)
@@ -467,7 +484,8 @@ class VirtualDAS:
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
     pedal_di_bounded = float(clip(pedal_di_unclipped, PEDAL_DI_MIN, max_pedal_value))
 
-    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di)
+    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di, pedal_ramp_rate_up)
+    self.pedal_ramp_limited_up = pedal_di < pedal_di_bounded
     physical_bound_blocks_error = (
       (pedal_di_bounded < pedal_di_unclipped and error > 0.0)
       or (pedal_di_bounded > pedal_di_unclipped and error < 0.0)
@@ -484,10 +502,8 @@ class VirtualDAS:
 
   def observe(self, a_ego: float, orientation_ned: list | None = None):
     """Keep measured acceleration and grade state current without authority."""
-    grade_accel, _ = self.grade_estimator.update(
-      orientation_ned if orientation_ned is not None else [])
-    a_ego_corrected = a_ego - grade_accel
-    a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)
+    self.grade_estimator.update(orientation_ned if orientation_ned is not None else [])
+    a_ego_filtered = self.a_ego_filter.update(a_ego)
     self.prev_a_ego_filtered = a_ego_filtered
     self.a_ego_initialized = True
     self.inner_pid.reset()
@@ -509,16 +525,18 @@ class VirtualDAS:
       self.prev_a_ego_filtered = measured_accel
     self.a_ego_initialized = True
     self.prev_pedal_di = pedal_di_init
+    self.pedal_ramp_limited_up = False
 
   def _feedforward(self, a_cmd: float, v_ego: float) -> float:
     """Map acceleration to raw pedal DI via the finite 2D lookup table."""
     zero_torque_di = get_zero_torque().get(v_ego)
     return self.ff_model.get(a_cmd, v_ego, zero_torque_di)
 
-  def _rate_limit(self, pedal_di: float, prev_pedal_di: float) -> float:
+  def _rate_limit(self, pedal_di: float, prev_pedal_di: float,
+                  ramp_rate_up: float = PEDAL_RAMP_RATE_UP) -> float:
     """Safety backstop: asymmetric DI rate limit."""
     return float(clip(
       pedal_di,
       prev_pedal_di - PEDAL_RAMP_RATE_DOWN,
-      prev_pedal_di + PEDAL_RAMP_RATE_UP,
+      prev_pedal_di + ramp_rate_up,
     ))

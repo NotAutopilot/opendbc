@@ -967,22 +967,43 @@ class TestGradeEstimator:
     _, pitch_comp = ge.update([0.0, math.radians(20.0), 0.0])
     assert abs(pitch_comp) <= MAX_PITCH_COMPENSATION + 0.01
 
-  def test_grade_subtracted_from_aego(self, mock_nap_conf, mock_zero_torque):
-    """On a downhill, grade compensation should reduce the effective a_ego
-    so the PID doesn't think the car is over-accelerating."""
+  def test_sustained_pitch_outlier_cannot_exceed_steady_grade_limit(self):
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator, MAX_STEADY_GRADE_COMPENSATION
+    ge = GradeEstimator(dt=0.02)
+
+    for _ in range(500):
+      grade, _ = ge.update([0.0, math.radians(20.0), 0.0])
+
+    assert abs(grade) <= MAX_STEADY_GRADE_COMPENSATION
+    for _ in range(50):
+      recovered_grade, _ = ge.update([0.0, 0.0, 0.0])
+    assert abs(recovered_grade) < 0.3
+
+  def test_orientation_dropout_holds_filtered_steady_grade(self):
+    import math
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+    ge = GradeEstimator(dt=0.02)
+
+    for _ in range(200):
+      steady_grade, _ = ge.update([0.0, math.radians(3.0), 0.0])
+
+    dropout_grade, dropout_transient = ge.update([])
+
+    assert dropout_grade == pytest.approx(steady_grade)
+    assert dropout_transient == 0.0
+
+  def test_grade_does_not_change_net_acceleration_feedback(self, mock_nap_conf, mock_zero_torque):
+    """Wheel-speed acceleration and planner targets remain in the net domain."""
     import math
     vdas = VirtualDAS(dt=0.02)
     pitch = math.radians(-3.0)  # downhill
 
-    # Run with grade: the PID should see less error than without
     for _ in range(100):
       vdas.update(0.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
                   a_ego=0.5, orientation_ned=[0.0, pitch, 0.0])
 
-    # The a_ego_filter should reflect corrected value (a_ego - grade)
-    # grade is negative on downhill, so corrected = 0.5 - (-0.51) = ~1.01
-    # Without grade: filter would settle near 0.5
-    assert vdas.a_ego_filter.x > 0.8  # corrected is higher than raw
+    assert vdas.a_ego_filter.x == pytest.approx(0.5, abs=0.01)
 
   def test_reset_clears_grade(self):
     import math
@@ -1034,6 +1055,54 @@ class TestVDASDomainBoundaries:
       + f"got {feedforward_inputs_mps2[-1]:.3f} m/s^2"
     )
     assert pedal_outputs_di == [feedforward_sentinel_di] * 100
+
+  def test_engage_effort_limits_include_grade_compensation(self, monkeypatch):
+    import math
+
+    feedforward_inputs_mps2 = []
+    vdas = VirtualDAS(dt=0.02)
+    orientation_ned = [0.0, math.radians(3.0), 0.0]
+    for _ in range(200):
+      vdas.observe(0.0, orientation_ned)
+    vdas.reset(
+      measured_accel=0.0,
+      commanded_accel=0.0,
+      pedal_di_init=0.0,
+      preserve_grade=True,
+    )
+
+    def record_feedforward(acceleration_effort_mps2, _v_ego):
+      feedforward_inputs_mps2.append(acceleration_effort_mps2)
+      return 0.0
+
+    monkeypatch.setattr(vdas, '_feedforward', record_feedforward)
+    pedal_di = vdas.update(
+      0.0,
+      v_ego=15.0,
+      prev_pedal_di=0.0,
+      a_ego=0.0,
+      freeze_integrator=True,
+      orientation_ned=orientation_ned,
+      accel_effort_limits=(0.0, 0.0),
+    )
+
+    assert feedforward_inputs_mps2 == [0.0]
+    assert pedal_di == pytest.approx(0.0)
+
+  def test_engage_pedal_ramp_limit_applies_after_feedforward(self, monkeypatch):
+    vdas = VirtualDAS(dt=0.02)
+    monkeypatch.setattr(vdas, '_feedforward', lambda _acceleration_effort_mps2, _v_ego: 20.0)
+
+    pedal_di = vdas.update(
+      0.0,
+      v_ego=15.0,
+      prev_pedal_di=0.0,
+      a_ego=0.0,
+      freeze_integrator=True,
+      pedal_ramp_rate_up=0.9,
+    )
+
+    assert pedal_di == pytest.approx(0.9)
 
   def test_pid_starts_with_acceleration_domain_limits(self):
     vdas = VirtualDAS(dt=0.02)
@@ -1283,7 +1352,7 @@ class TestVDASDomainBoundaries:
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration)
     assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.0)
 
-  def test_preserved_grade_reset_keeps_acceleration_filter_in_corrected_domain(self):
+  def test_preserved_grade_reset_keeps_acceleration_filter_in_net_domain(self):
     import math
 
     vdas = VirtualDAS(dt=0.02)
@@ -1292,11 +1361,10 @@ class TestVDASDomainBoundaries:
     for _ in range(300):
       vdas.observe(measured_acceleration, orientation_ned)
 
-    corrected_acceleration = vdas.a_ego_filter.x
-    assert corrected_acceleration < -0.7
+    assert vdas.a_ego_filter.x == pytest.approx(measured_acceleration, abs=0.01)
 
     vdas.reset(measured_accel=measured_acceleration, commanded_accel=0.0, preserve_grade=True)
 
-    assert vdas.a_ego_filter.x == pytest.approx(corrected_acceleration)
-    assert vdas.prev_a_ego_filtered == pytest.approx(corrected_acceleration)
+    assert vdas.a_ego_filter.x == pytest.approx(measured_acceleration, abs=0.01)
+    assert vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration, abs=0.01)
     assert vdas.jerk_limiter.a_limited == pytest.approx(0.0)

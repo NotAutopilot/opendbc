@@ -570,7 +570,8 @@ def test_engage_grace_starts_on_actual_long_active_rising(controller_env):
 
 
 @pytest.mark.parametrize("engage_a_max", (0.8, 0.9, 1.0))
-def test_non_timeout_gas_override_release_has_no_launch(controller_env, monkeypatch, engage_a_max):
+def test_non_timeout_gas_override_release_has_no_launch_for_1p5_seconds(
+    controller_env, monkeypatch, engage_a_max):
   controller, cc, cs, tesla_can = controller_env
   monkeypatch.setattr(
     'opendbc.car.tesla.preap.carcontroller.get_preap_accel_limits',
@@ -585,9 +586,11 @@ def test_non_timeout_gas_override_release_has_no_launch(controller_env, monkeypa
   cc.actuators.accel = 0.67
 
   release_commands = []
-  for frame in range(460, 510, 2):
+  limited_acceleration_by_frame = {}
+  for frame in range(460, 612, 2):
     commands = controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
     release_commands.extend(_decode_pedal_command(command) for command in commands)
+    limited_acceleration_by_frame[frame] = controller.vdas.jerk_limiter.a_limited
 
   assert release_commands
   assert all(command.enabled for command in release_commands)
@@ -596,8 +599,10 @@ def test_non_timeout_gas_override_release_has_no_launch(controller_env, monkeypa
     for previous, current in zip(release_commands, release_commands[1:], strict=False)
   ]
   assert release_commands[0].command < 0.1
-  assert max(command_steps) < 1.0
-  assert controller.vdas.jerk_limiter.a_limited < 0.4
+  assert max(command_steps) < 1.0, command_steps
+  assert limited_acceleration_by_frame[508] < 0.4
+  assert limited_acceleration_by_frame[610] == pytest.approx(cc.actuators.accel)
+  assert not controller.preap_long_handoff_slew_active
 
 
 def test_gas_override_timeout_rearm_has_no_launch(controller_env):

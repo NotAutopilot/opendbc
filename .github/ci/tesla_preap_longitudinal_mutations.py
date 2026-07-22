@@ -138,6 +138,103 @@ MUTATIONS = (
     ),
   ),
   HistoricalMutation(
+    name="steady-grade-removed-from-effort",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"      a_limited + steady_grade_compensation + transient_pitch_compensation,\n"
+    ),
+    replacement=b"      a_limited + transient_pitch_compensation,\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_preserved_grade_handoff_holds_net_acceleration_for_1p5_seconds[0.5-15.0]"
+    ),
+  ),
+  HistoricalMutation(
+    name="steady-grade-subtracted-from-net-feedback",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    a_ego_filtered = self.a_ego_filter.update(a_ego)\n" +
+      b"    self.a_ego_initialized = True\n"
+    ),
+    replacement=(
+      b"    a_ego_corrected = a_ego - steady_grade_compensation\n" +
+      b"    a_ego_filtered = self.a_ego_filter.update(a_ego_corrected)\n" +
+      b"    self.a_ego_initialized = True\n"
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_steady_grade_hold_does_not_double_compensate[0.5-15.0]"
+    ),
+  ),
+  HistoricalMutation(
+    name="engage-grade-bypasses-effort-envelope",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    effort_min, effort_max = accel_effort_limits or (REGEN_MAX, ACCEL_MAX)\n",
+    replacement=b"    effort_min, effort_max = REGEN_MAX, ACCEL_MAX\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
+      "test_engage_effort_limits_include_grade_compensation"
+    ),
+  ),
+  HistoricalMutation(
+    name="engage-grade-bypasses-pedal-slew-envelope",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di, pedal_ramp_rate_up)\n"
+    ),
+    replacement=b"    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di)\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
+      "test_engage_pedal_ramp_limit_applies_after_feedforward"
+    ),
+  ),
+  HistoricalMutation(
+    name="engage-slew-stops-before-pedal-catches-up",
+    source_path="opendbc/car/tesla/preap/carcontroller.py",
+    original=(
+      b"          pedal_ramp_rate_up = (\n" +
+      b"            ENGAGE_GRACE_PEDAL_RAMP_RATE_UP\n" +
+      b"            if self.preap_long_handoff_slew_active\n" +
+      b"            else PEDAL_RAMP_RATE_UP\n" +
+      b"          )\n"
+    ),
+    replacement=b"          pedal_ramp_rate_up = PEDAL_RAMP_RATE_UP\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_pedal_authority.py::" +
+      "test_non_timeout_gas_override_release_has_no_launch_for_1p5_seconds"
+    ),
+  ),
+  HistoricalMutation(
+    name="full-strength-transient-grade-overshoot",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"TRANSIENT_GRADE_GAIN = 0.4\n",
+    replacement=b"TRANSIENT_GRADE_GAIN = 1.0\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_flat_to_grade_step_improves_on_no_pitch_baseline_at_1p5_seconds[0.4]"
+    ),
+  ),
+  HistoricalMutation(
+    name="steady-grade-pitch-outlier-unbounded",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    pitch = float(clip(orientation_ned[1], -maximum_pitch, maximum_pitch))\n",
+    replacement=b"    pitch = orientation_ned[1]\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestGradeEstimator::" +
+      "test_sustained_pitch_outlier_cannot_exceed_steady_grade_limit"
+    ),
+  ),
+  HistoricalMutation(
+    name="orientation-dropout-zeroes-grade-effort",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"      return self._steady_grade_compensation(), 0.0\n",
+    replacement=b"      return 0.0, 0.0\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestGradeEstimator::" +
+      "test_orientation_dropout_holds_filtered_steady_grade"
+    ),
+  ),
+  HistoricalMutation(
     name="focused-job-skip-bypass",
     source_path=".github/workflows/tests.yml",
     original=(

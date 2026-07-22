@@ -77,7 +77,8 @@ def test_highway_speed_step_bounds_pedal_command_rise(monkeypatch):
     )
     pedal_commands.append(pedal_di)
 
-  assert max(pedal_commands) - steady_pedal_di <= 7.0
+  pedal_rise_di = max(pedal_commands) - steady_pedal_di
+  assert 1.0 <= pedal_rise_di <= 7.0
 
 
 @pytest.mark.parametrize(

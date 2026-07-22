@@ -51,8 +51,12 @@ class TestWorkflowContract(unittest.TestCase):
     focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
 
     required_test_paths = (
+      "opendbc/car/tesla/preap/tests/test_pedal_authority.py",
       "opendbc/car/tesla/preap/tests/test_longitudinal_tuning.py",
       "opendbc/car/tesla/preap/tests/test_virtual_das.py",
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py",
+      "opendbc/car/tesla/preap/tests/test_accel_limits.py",
+      "opendbc/car/tesla/preap/tests/test_engage_grace.py",
     )
     for test_path in required_test_paths:
       self.assertIn(test_path, normalized_lines(focused_job))

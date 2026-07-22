@@ -6,7 +6,7 @@ from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN
 from opendbc.car.tesla.preap.interface import get_preap_accel_limits
-from opendbc.car.tesla.pedal.controller import get_zero_torque
+from opendbc.car.tesla.pedal.controller import get_zero_torque, PEDAL_RAMP_RATE_UP
 from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.values import CANBUS, CruiseButtons
@@ -24,6 +24,7 @@ def init_preap_can(dbc_names, packers):
 # Prevents both regen spike (negative) and pedal stab (MPC requesting high
 # positive accel on frame 1). Inspired by Tinkla's proportional ramp.
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
+ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
 
 # The pedal controller updates at 50 Hz. Only prompt after the regen rail has
 # been near its physical limit while measured deceleration trails the shaped
@@ -174,6 +175,7 @@ class PreAPLongController:
     # Snapshot of max-accel-at-engage-speed; used as the deterministic
     # ceiling for the grace-period ramp. Set fresh on each engage rising edge.
     self.engage_a_max = 0.0
+    self.preap_long_handoff_slew_active = False
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
@@ -245,6 +247,7 @@ class PreAPLongController:
 
       if pedal_action == PedalCommandAction.ACQUIRE:
         self.preap_long_engage_frame = frame
+        self.preap_long_handoff_slew_active = True
         zero_torque_di = get_zero_torque().get(CS.out.vEgo)
         self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
         self.vdas.reset(
@@ -269,11 +272,13 @@ class PreAPLongController:
 
       if pedal_action == PedalCommandAction.RESET:
         self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
+        self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
 
       elif pedal_action == PedalCommandAction.RELEASE:
         self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
         self.prev_pedal_di = 0.0
+        self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
 
       elif pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
@@ -281,6 +286,12 @@ class PreAPLongController:
           engage_elapsed_frames = frame - self.preap_long_engage_frame
           in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
           accel_request = float(actuators.accel)
+          accel_effort_limits = None
+          pedal_ramp_rate_up = (
+            ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
+            if self.preap_long_handoff_slew_active
+            else PEDAL_RAMP_RATE_UP
+          )
           if in_engage_grace:
             # Cap at grace_progress * engage_a_max so the ceiling is the
             # tuned accel-profile envelope, not the live MPC request.
@@ -288,11 +299,22 @@ class PreAPLongController:
             grace_progress = engage_elapsed_frames / ENGAGE_GRACE_FRAMES
             accel_cap = grace_progress * self.engage_a_max
             accel_request = max(0.0, min(accel_request, accel_cap))
+            accel_effort_limits = (0.0, accel_cap)
+            pedal_ramp_rate_up = ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
 
           self.prev_pedal_di = self.vdas.update(
             accel_request, CS.out.vEgo, self.prev_pedal_di,
             a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
-            orientation_ned=list(CC.orientationNED))
+            orientation_ned=list(CC.orientationNED),
+            accel_effort_limits=accel_effort_limits,
+            pedal_ramp_rate_up=pedal_ramp_rate_up)
+          handoff_slew_complete = (
+            self.preap_long_handoff_slew_active
+            and not in_engage_grace
+            and not self.vdas.pedal_ramp_limited_up
+          )
+          if handoff_slew_complete:
+            self.preap_long_handoff_slew_active = False
           pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
           command = tesla_can.create_pedal_command(pedal_cmd, enable=1)
           self._append_pedal_command(can_sends, CS, command)
@@ -313,12 +335,14 @@ class PreAPLongController:
           self._handle_pedal_unavailable(CS)
           self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
           self.prev_pedal_di = 0.0
+          self.preap_long_handoff_slew_active = False
           self.regen_decel_monitor.reset()
           pedal_action = PedalCommandAction.FAILURE
 
       elif pedal_action == PedalCommandAction.FAILURE:
         carlog.error("Pre-AP pedal authority acquisition failed")
         self._handle_pedal_unavailable(CS)
+        self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
 
       else:
