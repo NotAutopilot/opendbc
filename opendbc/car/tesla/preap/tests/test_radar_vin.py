@@ -261,6 +261,7 @@ def test_learner_uses_exact_sequence_and_variable_length_positive_responses():
   output = learner.update([_rx_single(b"\x50\x01\x00\x32\x01\xf4")], now + 0.01)
   assert output.state == radar_vin.RadarVinLearnerState.COMPLETE
   assert output.result == radar_vin.RadarVinLearnerResult.LEARNED
+  assert output.cleanup_confirmed
 
 
 def test_learner_reassembles_f190_across_updates_and_sends_flow_control_once():
@@ -323,6 +324,7 @@ def test_learner_returns_already_matched_after_cleanup_without_security_access()
   output = learner.update([_rx_single(b"\x50\x01")], now + 0.01)
   assert output.state == radar_vin.RadarVinLearnerState.COMPLETE
   assert output.result == radar_vin.RadarVinLearnerResult.ALREADY_MATCHED
+  assert output.cleanup_confirmed
 
 
 def test_learner_retries_only_negative_stop_responses_with_three_attempt_bound():
@@ -487,6 +489,62 @@ def test_learner_rejects_malformed_negative_response(response):
   output = learner.update([_rx_single(response)], now + 0.01)
   assert output.state == radar_vin.RadarVinLearnerState.CLEANUP
   assert learner.failure == radar_vin.RadarVinFailure.MALFORMED_RESPONSE
+
+
+def test_learner_initial_negative_response_enters_cleanup():
+  radar_vin = _module()
+  learner = radar_vin.RadarVinLearner()
+  learner.start(TARGET_VIN, 0.0)
+  learner.update([], 0.0)
+
+  output = learner.update([_rx_single(b"\x7f\x3e\x22")], 0.01)
+  assert output.state == radar_vin.RadarVinLearnerState.CLEANUP
+  assert learner.failure == radar_vin.RadarVinFailure.NEGATIVE_RESPONSE
+  assert _tx_payload(learner.update([], 0.02)) == b"\x02\x10\x01\x00\x00\x00\x00\x00"
+
+
+def test_learner_reports_acknowledged_cleanup_after_operation_failure():
+  radar_vin = _module()
+  learner = radar_vin.RadarVinLearner()
+  learner.start(TARGET_VIN, 0.0)
+  learner.update([], 0.0)
+  learner.update([_rx_single(b"\x7f\x3e\x22")], 0.01)
+  learner.update([], 0.02)
+
+  output = learner.update([_rx_single(b"\x50\x01\x00\x32\x01\xf4")], 0.03)
+  assert output.state == radar_vin.RadarVinLearnerState.FAILED
+  assert output.result == radar_vin.RadarVinLearnerResult.FAILED
+  assert output.cleanup_confirmed
+
+
+def test_learner_initial_response_pending_timeout_enters_cleanup():
+  radar_vin = _module()
+  learner = radar_vin.RadarVinLearner()
+  learner.start(TARGET_VIN, 0.0)
+  learner.update([], 0.0)
+
+  output = learner.update([_rx_single(b"\x7f\x3e\x78")], 0.01)
+  assert output.state == radar_vin.RadarVinLearnerState.TESTER_PRESENT
+  assert output.can_sends == ()
+
+  output = learner.update([], 3.01)
+  assert output.state == radar_vin.RadarVinLearnerState.CLEANUP
+  assert learner.failure == radar_vin.RadarVinFailure.TIMEOUT
+  assert _tx_payload(learner.update([], 3.02)) == b"\x02\x10\x01\x00\x00\x00\x00\x00"
+
+
+def test_learner_does_not_report_cleanup_confirmed_after_cleanup_timeout():
+  radar_vin = _module()
+  learner = radar_vin.RadarVinLearner()
+  learner.start(TARGET_VIN, 0.0)
+  learner.update([], 0.0)
+  learner.update([_rx_single(b"\x7f\x3e\x22")], 0.01)
+  learner.update([], 0.02)
+
+  output = learner.update([], 3.03)
+  assert output.state == radar_vin.RadarVinLearnerState.FAILED
+  assert output.result == radar_vin.RadarVinLearnerResult.FAILED
+  assert not output.cleanup_confirmed
 
 
 def test_learner_holds_on_response_pending_then_times_out_and_cleans_up():

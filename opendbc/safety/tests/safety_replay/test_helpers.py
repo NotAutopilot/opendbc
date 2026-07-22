@@ -28,8 +28,15 @@ def test_tesla_preap_requested_angle_is_extracted(data, expected_angle):
   assert angle == expected_angle
 
 
-def test_tesla_preap_replay_initializes_controls_at_zero_angle(monkeypatch):
-  packet = SimpleNamespace(data=bytes.fromhex("40000000"))
+@pytest.mark.parametrize(
+  ("steering_control_type", "expected_controls_allowed"),
+  (
+    (0, []),
+    (1, [1]),
+  ),
+)
+def test_tesla_preap_replay_initializes_zero_angle_by_control_type(monkeypatch, steering_control_type, expected_controls_allowed):
+  packet = SimpleNamespace(data=bytes([0x40, 0x00, steering_control_type << 6, 0x00]))
   can_message = SimpleNamespace(address=0x488)
   event = SimpleNamespace(which=lambda: "sendcan", sendcan=(can_message,))
 
@@ -58,6 +65,6 @@ def test_tesla_preap_replay_initializes_controls_at_zero_angle(monkeypatch):
 
   init_segment(safety, [event], CarParams.SafetyModel.teslaPreap, 0)
 
-  assert safety.controls_allowed == [1]
+  assert safety.controls_allowed == expected_controls_allowed
   assert safety.desired_angles == [0]
   assert safety.measured_angles == [(0, 0)]

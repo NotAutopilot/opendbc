@@ -1174,7 +1174,22 @@ class TeslaPreAPRadarVinTestMixin(TeslaPreAPTestMixin):
     self.assertFalse(self._diag_tx(REQUEST_SEED))
     self.assertTrue(self._diag_tx(DEFAULT_SESSION))
 
-  def test_response_address_bus_length_padding_and_pci_are_strict(self):
+  def test_single_frame_response_padding_is_ignored(self):
+    self._prepare_stage("default")
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+    self._diag_rx(b"\x02\x50\x01\xaa\xbb\xcc\xdd\xee")
+    self.assertTrue(self._diag_tx(EXTENDED_SESSION))
+
+  def test_final_consecutive_frame_response_padding_is_ignored(self):
+    self._prepare_stage("stop")
+    self.assertTrue(self._diag_tx(STOP_ROUTINE))
+    response = b"\x71\x02\x0a\x03\x01\x02\x03\x04\x05"
+    self._diag_rx(self._first_frame(response[:6], len(response)))
+    self.assertTrue(self._diag_tx(FLOW_CONTROL))
+    self._diag_rx(b"\x21" + response[6:] + b"\xaa\xbb\xcc\xdd")
+    self.assertTrue(self._diag_tx(STOP_ROUTINE))
+
+  def test_response_address_bus_length_and_pci_are_strict(self):
     self._prepare_stage("default")
     self.assertTrue(self._diag_tx(DEFAULT_SESSION))
     self._diag_rx(b"\x02\x50\x01\x00\x00\x00\x00\x00", addr=RADAR_DIAG_RX_ADDR - 1)
@@ -1184,7 +1199,6 @@ class TeslaPreAPRadarVinTestMixin(TeslaPreAPTestMixin):
     malformed = (
       (b"\x02\x50\x01\x00\x00\x00\x00\x00", RADAR_DIAG_BUS + 1),
       (b"\x02\x50\x01\x00\x00\x00\x00", RADAR_DIAG_BUS),
-      (b"\x02\x50\x01\x01\x00\x00\x00\x00", RADAR_DIAG_BUS),
       (b"\x30\x00\x00\x00\x00\x00\x00\x00", RADAR_DIAG_BUS),
     )
     for response, bus in malformed:

@@ -63,6 +63,7 @@ class RadarVinLearnerOutput:
   state: RadarVinLearnerState
   can_sends: tuple[CanData, ...]
   result: RadarVinLearnerResult | None
+  cleanup_confirmed: bool = False
 
 
 @dataclass
@@ -159,6 +160,7 @@ class RadarVinLearner:
     self._stop_attempts = 0
     self._successful_stops = 0
     self._ecu_responsive = False
+    self._cleanup_confirmed = False
     self._pending_result: RadarVinLearnerResult | None = None
     self._rx_payload = bytearray()
     self._rx_length: int | None = None
@@ -184,6 +186,7 @@ class RadarVinLearner:
     self._stop_attempts = 0
     self._successful_stops = 0
     self._ecu_responsive = False
+    self._cleanup_confirmed = False
     self._pending_result = None
     self._reset_rx()
 
@@ -380,6 +383,7 @@ class RadarVinLearner:
       else:
         self._fail(RadarVinFailure.POST_LEARN_MISMATCH)
     elif self.state == RadarVinLearnerState.CLEANUP:
+      self._cleanup_confirmed = True
       if self._pending_result in (RadarVinLearnerResult.ALREADY_MATCHED, RadarVinLearnerResult.LEARNED):
         self.state = RadarVinLearnerState.COMPLETE
         self.result = self._pending_result
@@ -421,6 +425,7 @@ class RadarVinLearner:
     if len(payload) != 3 or payload[1] != request_service:
       self._fail(RadarVinFailure.MALFORMED_RESPONSE)
       return
+    self._ecu_responsive = True
     if payload[2] == 0x78:
       return
     if self.state == RadarVinLearnerState.STOP_ROUTINE and self._stop_attempts < self.STOP_ATTEMPTS:
@@ -462,4 +467,4 @@ class RadarVinLearner:
 
   def _output(self, can_sends: list[CanData]) -> RadarVinLearnerOutput:
     result = self.result if self.state in (RadarVinLearnerState.COMPLETE, RadarVinLearnerState.FAILED) else None
-    return RadarVinLearnerOutput(self.state, tuple(can_sends), result)
+    return RadarVinLearnerOutput(self.state, tuple(can_sends), result, self._cleanup_confirmed)

@@ -417,9 +417,6 @@ static void preap_diag_rx_frame(const CANPacket_t *msg) {
   if (frame_type == 0U) {
     uint8_t length = msg->data[0] & 0x0FU;
     bool valid = !preap_diag_rx_in_progress && (length > 0U) && (length <= 7U);
-    for (int i = length + 1; i < 8; i++) {
-      valid &= msg->data[i] == 0U;
-    }
     if (!valid) {
       preap_diag_poison();
       return;
@@ -447,14 +444,6 @@ static void preap_diag_rx_frame(const CANPacket_t *msg) {
 
     uint16_t remaining = preap_diag_rx_length - preap_diag_rx_received;
     uint16_t copied = (remaining < 7U) ? remaining : 7U;
-    if (copied < 7U) {
-      for (int i = copied + 1; i < 8; i++) {
-        if (msg->data[i] != 0U) {
-          preap_diag_poison();
-          return;
-        }
-      }
-    }
     preap_diag_rx_received += copied;
     preap_diag_rx_sequence = (preap_diag_rx_sequence + 1U) & 0x0FU;
     preap_diag_note_activity();

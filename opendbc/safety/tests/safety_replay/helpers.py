@@ -97,7 +97,8 @@ def init_segment(safety, msgs, mode, param):
   msg = package_can_msg(msg)
   torque, angle = get_steer_value(mode, param, msg)
   if mode == CarParams.SafetyModel.teslaPreap:
-    safety.set_controls_allowed(1)
+    if msg.data[2] >> 6 == 1:
+      safety.set_controls_allowed(1)
     safety.set_desired_angle_last(angle)
     safety.set_angle_meas(angle, angle)
   elif torque != 0:
