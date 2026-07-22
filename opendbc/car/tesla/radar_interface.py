@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 from opendbc.can.parser import CANParser
@@ -87,6 +88,7 @@ class RadarInterface(RadarInterfaceBase):
 
     self.continental_radar = CP.carFingerprint in (CAR.TESLA_MODEL_S_HW3, )
     self.bosch_radar = CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_S_PREAP)
+    self.preap_radar = CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP
 
     messages = []
     if self.continental_radar:
@@ -96,6 +98,9 @@ class RadarInterface(RadarInterfaceBase):
       self.radar_point_frq = 16
     elif self.bosch_radar:
       messages.append(('TeslaRadarSguInfo', 8))
+      if self.preap_radar:
+        # Pre-AP radar alerts should stay alive-agnostic so absence does not look like a CAN fault.
+        messages.append(('TeslaRadarAlertMatrix', math.nan))
 
       self.num_points = 32
       self.trigger_msg = 878
@@ -155,7 +160,15 @@ class RadarInterface(RadarInterfaceBase):
         ret.errors.radarFault = True
     elif self.bosch_radar:
       radar_status = self.rcp.vl['TeslaRadarSguInfo']
-      if radar_status['RADC_HWFail'] or radar_status['RADC_SGUFail']:
+      if self.preap_radar:
+        alert_matrix = self.rcp.vl['TeslaRadarAlertMatrix']
+        ret.errors.radarVinInvalid = bool(alert_matrix.get('RADC_a037_vinValidity', 0))
+        ret.errors.radarEspInputError = bool(alert_matrix.get('RADC_a012_espMIA', 0))
+        ret.errors.radarEcuError = bool(radar_status.get('RADC_HWFail', 0)) or (
+          bool(radar_status.get('RADC_SGUFail', 0)) and not (ret.errors.radarVinInvalid or ret.errors.radarEspInputError)
+        )
+        ret.errors.radarFault = ret.errors.radarVinInvalid or ret.errors.radarEspInputError or ret.errors.radarEcuError
+      elif radar_status['RADC_HWFail'] or radar_status['RADC_SGUFail']:
         ret.errors.radarFault = True
       if radar_status['RADC_SensorDirty']:
         ret.errors.radarUnavailableTemporary = True

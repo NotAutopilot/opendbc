@@ -1,5 +1,9 @@
+import math
 from types import SimpleNamespace
 
+from opendbc.can.parser import CANParser
+from opendbc.car import Bus
+from opendbc.car.tesla.values import CANBUS, CAR, DBC
 import pytest
 
 from opendbc.car.tesla import radar_interface as radar_interface_module
@@ -23,7 +27,11 @@ class FakeRadarParser:
         "RADC_SensorDirty": 0,
         "RADC_SGUInfoConsistBit": 0,
       },
-      "TeslaRadarAlertMatrix": {"RADC_a001_ecuInternalPerf": 0},
+      "TeslaRadarAlertMatrix": {
+        "RADC_a001_ecuInternalPerf": 0,
+        "RADC_a012_espMIA": 0,
+        "RADC_a037_vinValidity": 0,
+      },
     }
     for slot in range(32):
       self.vl[f"RadarPoint{slot}_A"] = _point_a(tracked=False)
@@ -50,13 +58,14 @@ def _point_b():
   return {"Index2": 0, "LatSpeed": 0.0}
 
 
-def _make_bosch_interface():
+def _make_bosch_interface(car_fingerprint=CAR.TESLA_MODEL_S_HW1):
   radar = radar_interface_module.RadarInterface.__new__(radar_interface_module.RadarInterface)
-  radar.CP = SimpleNamespace()
+  radar.CP = SimpleNamespace(carFingerprint=car_fingerprint)
   radar.continental_radar = False
   radar.bosch_radar = True
   radar.num_points = 32
   radar.trigger_msg = BOSCH_TRIGGER_ADDRESS
+  radar.preap_radar = car_fingerprint == CAR.TESLA_MODEL_S_PREAP
   radar.radar_off_can = False
   radar.radar_offset = 0.0
   radar.updated_messages = set()
@@ -165,3 +174,140 @@ class TestBoschHealth:
 
     assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is False
+
+
+class TestBoschPreAPHealth:
+  def test_alert_matrix_uses_nan_ignore_alive(self, monkeypatch):
+    created_messages = []
+
+    class FakeCANParser:
+      def __init__(self, dbc, messages, bus):
+        self.can_valid = True
+        created_messages.extend(messages)
+        self.vl = {
+          'TeslaRadarSguInfo': {
+            'RADC_HWFail': 0,
+            'RADC_SGUFail': 0,
+            'RADC_SensorDirty': 0,
+            'RADC_SGUInfoConsistBit': 0,
+          },
+          'TeslaRadarAlertMatrix': {},
+        }
+        for slot in range(32):
+          self.vl[f'RadarPoint{slot}_A'] = _point_a(tracked=False)
+          self.vl[f'RadarPoint{slot}_B'] = _point_b()
+
+      def update(self, _can_msgs):
+        self.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+        return self.updated_addresses
+
+    monkeypatch.setattr(radar_interface_module, 'CANParser', FakeCANParser)
+    cp = SimpleNamespace(carFingerprint=CAR.TESLA_MODEL_S_PREAP, radarUnavailable=False)
+    radar = radar_interface_module.RadarInterface(cp)
+
+    assert ("TeslaRadarSguInfo", 8) in created_messages
+    alert_matrix_msg = next((msg for msg in created_messages if msg[0] == "TeslaRadarAlertMatrix"), None)
+    assert alert_matrix_msg is not None
+    assert math.isnan(alert_matrix_msg[1])
+
+    result = radar.update([])
+    assert result.errors.canError is False
+    assert result.errors.radarFault is False
+
+  def test_alert_matrix_ignore_alive_keeps_can_valid_without_frames(self):
+    parser = CANParser(
+      DBC[CAR.TESLA_MODEL_S_PREAP][Bus.radar],
+      [("TeslaRadarAlertMatrix", math.nan)],
+      CANBUS.radar,
+    )
+
+    parser.update([])
+
+    assert parser.can_valid is True
+
+  @pytest.mark.parametrize(
+    ("signal", "vin_invalid", "esp_input_error", "ecu_error"),
+    (
+      ("RADC_a037_vinValidity", True, False, False),
+      ("RADC_a012_espMIA", False, True, False),
+      ("RADC_HWFail", False, False, True),
+    ),
+  )
+  def test_preap_permanent_fault_mapping(self, signal, vin_invalid, esp_input_error, ecu_error):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    if signal.startswith('RADC_a'):
+      radar.rcp.vl['TeslaRadarAlertMatrix'][signal] = 1
+    else:
+      radar.rcp.vl['TeslaRadarSguInfo'][signal] = 1
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarVinInvalid is vin_invalid
+    assert result.errors.radarEspInputError is esp_input_error
+    assert result.errors.radarEcuError is ecu_error
+    assert result.errors.radarFault is True
+
+  @pytest.mark.parametrize(
+    ("status_signal", "alert_signal", "vin_invalid", "esp_input_error", "ecu_error"),
+    (
+      ("RADC_SGUFail", "RADC_a037_vinValidity", True, False, False),
+      ("RADC_SGUFail", "RADC_a012_espMIA", False, True, False),
+      ("RADC_HWFail", "RADC_a037_vinValidity", True, False, True),
+    ),
+  )
+  def test_preap_combined_fault_precedence(self, status_signal, alert_signal, vin_invalid, esp_input_error, ecu_error):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    radar.rcp.vl['TeslaRadarSguInfo'][status_signal] = 1
+    radar.rcp.vl['TeslaRadarAlertMatrix'][alert_signal] = 1
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarVinInvalid is vin_invalid
+    assert result.errors.radarEspInputError is esp_input_error
+    assert result.errors.radarEcuError is ecu_error
+    assert result.errors.radarFault is True
+
+  def test_preap_sgu_fail_without_vin_or_esp_cause_maps_to_ecu_error(self):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    radar.rcp.vl['TeslaRadarSguInfo']['RADC_SGUFail'] = 1
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarVinInvalid is False
+    assert result.errors.radarEspInputError is False
+    assert result.errors.radarEcuError is True
+    assert result.errors.radarFault is True
+
+  def test_preap_unknown_alert_bits_do_not_create_new_cause(self):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    radar.rcp.vl['TeslaRadarAlertMatrix']['RADC_a001_ecuInternalPerf'] = 1
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarVinInvalid is False
+    assert result.errors.radarEspInputError is False
+    assert result.errors.radarEcuError is False
+    assert result.errors.radarFault is False
+
+  def test_preap_sensor_dirty_remains_temporary(self):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_PREAP)
+    radar.rcp.vl['TeslaRadarSguInfo']['RADC_SensorDirty'] = 1
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarUnavailableTemporary is True
+    assert result.errors.radarFault is False
+    assert result.errors.radarVinInvalid is False
+    assert result.errors.radarEspInputError is False
+    assert result.errors.radarEcuError is False
+
+  def test_non_preap_bosch_behavior_remains_unchanged(self):
+    radar = _make_bosch_interface(CAR.TESLA_MODEL_S_HW1)
+    radar.rcp.vl['TeslaRadarSguInfo']['RADC_HWFail'] = 1
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarFault is True
+    assert result.errors.radarVinInvalid is False
+    assert result.errors.radarEspInputError is False
+    assert result.errors.radarEcuError is False
