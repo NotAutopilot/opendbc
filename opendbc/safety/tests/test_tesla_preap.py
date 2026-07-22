@@ -730,6 +730,15 @@ class TeslaPreAPRadarVinTestMixin(TeslaPreAPTestMixin):
   def _diag_rx(self, data, addr=RADAR_DIAG_RX_ADDR, bus=RADAR_DIAG_BUS):
     return self._rx(libsafety_py.make_CANPacket(addr, bus, data))
 
+  def _gtw_emissions(self):
+    emissions = []
+    count = self.safety.get_tesla_preap_gtw_debug_count()
+    for index in range(count):
+      packet = libsafety_py.ffi.new("CANPacket_t *")
+      self.assertTrue(self.safety.get_tesla_preap_gtw_debug_packet(index, packet))
+      emissions.append((packet.addr, packet.bus, bytes(packet.data[0:8])))
+    return emissions
+
   def _single_response(self, payload):
     assert len(payload) <= 7
     self._diag_rx(bytes([len(payload)]) + payload + bytes(7 - len(payload)))
@@ -1196,6 +1205,41 @@ class TeslaPreAPRadarVinTestMixin(TeslaPreAPTestMixin):
       self.assertFalse(self.safety.get_controls_allowed())
 
     self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_gtw_emulation_survives_diagnostic_interleaving(self):
+    flags = TeslaPreAPSafetyFlags.RADAR_VIN_LEARN | TeslaPreAPSafetyFlags.RADAR_BEHIND_NOSECONE
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, int(flags))
+    self.safety.init_tests()
+    self.assertEqual(self._gtw_emissions(), [])
+
+    self.assertTrue(self._diag_tx(TESTER_PRESENT))
+    vip_data = b"\x12\x34\x56\x78\x9a\xbc\xde\xf0"
+    config_data = b"\xff" * 8
+    self._rx(libsafety_py.make_CANPacket(0x405, 0, vip_data))
+    self._rx(libsafety_py.make_CANPacket(0x398, 0, config_data))
+
+    expected_config = b"\x7f\xf7\xff\xff\x1f\x0f\xff\x4c"
+    self.assertEqual(self._gtw_emissions(), [
+      (0x2B9, 1, vip_data),
+      (0x2A9, 1, expected_config),
+    ])
+
+    self._single_response(b"\x7e\x00")
+    self.assertEqual(len(self._gtw_emissions()), 2)
+    self.assertTrue(self._diag_tx(DEFAULT_SESSION))
+
+  def test_gtw_debug_sink_resets_with_test_and_safety_initialization(self):
+    vip_frame = libsafety_py.make_CANPacket(0x405, 0, b"\x12\x34\x56\x78\x9a\xbc\xde\xf0")
+    self._rx(vip_frame)
+    self.assertEqual(len(self._gtw_emissions()), 1)
+
+    self.safety.init_tests()
+    self.assertEqual(self._gtw_emissions(), [])
+
+    self._rx(vip_frame)
+    self.assertEqual(len(self._gtw_emissions()), 1)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, int(TeslaPreAPSafetyFlags.RADAR_VIN_LEARN))
+    self.assertEqual(self._gtw_emissions(), [])
 
   def test_release_frames_only_in_every_latched_state(self):
     for state in ("active", "poisoned", "cleanup_pending"):

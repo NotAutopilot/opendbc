@@ -670,8 +670,36 @@ static int preap_compute_crc8(uint32_t lo, uint32_t hi, int msg_len) {
 // GTW Emulation helpers
 // ============================================
 
-static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+#define PREAP_GTW_DEBUG_CAPACITY 16U
+static CANPacket_t preap_gtw_debug_packets[PREAP_GTW_DEBUG_CAPACITY];
+static uint8_t preap_gtw_debug_count = 0U;
+
+static void preap_gtw_debug_reset(void) {
+  preap_gtw_debug_count = 0U;
+}
+
+static void preap_gtw_debug_record(const CANPacket_t *packet) {
+  if (preap_gtw_debug_count < PREAP_GTW_DEBUG_CAPACITY) {
+    preap_gtw_debug_packets[preap_gtw_debug_count] = *packet;
+    preap_gtw_debug_count++;
+  }
+}
+#endif
+
+static void preap_radar_send(CANPacket_t *packet) {
 #if defined(STM32H7) || defined(STM32F4)
+  can_set_checksum(packet);
+  can_send(packet, 1, true);
+#elif defined(ALLOW_DEBUG)
+  preap_gtw_debug_record(packet);
+#else
+  (void)packet;
+#endif
+}
+
+static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
+#if defined(STM32H7) || defined(STM32F4) || defined(ALLOW_DEBUG)
   CANPacket_t pkt;
   pkt.returned = 0U;
   pkt.rejected = 0U;
@@ -682,8 +710,7 @@ static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
   for (int i = 0; i < GET_LEN(src); i++) {
     pkt.data[i] = src->data[i];
   }
-  can_set_checksum(&pkt);
-  can_send(&pkt, 1, true);
+  preap_radar_send(&pkt);
 #else
   (void)src;
   (void)new_addr;
@@ -740,10 +767,7 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
       PREAP_WORD_TO_BYTES(&pkt.data[0], lo);
       PREAP_WORD_TO_BYTES(&pkt.data[4], hi);
       pkt.data[7] = preap_byte_sum_checksum(&pkt);
-#if defined(STM32H7) || defined(STM32F4)
-      can_set_checksum(&pkt);
-      can_send(&pkt, 1, true);
-#endif
+      preap_radar_send(&pkt);
     }
 
     // Group B: STW_ANGLHP_STAT (0x0E) → 0x199 with SNA replacement
@@ -760,10 +784,7 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
       }
       PREAP_WORD_TO_BYTES(&pkt.data[0], lo);
       PREAP_WORD_TO_BYTES(&pkt.data[4], hi);
-#if defined(STM32H7) || defined(STM32F4)
-      can_set_checksum(&pkt);
-      can_send(&pkt, 1, true);
-#endif
+      preap_radar_send(&pkt);
     }
 
     // Group C: ESP_115h (0x115) → 0x129 + synthetic DI_espControl (0x1A9)
@@ -777,10 +798,7 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
                          .bus = 1, .addr = 0x1A9, .data_len_code = 5};
       PREAP_WORD_TO_BYTES(&pkt.data[0], syn_lo);
       PREAP_WORD_TO_BYTES(&pkt.data[4], (uint32_t)cksm);
-#if defined(STM32H7) || defined(STM32F4)
-      can_set_checksum(&pkt);
-      can_send(&pkt, 1, true);
-#endif
+      preap_radar_send(&pkt);
     }
 
     // Group C: DI_torque2 (0x118) → 0x119 + synthetic ESP_wheelSpeeds (0x169)
@@ -807,10 +825,7 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
                          .bus = 1, .addr = 0x169, .data_len_code = 8};
       PREAP_WORD_TO_BYTES(&pkt.data[0], ws_lo);
       PREAP_WORD_TO_BYTES(&pkt.data[4], ws_hi);
-#if defined(STM32H7) || defined(STM32F4)
-      can_set_checksum(&pkt);
-      can_send(&pkt, 1, true);
-#endif
+      preap_radar_send(&pkt);
     }
   }
 
@@ -1105,6 +1120,9 @@ static bool tesla_preap_fwd_hook(int bus_num, int addr) {
 // ============================================
 
 static safety_config tesla_preap_init(uint16_t param) {
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  preap_gtw_debug_reset();
+#endif
   preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
   preap_radar_vin_learn = GET_FLAG(param, PREAP_FLAG_RADAR_VIN_LEARN);
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION) || preap_radar_vin_learn;

@@ -33,6 +33,24 @@ bool safety_config_valid() {
   return true;
 }
 
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+void reset_tesla_preap_gtw_debug(void) {
+  preap_gtw_debug_reset();
+}
+
+int get_tesla_preap_gtw_debug_count(void) {
+  return preap_gtw_debug_count;
+}
+
+bool get_tesla_preap_gtw_debug_packet(int index, CANPacket_t *packet) {
+  bool valid_index = (index >= 0) && (index < preap_gtw_debug_count);
+  if (valid_index && (packet != NULL)) {
+    *packet = preap_gtw_debug_packets[index];
+  }
+  return valid_index && (packet != NULL);
+}
+#endif
+
 void set_controls_allowed(bool c){
   controls_allowed = c;
 }
@@ -198,6 +216,10 @@ void init_tests(void){
   ts_steer_req_mismatch_last = 0;
   valid_steer_req_count = 0;
   invalid_steer_req_count = 0;
+
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  reset_tesla_preap_gtw_debug();
+#endif
 
   // assumes autopark on safety mode init to avoid a fault. get rid of that for testing
   tesla_autopark = false;

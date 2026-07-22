@@ -73,7 +73,7 @@ def replay_drive(msgs, safety_mode, param, alternative_experience):
   return tx_controls_blocked == 0 and rx_invalid == 0 and not safety_tick_rx_invalid
 
 
-if __name__ == "__main__":
+def main() -> int:
   from openpilot.tools.lib.logreader import LogReader
 
   parser = argparse.ArgumentParser(description="Replay CAN messages from a route or segment through a safety mode",
@@ -96,4 +96,9 @@ if __name__ == "__main__":
       args.alternative_experience = CP.alternativeExperience
 
   print(f"replaying {args.route_or_segment_name[0]} with safety mode {args.mode}, param {args.param}, alternative experience {args.alternative_experience}")
-  replay_drive(list(lr), args.mode, args.param, args.alternative_experience)
+  passed = replay_drive(list(lr), args.mode, args.param, args.alternative_experience)
+  return 0 if passed else 1
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

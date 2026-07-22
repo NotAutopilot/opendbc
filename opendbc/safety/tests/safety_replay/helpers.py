@@ -36,7 +36,7 @@ def is_steering_msg(mode, param, addr):
     ret = addr == 0x169
   elif mode == CarParams.SafetyModel.rivian:
     ret = addr == 0x120
-  elif mode == CarParams.SafetyModel.tesla:
+  elif mode in (CarParams.SafetyModel.tesla, CarParams.SafetyModel.teslaPreap):
     ret = addr == 0x488
   return ret
 
@@ -76,7 +76,7 @@ def get_steer_value(mode, param, msg):
     angle = -angle + (1310 * 100)
   elif mode == CarParams.SafetyModel.rivian:
     torque = ((msg.data[2] << 3) | (msg.data[3] >> 5)) - 1024
-  elif mode == CarParams.SafetyModel.tesla:
+  elif mode in (CarParams.SafetyModel.tesla, CarParams.SafetyModel.teslaPreap):
     angle = (((msg.data[0] & 0x7F) << 8) | (msg.data[1])) - 16384  # ceil(1638.35/0.1)
   return torque, angle
 
@@ -96,7 +96,11 @@ def init_segment(safety, msgs, mode, param):
 
   msg = package_can_msg(msg)
   torque, angle = get_steer_value(mode, param, msg)
-  if torque != 0:
+  if mode == CarParams.SafetyModel.teslaPreap:
+    safety.set_controls_allowed(1)
+    safety.set_desired_angle_last(angle)
+    safety.set_angle_meas(angle, angle)
+  elif torque != 0:
     safety.set_controls_allowed(1)
     safety.set_desired_torque_last(torque)
     safety.set_rt_torque_last(torque)

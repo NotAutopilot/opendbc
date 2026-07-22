@@ -72,6 +72,10 @@ bool safety_config_valid();
 
 void init_tests(void);
 
+void reset_tesla_preap_gtw_debug(void);
+int get_tesla_preap_gtw_debug_count(void);
+bool get_tesla_preap_gtw_debug_packet(int index, CANPacket_t *packet);
+
 void set_honda_fwd_brake(bool c);
 bool get_honda_fwd_brake(void);
 void set_honda_alt_brake_msg(bool c);
