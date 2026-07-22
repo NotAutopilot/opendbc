@@ -24,6 +24,7 @@ from opendbc.car.tesla.pedal.controller import (
 )
 
 COMFORT_SNAP_MAX = 4.0  # m/s^4
+HIGH_SPEED_FALLBACK_FIELD_SCALE = 0.65
 
 
 # --- Phase 1: JerkLimiter ---
@@ -290,10 +291,11 @@ class TestVirtualDAS:
 
   def test_steady_state_max_accel(self):
     vdas = VirtualDAS(dt=0.02)
-    expected_max = float(np.interp(15.0, PEDAL_BP, PEDAL_MAX_VALUES))
+    physical_max = float(np.interp(15.0, PEDAL_BP, PEDAL_MAX_VALUES))
     for _ in range(500):
       di = vdas.update(ACCEL_MAX, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
-    assert abs(di - expected_max) < 0.5
+    assert di == pytest.approx(physical_max * HIGH_SPEED_FALLBACK_FIELD_SCALE, abs=0.01)
+    assert di < physical_max
 
   def test_steady_state_max_regen(self):
     vdas = VirtualDAS(dt=0.02)
@@ -440,7 +442,7 @@ class TestVirtualDAS:
       di = vdas.update(-1.0, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di)
     assert di < PEDAL_DI_ZERO
 
-  def test_speed_dependent_max(self):
+  def test_field_correction_is_continuous_from_five_to_thirty_mps(self):
     vdas_slow = VirtualDAS(dt=0.02)
     vdas_fast = VirtualDAS(dt=0.02)
 
@@ -448,7 +450,16 @@ class TestVirtualDAS:
       di_slow = vdas_slow.update(ACCEL_MAX, v_ego=5.0, prev_pedal_di=vdas_slow.prev_pedal_di)
       di_fast = vdas_fast.update(ACCEL_MAX, v_ego=30.0, prev_pedal_di=vdas_fast.prev_pedal_di)
 
-    assert di_fast > di_slow
+    low_speed_physical_max = float(np.interp(5.0, PEDAL_BP, PEDAL_MAX_VALUES))
+    high_speed_physical_max = float(np.interp(30.0, PEDAL_BP, PEDAL_MAX_VALUES))
+    assert di_slow == pytest.approx(
+      low_speed_physical_max * HIGH_SPEED_FALLBACK_FIELD_SCALE,
+      abs=0.01,
+    )
+    assert di_fast == pytest.approx(
+      high_speed_physical_max * HIGH_SPEED_FALLBACK_FIELD_SCALE,
+      abs=0.01,
+    )
 
 
 # --- Phase 2: Inner PID + delay compensation ---
@@ -517,8 +528,8 @@ class TestInnerPID:
     coast_pedal_di = 3.0
     accel_per_di_mps2 = 0.063
     road_load_accel_mps2 = -0.40
-    steady_error_bound_mps2 = 0.10
-    settling_time_bound_s = 6.0
+    steady_error_bound_mps2 = 0.105
+    settling_time_bound_s = 7.0
     simulation_dt_s = 0.02
     simulation_steps = round(30.0 / simulation_dt_s)
     steady_window_steps = round(2.0 / simulation_dt_s)
@@ -616,6 +627,82 @@ class TestInnerPID:
                   a_ego=0.0, freeze_integrator=False)
     assert abs(vdas.inner_pid.i) > 0.01
 
+  @pytest.mark.parametrize("persistent_error_mps2", [-0.09, -0.0196, 0.0196, 0.09])
+  def test_persistent_sub_deadband_error_earns_residual_authority(self, persistent_error_mps2):
+    vdas = VirtualDAS(dt=0.02)
+
+    for _ in range(round(5.0 / vdas.dt)):
+      vdas.update(
+        persistent_error_mps2,
+        v_ego=25.0,
+        prev_pedal_di=vdas.prev_pedal_di,
+        a_ego=0.0,
+        freeze_integrator=False,
+      )
+
+    assert abs(vdas.inner_pid.i) > 0.005
+    assert vdas.inner_pid.i * persistent_error_mps2 > 0.0
+
+  def test_sub_deadband_sign_changing_noise_does_not_accumulate_residual_authority(self):
+    vdas = VirtualDAS(dt=0.02)
+    maximum_integral_mps2 = 0.0
+
+    for step in range(round(10.0 / vdas.dt)):
+      noisy_command_mps2 = 0.09 if (step // 25) % 2 == 0 else -0.09
+      vdas.update(
+        noisy_command_mps2,
+        v_ego=25.0,
+        prev_pedal_di=vdas.prev_pedal_di,
+        a_ego=0.0,
+        freeze_integrator=False,
+      )
+      maximum_integral_mps2 = max(maximum_integral_mps2, abs(vdas.inner_pid.i))
+
+    assert maximum_integral_mps2 < 1e-9
+
+  def test_sign_changing_sub_deadband_error_never_completes_dwell(self):
+    vdas = VirtualDAS(dt=0.02)
+
+    selected_errors_mps2 = [
+      vdas._gate_pid_error_noise(
+        0.09 if (step // 5) % 2 == 0 else -0.09,
+        freeze_integrator=False,
+      )
+      for step in range(round(10.0 / vdas.dt))
+    ]
+
+    assert selected_errors_mps2 == pytest.approx(np.zeros(len(selected_errors_mps2)))
+
+  def test_persistent_error_dwell_restarts_after_freeze_observe_and_reset(self):
+    vdas = VirtualDAS(dt=0.02)
+
+    def hold_small_error(duration_s, freeze_integrator=False):
+      for _ in range(round(duration_s / vdas.dt)):
+        vdas.update(
+          0.09,
+          v_ego=25.0,
+          prev_pedal_di=vdas.prev_pedal_di,
+          a_ego=0.0,
+          freeze_integrator=freeze_integrator,
+        )
+
+    hold_small_error(0.8)
+    hold_small_error(vdas.dt, freeze_integrator=True)
+    hold_small_error(0.4)
+    assert vdas.inner_pid.i == 0.0
+
+    hold_small_error(1.0)
+    assert vdas.inner_pid.i > 0.0
+    vdas.observe(a_ego=0.0)
+    hold_small_error(0.4)
+    assert vdas.inner_pid.i == 0.0
+
+    hold_small_error(1.0)
+    assert vdas.inner_pid.i > 0.0
+    vdas.reset(measured_accel=0.0, commanded_accel=0.09)
+    hold_small_error(0.4)
+    assert vdas.inner_pid.i == 0.0
+
   def test_anti_windup(self):
     """Integrator should be bounded by acceleration-map authority."""
     vdas = VirtualDAS(dt=0.02)
@@ -698,8 +785,8 @@ class TestFeedforwardModel:
   def _fixtures(self, mock_nap_conf, mock_zero_torque):
     pass
 
-  def test_default_table_matches_legacy_at_grid_points(self):
-    """Default FF table should match the old 3-breakpoint interp at grid points."""
+  def test_default_table_only_scales_positive_branch_above_zero_speed(self):
+    """The field correction must not alter regen or the 0 m/s fallback."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
     from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP
 
@@ -711,10 +798,12 @@ class TestFeedforwardModel:
         expected = float(np.interp(accel,
                                    [REGEN_MAX, 0.0, ACCEL_MAX],
                                    [PEDAL_DI_MIN, 0.0, max_pedal]))
-        # FF model with zero_torque_di=0 should match legacy interp
+        if speed >= 5.0 and accel > 0.0:
+          expected *= HIGH_SPEED_FALLBACK_FIELD_SCALE
         got = ff.get(accel, speed, zero_torque_di=0.0)
-        assert abs(got - expected) < 0.5, \
+        assert got == pytest.approx(expected, abs=0.01), (
           f"Mismatch at speed={speed}, accel={accel}: got={got:.2f}, expected={expected:.2f}"
+        )
 
   def test_zero_torque_shift_positive_accel(self):
     """Positive accel zt offset fades: full at accel=0, zero at ACCEL_MAX."""

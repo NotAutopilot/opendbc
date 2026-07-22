@@ -15,6 +15,7 @@ CAPTURE_STEADY_PEDAL_DI = 16.651  # median decoded enabled 0x551 command
 # Solving the deployed feedforward mapping at the values above gives 4.997 DI.
 # This is inferred controller zero-torque state, not pedal calibration voltage.
 CAPTURE_INFERRED_ZERO_TORQUE_DI = 5.0
+HIGH_SPEED_FALLBACK_FIELD_SCALE = 0.65
 
 
 class CapturedZeroTorque:
@@ -64,7 +65,10 @@ def test_highway_speed_step_bounds_pedal_command_rise(monkeypatch):
       freeze_integrator=True,
     )
   steady_pedal_di = pedal_di
-  assert steady_pedal_di == pytest.approx(CAPTURE_STEADY_PEDAL_DI, abs=0.1)
+  calibrated_capture_bound_di = CAPTURE_INFERRED_ZERO_TORQUE_DI + HIGH_SPEED_FALLBACK_FIELD_SCALE * (
+    CAPTURE_STEADY_PEDAL_DI - CAPTURE_INFERRED_ZERO_TORQUE_DI
+  )
+  assert CAPTURE_INFERRED_ZERO_TORQUE_DI < steady_pedal_di <= calibrated_capture_bound_di
 
   pedal_commands = []
   for _ in range(50):

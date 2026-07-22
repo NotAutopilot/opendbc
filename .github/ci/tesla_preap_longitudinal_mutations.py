@@ -138,6 +138,102 @@ MUTATIONS = (
     ),
   ),
   HistoricalMutation(
+    name="hard-inner-error-deadband-restored",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    error = self._gate_pid_error_noise(error, freeze_integrator)\n",
+    replacement=(
+      b"    if abs(error) < PID_ERROR_DEADBAND:\n" +
+      b"      error = 0.0\n"
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_persistent_sub_deadband_error_earns_residual_authority[0.0196]"
+    ),
+  ),
+  HistoricalMutation(
+    name="inner-error-noise-gate-call-bypassed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    error = self._gate_pid_error_noise(error, freeze_integrator)\n",
+    replacement=b"    error = error\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_sub_deadband_sign_changing_noise_does_not_accumulate_residual_authority"
+    ),
+  ),
+  HistoricalMutation(
+    name="persistent-error-dwell-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    if self.persistent_error_elapsed_s < PID_PERSISTENT_ERROR_DWELL_S:\n",
+    replacement=b"    if False:\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_sign_changing_sub_deadband_error_never_completes_dwell"
+    ),
+  ),
+  HistoricalMutation(
+    name="persistent-error-sign-reset-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    if error_sign != self.persistent_error_sign:\n" +
+      b"      self.persistent_error_sign = error_sign\n" +
+      b"      self.persistent_error_elapsed_s = self.dt\n"
+    ),
+    replacement=(
+      b"    if error_sign != self.persistent_error_sign:\n" +
+      b"      self.persistent_error_sign = error_sign\n"
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_sign_changing_sub_deadband_error_never_completes_dwell"
+    ),
+  ),
+  HistoricalMutation(
+    name="persistent-error-freeze-reset-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    if freeze_integrator or error == 0.0:\n",
+    replacement=b"    if error == 0.0:\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_persistent_error_dwell_restarts_after_freeze_observe_and_reset"
+    ),
+  ),
+  HistoricalMutation(
+    name="persistent-error-observe-reset-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    self.inner_pid.reset()\n" +
+      b"    self._reset_negative_handoff()\n" +
+      b"    self._reset_persistent_error()\n\n" +
+      b"  def reset("
+    ),
+    replacement=(
+      b"    self.inner_pid.reset()\n" +
+      b"    self._reset_negative_handoff()\n\n" +
+      b"  def reset("
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_persistent_error_dwell_restarts_after_freeze_observe_and_reset"
+    ),
+  ),
+  HistoricalMutation(
+    name="persistent-error-command-reset-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    self._reset_negative_handoff()\n" +
+      b"    self._reset_persistent_error()\n\n" +
+      b"  def _gate_pid_error_noise("
+    ),
+    replacement=(
+      b"    self._reset_negative_handoff()\n\n" +
+      b"  def _gate_pid_error_noise("
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_persistent_error_dwell_restarts_after_freeze_observe_and_reset"
+    ),
+  ),
+  HistoricalMutation(
     name="steady-grade-removed-from-effort",
     source_path="opendbc/car/tesla/preap/virtual_das.py",
     original=(
@@ -180,9 +276,21 @@ MUTATIONS = (
     name="engage-grade-bypasses-pedal-slew-envelope",
     source_path="opendbc/car/tesla/preap/virtual_das.py",
     original=(
-      b"    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di, pedal_ramp_rate_up)\n"
+      b"    pedal_di = self._rate_limit(\n" +
+      b"      pedal_di_bounded,\n" +
+      b"      prev_pedal_di,\n" +
+      b"      pedal_ramp_rate_up,\n" +
+      b"      pedal_ramp_rate_down,\n" +
+      b"    )\n"
     ),
-    replacement=b"    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di)\n",
+    replacement=(
+      b"    pedal_di = self._rate_limit(\n" +
+      b"      pedal_di_bounded,\n" +
+      b"      prev_pedal_di,\n" +
+      b"      PEDAL_RAMP_RATE_UP,\n" +
+      b"      pedal_ramp_rate_down,\n" +
+      b"    )\n"
+    ),
     test_node=(
       "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
       "test_engage_pedal_ramp_limit_applies_after_feedforward"
@@ -262,6 +370,32 @@ MUTATIONS = (
     ),
   ),
   HistoricalMutation(
+    name="legacy-positive-fallback-actuator-gain",
+    source_path="opendbc/car/tesla/preap/ff_table_default.py",
+    original=(
+      b"    [-5.00, -3.33, -1.67,  0.00,  9.62, 19.24, 28.86, 38.48, 48.10],  # 20 m/s\n" +
+      b"    [-5.00, -3.33, -1.67,  0.00, 10.66, 21.32, 31.98, 42.64, 53.30],  # 30 m/s\n"
+    ),
+    replacement=(
+      b"    [-5.00, -3.33, -1.67,  0.00, 14.80, 29.60, 44.40, 59.20, 74.00],  # 20 m/s\n" +
+      b"    [-5.00, -3.33, -1.67,  0.00, 16.40, 32.80, 49.20, 65.60, 82.00],  # 30 m/s\n"
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_route_shaped_positive_transition_bounds_delivered_acceleration"
+    ),
+  ),
+  HistoricalMutation(
+    name="legacy-5mps-positive-fallback-transition",
+    source_path="opendbc/car/tesla/preap/ff_table_default.py",
+    original=b"    [-5.00, -3.33, -1.67,  0.00,  7.54, 15.08, 22.62, 30.16, 37.70],  # 5 m/s\n",
+    replacement=b"    [-5.00, -3.33, -1.67,  0.00, 11.60, 23.20, 34.80, 46.40, 58.00],  # 5 m/s\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_speed_ramp_through_fallback_transition_is_smooth"
+    ),
+  ),
+  HistoricalMutation(
     name="focused-job-skip-bypass",
     source_path=".github/workflows/tests.yml",
     original=(
@@ -321,6 +455,56 @@ MUTATIONS = (
     test_node=(
       "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
       "test_retained_integral_is_clipped_to_remaining_acceleration_authority"
+    ),
+  ),
+  HistoricalMutation(
+    name="negative-handoff-integral-shaping-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"NEGATIVE_HANDOFF_INTEGRAL_SLEW = 0.25  # m/s\xc2\xb3\n",
+    replacement=b"NEGATIVE_HANDOFF_INTEGRAL_SLEW = 100.0  # m/s\xc2\xb3\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_negative_command_handoff_keeps_grade_effort_separate"
+    ),
+  ),
+  HistoricalMutation(
+    name="negative-handoff-braking-effort-budget-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"      shared_effort_min = max(\n" +
+      b"        effort_min,\n" +
+      b"        previous_accel_effort - VDAS_DECEL_JERK_MAX * self.dt,\n" +
+      b"      )\n"
+    ),
+    replacement=b"      shared_effort_min = effort_min\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_handoff_shares_command_jerk_budget_in_both_directions"
+    ),
+  ),
+  HistoricalMutation(
+    name="negative-handoff-recovery-effort-budget-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"      shared_effort_max = min(\n" +
+      b"        effort_max,\n" +
+      b"        previous_accel_effort + VDAS_ACCEL_JERK_MAX * self.dt,\n" +
+      b"      )\n"
+    ),
+    replacement=b"      shared_effort_max = effort_max\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_handoff_shares_command_jerk_budget_in_both_directions"
+    ),
+  ),
+  HistoricalMutation(
+    name="negative-handoff-comfort-pedal-step-removed",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"NEGATIVE_HANDOFF_PEDAL_STEP = 0.50  # DI/update\n",
+    replacement=b"NEGATIVE_HANDOFF_PEDAL_STEP = PEDAL_RAMP_RATE_DOWN  # DI/update\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_vdas_grade_control.py::" +
+      "test_handoff_full_brake_and_recovery_stay_inside_comfort_pedal_step"
     ),
   ),
   HistoricalMutation(

@@ -40,11 +40,18 @@ from opendbc.car.tesla.pedal.controller import (
 
 FF_TABLE_PATH = "/data/vdas_ff_table.json"
 
-# Inner PID error deadband: errors below this threshold are zeroed before
-# entering the PID. Prevents integral accumulation from sensor noise and
-# MPC jitter near steady-state. Applied to the error input, not the output,
-# so there's no discontinuity in the correction signal.
+# Inner PID error deadband: brief or sign-changing errors below this threshold
+# are zeroed before entering the PID. A coherent same-sign residual earns
+# integral authority after a dwell, so persistent road-load bias still closes.
+# Applied to the error input, not the output, so the correction stays continuous.
 PID_ERROR_DEADBAND = 0.1  # m/s²
+PID_PERSISTENT_ERROR_DWELL_S = 1.0
+# The negative-command handoff stays dormant around zero, then uses a smaller
+# directional error band and a bounded slew to unwind only opposing trim.
+NEGATIVE_HANDOFF_ACTIVATION_ACCEL = -0.05  # m/s²
+NEGATIVE_HANDOFF_ERROR_DEADBAND = 0.02  # m/s²
+NEGATIVE_HANDOFF_INTEGRAL_SLEW = 0.25  # m/s³
+NEGATIVE_HANDOFF_PEDAL_STEP = 0.50  # DI/update
 
 GRAVITY = 9.81  # m/s²
 PITCH_LP_RC = 0.5   # low-pass filter RC for steady-state grade (seconds)
@@ -438,6 +445,12 @@ class VirtualDAS:
     self.prev_a_ego_filtered = 0.0
     self.a_ego_initialized = False
     self.pedal_ramp_limited_up = False
+    self.negative_handoff_pending = False
+    self.negative_handoff_active = False
+    self.negative_handoff_integral_at_crossing = 0.0
+    self.prev_accel_effort = 0.0
+    self.persistent_error_sign = 0
+    self.persistent_error_elapsed_s = 0.0
 
   def update(self, a_cmd: float, v_ego: float, prev_pedal_di: float,
              a_ego: float = 0.0, freeze_integrator: bool = False,
@@ -459,7 +472,9 @@ class VirtualDAS:
     Returns:
       pedal_di: output in DI units (caller converts to voltage via di_to_pedal)
     """
+    previous_a_limited = self.jerk_limiter.a_limited
     a_limited = self.jerk_limiter.update(a_cmd)
+    self._update_negative_handoff_state(previous_a_limited, a_limited)
 
     steady_grade_compensation, transient_pitch_compensation = self.grade_estimator.update(
       orientation_ned if orientation_ned is not None else [])
@@ -487,11 +502,24 @@ class VirtualDAS:
     a_ego_future = a_ego_filtered + j_ego * future_t
 
     error = a_limited - a_ego_future
-    if abs(error) < PID_ERROR_DEADBAND:
-      error = 0.0
+    self._shape_integral_for_negative_handoff(a_limited, error)
+    error = self._gate_pid_error_noise(error, freeze_integrator)
 
-    # Keep residual control in acceleration space. The PID can use only the
-    # authority left after desired acceleration and grade compensation.
+    # Keep residual control in acceleration space. Command and residual trim
+    # share one effort-jerk envelope during the negative handoff.
+    negative_handoff_in_progress = self.negative_handoff_pending or self.negative_handoff_active
+    if negative_handoff_in_progress:
+      previous_accel_effort = float(clip(self.prev_accel_effort, effort_min, effort_max))
+      shared_effort_min = max(
+        effort_min,
+        previous_accel_effort - VDAS_DECEL_JERK_MAX * self.dt,
+      )
+      shared_effort_max = min(
+        effort_max,
+        previous_accel_effort + VDAS_ACCEL_JERK_MAX * self.dt,
+      )
+    else:
+      shared_effort_min, shared_effort_max = effort_min, effort_max
     self.inner_pid.neg_limit = effort_min - base_accel_effort
     self.inner_pid.pos_limit = effort_max - base_accel_effort
     self.inner_pid.i = float(clip(
@@ -502,11 +530,15 @@ class VirtualDAS:
     integral_before_update = self.inner_pid.i
     accel_trim = float(self.inner_pid.update(
       error, speed=v_ego, freeze_integrator=freeze_integrator))
+    requested_accel_effort = base_accel_effort + accel_trim
     accel_effort = float(clip(
-      base_accel_effort + accel_trim,
-      effort_min,
-      effort_max,
+      requested_accel_effort,
+      shared_effort_min,
+      shared_effort_max,
     ))
+    if negative_handoff_in_progress:
+      self.inner_pid.i += accel_effort - requested_accel_effort
+    self.prev_accel_effort = accel_effort
 
     pedal_di_unclipped = self._feedforward(accel_effort, v_ego)
 
@@ -514,7 +546,17 @@ class VirtualDAS:
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
     pedal_di_bounded = float(clip(pedal_di_unclipped, PEDAL_DI_MIN, max_pedal_value))
 
-    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di, pedal_ramp_rate_up)
+    if negative_handoff_in_progress:
+      pedal_ramp_rate_up = min(pedal_ramp_rate_up, NEGATIVE_HANDOFF_PEDAL_STEP)
+      pedal_ramp_rate_down = NEGATIVE_HANDOFF_PEDAL_STEP
+    else:
+      pedal_ramp_rate_down = PEDAL_RAMP_RATE_DOWN
+    pedal_di = self._rate_limit(
+      pedal_di_bounded,
+      prev_pedal_di,
+      pedal_ramp_rate_up,
+      pedal_ramp_rate_down,
+    )
     self.pedal_ramp_limited_up = pedal_di < pedal_di_bounded
     physical_bound_blocks_error = (
       (pedal_di_bounded < pedal_di_unclipped and error > 0.0)
@@ -537,6 +579,8 @@ class VirtualDAS:
     self.prev_a_ego_filtered = a_ego_filtered
     self.a_ego_initialized = True
     self.inner_pid.reset()
+    self._reset_negative_handoff()
+    self._reset_persistent_error()
 
   def reset(self, measured_accel: float = 0.0, commanded_accel: float = 0.0,
             pedal_di_init: float = 0.0, preserve_grade: bool = False):
@@ -556,6 +600,71 @@ class VirtualDAS:
     self.a_ego_initialized = True
     self.prev_pedal_di = pedal_di_init
     self.pedal_ramp_limited_up = False
+    preserved_grade_effort = (
+      self.grade_estimator._steady_grade_compensation()
+      if preserve_grade
+      else 0.0
+    )
+    self.prev_accel_effort = float(clip(
+      commanded_accel + preserved_grade_effort,
+      REGEN_MAX,
+      ACCEL_MAX,
+    ))
+    self._reset_negative_handoff()
+    self._reset_persistent_error()
+
+  def _gate_pid_error_noise(self, error: float, freeze_integrator: bool) -> float:
+    if abs(error) >= PID_ERROR_DEADBAND:
+      self._reset_persistent_error()
+      return error
+
+    if freeze_integrator or error == 0.0:
+      self._reset_persistent_error()
+      return 0.0
+
+    error_sign = 1 if error > 0.0 else -1
+    if error_sign != self.persistent_error_sign:
+      self.persistent_error_sign = error_sign
+      self.persistent_error_elapsed_s = self.dt
+    else:
+      self.persistent_error_elapsed_s += self.dt
+
+    if self.persistent_error_elapsed_s < PID_PERSISTENT_ERROR_DWELL_S:
+      return 0.0
+    return error
+
+  def _reset_persistent_error(self):
+    self.persistent_error_sign = 0
+    self.persistent_error_elapsed_s = 0.0
+
+  def _update_negative_handoff_state(self, previous_a_limited: float, a_limited: float):
+    if a_limited >= 0.0:
+      self._reset_negative_handoff()
+      return
+
+    if previous_a_limited >= 0.0:
+      self.negative_handoff_pending = True
+      self.negative_handoff_integral_at_crossing = self.inner_pid.i
+
+    if self.negative_handoff_pending and a_limited <= NEGATIVE_HANDOFF_ACTIVATION_ACCEL:
+      self.negative_handoff_pending = False
+      self.negative_handoff_active = True
+
+  def _shape_integral_for_negative_handoff(self, a_limited: float, tracking_error: float):
+    needs_more_deceleration = tracking_error < -NEGATIVE_HANDOFF_ERROR_DEADBAND
+    if not self.negative_handoff_active or not needs_more_deceleration or self.inner_pid.i <= 0.0:
+      return
+
+    # Rebase residual authority by the finite-jerk command change, but slew
+    # toward it so learned road-load trim cannot disappear in one update.
+    rebased_integral = max(0.0, self.negative_handoff_integral_at_crossing + a_limited)
+    maximum_integral_step = NEGATIVE_HANDOFF_INTEGRAL_SLEW * self.dt
+    self.inner_pid.i = max(rebased_integral, self.inner_pid.i - maximum_integral_step)
+
+  def _reset_negative_handoff(self):
+    self.negative_handoff_pending = False
+    self.negative_handoff_active = False
+    self.negative_handoff_integral_at_crossing = 0.0
 
   def _feedforward(self, a_cmd: float, v_ego: float) -> float:
     """Map acceleration to raw pedal DI via the finite 2D lookup table."""
@@ -563,10 +672,11 @@ class VirtualDAS:
     return self.ff_model.get(a_cmd, v_ego, zero_torque_di)
 
   def _rate_limit(self, pedal_di: float, prev_pedal_di: float,
-                  ramp_rate_up: float = PEDAL_RAMP_RATE_UP) -> float:
+                  ramp_rate_up: float = PEDAL_RAMP_RATE_UP,
+                  ramp_rate_down: float = PEDAL_RAMP_RATE_DOWN) -> float:
     """Safety backstop: asymmetric DI rate limit."""
     return float(clip(
       pedal_di,
-      prev_pedal_di - PEDAL_RAMP_RATE_DOWN,
+      prev_pedal_di - ramp_rate_down,
       prev_pedal_di + ramp_rate_up,
     ))
