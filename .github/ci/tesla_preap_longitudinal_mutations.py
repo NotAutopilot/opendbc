@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,15 +107,143 @@ MUTATIONS = (
       "test_controller_failure_drops_only_longitudinal_and_latches_unavailable"
     ),
   ),
+  HistoricalMutation(
+    name="generic-outer-integral-feedback",
+    source_path="opendbc/car/tesla/preap/constants.py",
+    original=b"PEDAL_LONG_KI_V = [0.0, 0.0, 0.0, 0.0]\n",
+    replacement=b"PEDAL_LONG_KI_V = [0.05, 0.08, 0.10, 0.15]\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_longitudinal_tuning.py::" +
+      "test_pedal_params_leave_generic_outer_feedback_disabled"
+    ),
+  ),
+  HistoricalMutation(
+    name="planner-feedforward-passthrough-disabled",
+    source_path="opendbc/car/tesla/preap/interface.py",
+    original=b"      ret.longitudinalTuning.kf = 1.0\n",
+    replacement=b"      ret.longitudinalTuning.kf = 0.0\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_longitudinal_tuning.py::" +
+      "test_pedal_params_leave_generic_outer_feedback_disabled"
+    ),
+  ),
+  HistoricalMutation(
+    name="sluggish-inner-acceleration-feedback",
+    source_path="opendbc/car/tesla/preap/constants.py",
+    original=b"VDAS_INNER_KI_V = [0.3, 0.2, 0.15]\n",
+    replacement=b"VDAS_INNER_KI_V = [0.15, 0.10, 0.075]\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestInnerPID::" +
+      "test_inner_feedback_holds_cruise_against_sustained_road_load"
+    ),
+  ),
+  HistoricalMutation(
+    name="focused-job-skip-bypass",
+    source_path=".github/workflows/tests.yml",
+    original=(
+      b"  tesla_preap_longitudinal_regression:\n" +
+      b"    name: Tesla Pre-AP longitudinal regressions\n"
+    ),
+    replacement=(
+      b"  tesla_preap_longitudinal_regression:\n" +
+      b"    if: false\n" +
+      b"    name: Tesla Pre-AP longitudinal regressions\n"
+    ),
+    test_node=(
+      ".github/ci/test_tests_workflow.py::TestWorkflowContract::" +
+      "test_focused_longitudinal_job_cannot_be_skipped_or_soft_failed"
+    ),
+  ),
+  HistoricalMutation(
+    name="focused-job-soft-failure-bypass",
+    source_path=".github/workflows/tests.yml",
+    original=(
+      b"  tesla_preap_longitudinal_regression:\n" +
+      b"    name: Tesla Pre-AP longitudinal regressions\n"
+    ),
+    replacement=(
+      b"  tesla_preap_longitudinal_regression:\n" +
+      b"    continue-on-error: true\n" +
+      b"    name: Tesla Pre-AP longitudinal regressions\n"
+    ),
+    test_node=(
+      ".github/ci/test_tests_workflow.py::TestWorkflowContract::" +
+      "test_focused_longitudinal_job_cannot_be_skipped_or_soft_failed"
+    ),
+  ),
+  HistoricalMutation(
+    name="residual-trim-after-feedforward",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    pedal_di_unclipped = self._feedforward(accel_effort, v_ego)\n",
+    replacement=(
+      b"    pedal_di_unclipped = self._feedforward(base_accel_effort, v_ego) + accel_trim\n"
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
+      "test_residual_feedback_enters_feedforward_in_acceleration_domain"
+    ),
+  ),
+  HistoricalMutation(
+    name="retained-integral-without-authority-clamp",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    self.inner_pid.i = float(clip(\n" +
+      b"      self.inner_pid.i,\n" +
+      b"      self.inner_pid.neg_limit,\n" +
+      b"      self.inner_pid.pos_limit,\n" +
+      b"    ))\n"
+    ),
+    replacement=b"    self.inner_pid.i = self.inner_pid.i\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
+      "test_retained_integral_is_clipped_to_remaining_acceleration_authority"
+    ),
+  ),
+  HistoricalMutation(
+    name="hidden-physical-profile-clipping",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=(
+      b"    pedal_di_bounded = float(clip(pedal_di_unclipped, PEDAL_DI_MIN, max_pedal_value))\n"
+    ),
+    replacement=(
+      b"    pedal_di_unclipped = float(clip(pedal_di_unclipped, PEDAL_DI_MIN, max_pedal_value))\n" +
+      b"    pedal_di_bounded = pedal_di_unclipped\n"
+    ),
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
+      "test_physical_pedal_rail_freezes_and_unwinds_acceleration_integral"
+    ),
+  ),
+  HistoricalMutation(
+    name="final-slew-without-anti-windup",
+    source_path="opendbc/car/tesla/preap/virtual_das.py",
+    original=b"    if physical_bound_blocks_error or slew_bound_blocks_error:\n",
+    replacement=b"    if physical_bound_blocks_error:\n",
+    test_node=(
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py::TestVDASDomainBoundaries::" +
+      "test_final_di_slew_backstop_freezes_and_unwinds_acceleration_integral"
+    ),
+  ),
 )
 
 
-def run_pytest(repo_root: Path, test_nodes: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+class JUnitReportError(RuntimeError):
+  pass
+
+
+def run_pytest(
+    repo_root: Path,
+    test_nodes: tuple[str, ...],
+    junit_path: Path,
+) -> subprocess.CompletedProcess[str]:
   environment = os.environ.copy()
   environment["PYTHONDONTWRITEBYTECODE"] = "1"
   environment["PYTHONPATH"] = str(repo_root)
   return subprocess.run(
-    [sys.executable, "-m", "pytest", "-q", "-n", "0", *test_nodes],
+    [
+      sys.executable, "-m", "pytest", "-q", "-n", "0", "-p", "no:cacheprovider",
+      f"--junitxml={junit_path}", *test_nodes,
+    ],
     cwd=repo_root,
     env=environment,
     stdout=subprocess.PIPE,
@@ -130,9 +259,14 @@ def copy_repo(destination: Path) -> None:
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".cache",
+    ".hypothesis",
     ".venv",
+    "venv",
+    "env",
     "__pycache__",
     "*.pyc",
+    "*.pyo",
   )
   shutil.copytree(REPO_ROOT, destination, ignore=ignored_names)
 
@@ -148,37 +282,72 @@ def apply_mutation(repo_root: Path, mutation: HistoricalMutation) -> None:
   source_path.write_bytes(source.replace(mutation.original, mutation.replacement, 1))
 
 
+def junit_testcases(junit_path: Path) -> list[ET.Element]:
+  try:
+    return list(ET.parse(junit_path).iter("testcase"))
+  except (OSError, ET.ParseError) as exc:
+    raise JUnitReportError(f"cannot read {junit_path.name}: {exc}") from exc
+
+
+def has_only_assertion_failures(testcases: list[ET.Element]) -> bool:
+  failures = [failure for testcase in testcases for failure in testcase.findall("failure")]
+  errors = [error for testcase in testcases for error in testcase.findall("error")]
+  return (
+    bool(failures)
+    and not errors
+    and all(
+      (failure.get("type") or "").endswith("AssertionError")
+      or (failure.get("message") or "").startswith("AssertionError:")
+      or "AssertionError" in (failure.text or "")
+      for failure in failures
+    )
+  )
+
+
 def main() -> int:
   baseline_nodes = tuple(dict.fromkeys(mutation.test_node for mutation in MUTATIONS))
-  baseline = run_pytest(REPO_ROOT, baseline_nodes)
-  if baseline.returncode != 0:
-    print("Baseline longitudinal regression tests failed:")
-    print(baseline.stdout)
-    return 1
-  print(f"BASELINE PASS: {len(baseline_nodes)} focused tests")
-
-  survivors = []
   with tempfile.TemporaryDirectory(prefix="tesla-preap-longitudinal-mutations-") as temp_dir:
     temp_root = Path(temp_dir)
+    baseline_xml = temp_root / "baseline.xml"
+    baseline = run_pytest(REPO_ROOT, baseline_nodes, baseline_xml)
+    if baseline.returncode != 0:
+      print("BASELINE FAILED: longitudinal regression tests did not pass")
+      print(baseline.stdout)
+      return 1
+    try:
+      baseline_testcases = junit_testcases(baseline_xml)
+    except JUnitReportError as exc:
+      print(f"BASELINE INVALID: {exc}")
+      return 1
+    print(f"BASELINE PASS: {len(baseline_testcases)} tests across {len(baseline_nodes)} nodes")
+
+    survivors = []
     for mutation in MUTATIONS:
       mutant_root = temp_root / mutation.name
       copy_repo(mutant_root)
       apply_mutation(mutant_root, mutation)
 
-      result = run_pytest(mutant_root, (mutation.test_node,))
-      if result.returncode == 1:
+      junit_path = temp_root / f"{mutation.name}.xml"
+      result = run_pytest(mutant_root, (mutation.test_node,), junit_path)
+      try:
+        mutation_testcases = junit_testcases(junit_path)
+      except JUnitReportError as exc:
+        print(f"INVALID: {mutation.name} {exc}")
+        return 1
+      if result.returncode == 1 and has_only_assertion_failures(mutation_testcases):
         print(f"KILLED: {mutation.name} [{mutation.test_node}]")
       elif result.returncode == 0:
         survivors.append(mutation.name)
         print(f"SURVIVED: {mutation.name} [{mutation.test_node}]")
       else:
-        print(f"INVALID: {mutation.name} exited with pytest status {result.returncode}")
+        print(f"INVALID: {mutation.name} exited without assertion-only test failures "
+              + f"(pytest status {result.returncode})")
         print(result.stdout)
         return 1
 
-  if survivors:
-    print(f"Historical mutations survived: {', '.join(survivors)}")
-    return 1
+    if survivors:
+      print(f"Historical mutations survived: {', '.join(survivors)}")
+      return 1
 
   print(f"ALL KILLED: {len(MUTATIONS)} historical mutations")
   return 0

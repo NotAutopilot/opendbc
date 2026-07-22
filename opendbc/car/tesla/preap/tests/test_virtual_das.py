@@ -11,6 +11,9 @@ from opendbc.car.tesla.preap.ff_table_default import (
   ACCEL_BP as FF_ACCEL_BP,
   DEFAULT_TABLE as FF_DEFAULT_TABLE,
 )
+from opendbc.car.tesla.preap.constants import (
+  VDAS_EGO_JERK_MAX, VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
+)
 from opendbc.car.tesla.preap.virtual_das import FeedforwardModel, JerkLimiter, VirtualDAS
 from opendbc.car.tesla.preap.nap_conf import (
   PEDAL_DI_MIN, PEDAL_DI_ZERO, ACCEL_MAX, REGEN_MAX,
@@ -510,6 +513,83 @@ class TestInnerPID:
     assert settled, "System did not settle within 6 seconds"
     assert settle_time < 3.0, f"Settled at {settle_time:.2f}s, expected < 3.0s"
 
+  def test_inner_feedback_holds_cruise_against_sustained_road_load(self, monkeypatch):
+    coast_pedal_di = 3.0
+    accel_per_di_mps2 = 0.063
+    road_load_accel_mps2 = -0.40
+    steady_error_bound_mps2 = 0.10
+    settling_time_bound_s = 6.0
+    simulation_dt_s = 0.02
+    simulation_steps = round(30.0 / simulation_dt_s)
+    steady_window_steps = round(2.0 / simulation_dt_s)
+    delay_steps = round(0.40 / simulation_dt_s)
+    plant_tau_s = 0.25
+    plant_alpha = simulation_dt_s / (plant_tau_s + simulation_dt_s)
+    zero_torque = SimpleNamespace(get=lambda _v_ego: coast_pedal_di)
+    monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.get_zero_torque', lambda: zero_torque)
+
+    vdas = VirtualDAS(dt=simulation_dt_s)
+    vdas.reset(measured_accel=0.0, commanded_accel=0.0, pedal_di_init=coast_pedal_di)
+    real_feedforward = vdas._feedforward
+    acceleration_efforts_mps2 = []
+
+    def record_feedforward(acceleration_effort_mps2, v_ego):
+      acceleration_efforts_mps2.append(acceleration_effort_mps2)
+      return real_feedforward(acceleration_effort_mps2, v_ego)
+
+    monkeypatch.setattr(vdas, '_feedforward', record_feedforward)
+    delayed_pedal_di = [coast_pedal_di] * delay_steps
+    initial_speed_mps = 30.0
+    v_ego = initial_speed_mps
+    a_ego = 0.0
+    acceleration_errors_mps2 = []
+    pedal_commands_di = []
+    integrated_speed_change_mps = 0.0
+
+    for _ in range(simulation_steps):
+      pedal_di = vdas.update(
+        0.0,
+        v_ego=v_ego,
+        prev_pedal_di=vdas.prev_pedal_di,
+        a_ego=a_ego,
+        freeze_integrator=False,
+      )
+      applied_pedal_di = delayed_pedal_di.pop(0)
+      delayed_pedal_di.append(pedal_di)
+      plant_target_accel_mps2 = (
+        (applied_pedal_di - coast_pedal_di) * accel_per_di_mps2
+        + road_load_accel_mps2
+      )
+      a_ego += plant_alpha * (plant_target_accel_mps2 - a_ego)
+      integrated_speed_change_mps += a_ego * simulation_dt_s
+      v_ego += a_ego * simulation_dt_s
+      acceleration_errors_mps2.append(abs(a_ego))
+      pedal_commands_di.append(pedal_di)
+
+    steady_errors_mps2 = acceleration_errors_mps2[-steady_window_steps:]
+    post_settling_errors_mps2 = acceleration_errors_mps2[
+      round(settling_time_bound_s / simulation_dt_s):
+    ]
+    steady_efforts_mps2 = acceleration_efforts_mps2[-steady_window_steps:]
+    steady_pedals_di = pedal_commands_di[-steady_window_steps:]
+    max_pedal_di = float(np.interp(v_ego, PEDAL_BP, PEDAL_MAX_VALUES))
+    assert v_ego > 0.0
+    assert v_ego == pytest.approx(initial_speed_mps + integrated_speed_change_mps)
+    assert min(steady_efforts_mps2) > REGEN_MAX
+    assert max(steady_efforts_mps2) < ACCEL_MAX
+    assert min(steady_pedals_di) > PEDAL_DI_MIN
+    assert max(steady_pedals_di) < max_pedal_di
+    assert max(steady_errors_mps2) <= steady_error_bound_mps2, (
+      f"cruise-hold error reached {max(steady_errors_mps2):.3f} m/s^2 under "
+      + f"{abs(road_load_accel_mps2):.2f} m/s^2 sustained road load; "
+      + f"speed fell to {v_ego:.2f} m/s with {vdas.inner_pid.i:.3f} m/s^2 integral correction"
+    )
+    assert max(post_settling_errors_mps2) <= steady_error_bound_mps2, (
+      f"cruise-hold error had not settled below {steady_error_bound_mps2:.2f} m/s^2 "
+      + f"within {settling_time_bound_s:.1f}s; max later error was "
+      + f"{max(post_settling_errors_mps2):.3f} m/s^2"
+    )
+
   def test_integrator_freeze_during_grace(self):
     """Integrator should not accumulate during engage grace period."""
     vdas = VirtualDAS(dt=0.02)
@@ -537,15 +617,15 @@ class TestInnerPID:
     assert abs(vdas.inner_pid.i) > 0.01
 
   def test_anti_windup(self):
-    """Integrator should be bounded by PID pos/neg limits."""
+    """Integrator should be bounded by acceleration-map authority."""
     vdas = VirtualDAS(dt=0.02)
 
     for _ in range(2000):
       vdas.update(ACCEL_MAX, v_ego=15.0, prev_pedal_di=vdas.prev_pedal_di,
                   a_ego=-1.0, freeze_integrator=False)
 
-    assert vdas.inner_pid.i <= PEDAL_RAMP_RATE_UP + 0.1
-    assert vdas.inner_pid.i >= -PEDAL_RAMP_RATE_DOWN - 0.1
+    assert vdas.inner_pid.i <= ACCEL_MAX + 1e-9
+    assert vdas.inner_pid.i >= REGEN_MAX - 1e-9
 
   def test_reset_clears_pid_state(self):
     """Reset should zero out the inner PID and filter state."""
@@ -587,15 +667,27 @@ class TestInnerPID:
     di = vdas.update(1.0, v_ego=15.0, prev_pedal_di=0.0)
     assert np.isfinite(di)
 
-  def test_prediction_clamps_one_frame_acceleration_spike(self):
+  def test_prediction_clamps_one_frame_acceleration_spike(self, monkeypatch):
     vdas = VirtualDAS(dt=0.02)
+    feedforward_inputs_mps2 = []
+    real_feedforward = vdas._feedforward
 
-    pedal_di = vdas.update(
+    def record_feedforward(acceleration_effort_mps2, v_ego):
+      feedforward_inputs_mps2.append(acceleration_effort_mps2)
+      return real_feedforward(acceleration_effort_mps2, v_ego)
+
+    monkeypatch.setattr(vdas, '_feedforward', record_feedforward)
+
+    vdas.update(
       0.0, v_ego=15.0, prev_pedal_di=0.0,
       a_ego=100.0, freeze_integrator=False,
     )
 
-    assert pedal_di > -0.1
+    future_time_s = float(np.interp(15.0, VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V))
+    expected_future_accel_mps2 = vdas.a_ego_filter.x + VDAS_EGO_JERK_MAX * future_time_s
+    expected_trim_mps2 = -expected_future_accel_mps2 * vdas.inner_pid.k_i * vdas.dt
+    assert vdas.inner_pid.i == pytest.approx(expected_trim_mps2)
+    assert feedforward_inputs_mps2 == pytest.approx([expected_trim_mps2])
 
 
 # --- Phase 3: FeedforwardModel ---
@@ -908,6 +1000,221 @@ class TestVDASDomainBoundaries:
   @pytest.fixture(autouse=True)
   def _fixtures(self, mock_nap_conf, mock_zero_torque):
     pass
+
+  def test_residual_feedback_enters_feedforward_in_acceleration_domain(self, monkeypatch):
+    desired_acceleration_mps2 = 0.4
+    feedforward_sentinel_di = 10.0
+    feedforward_inputs_mps2 = []
+    pedal_outputs_di = []
+    vdas = VirtualDAS(dt=0.02)
+    vdas.reset(
+      measured_accel=0.0,
+      commanded_accel=desired_acceleration_mps2,
+      pedal_di_init=feedforward_sentinel_di,
+    )
+
+    def record_feedforward(acceleration_effort_mps2, _v_ego):
+      feedforward_inputs_mps2.append(acceleration_effort_mps2)
+      return feedforward_sentinel_di
+
+    monkeypatch.setattr(vdas, '_feedforward', record_feedforward)
+
+    for _ in range(100):
+      pedal_outputs_di.append(vdas.update(
+        desired_acceleration_mps2,
+        v_ego=20.0,
+        prev_pedal_di=feedforward_sentinel_di,
+        a_ego=0.0,
+        freeze_integrator=False,
+      ))
+
+    assert len(feedforward_inputs_mps2) == 100
+    assert feedforward_inputs_mps2[-1] > desired_acceleration_mps2 + 0.05, (
+      "sustained acceleration error did not move the feedforward input: "
+      + f"got {feedforward_inputs_mps2[-1]:.3f} m/s^2"
+    )
+    assert pedal_outputs_di == [feedforward_sentinel_di] * 100
+
+  def test_pid_starts_with_acceleration_domain_limits(self):
+    vdas = VirtualDAS(dt=0.02)
+
+    assert vdas.inner_pid.pos_limit == ACCEL_MAX
+    assert vdas.inner_pid.neg_limit == REGEN_MAX
+
+  @pytest.mark.parametrize(("base_effort_mps2", "seeded_integral_mps2", "authority_rail_mps2"), [
+    (ACCEL_MAX, 0.5, ACCEL_MAX),
+    (REGEN_MAX, -0.5, REGEN_MAX),
+  ])
+  def test_retained_integral_is_clipped_to_remaining_acceleration_authority(
+      self, base_effort_mps2, seeded_integral_mps2, authority_rail_mps2):
+    vdas = VirtualDAS(dt=0.02)
+    initial_pedal_di = vdas._feedforward(base_effort_mps2, v_ego=15.0)
+    vdas.reset(
+      measured_accel=base_effort_mps2,
+      commanded_accel=base_effort_mps2,
+      pedal_di_init=initial_pedal_di,
+    )
+    vdas.inner_pid.i = seeded_integral_mps2
+
+    vdas.update(
+      base_effort_mps2,
+      v_ego=15.0,
+      prev_pedal_di=initial_pedal_di,
+      a_ego=base_effort_mps2,
+      freeze_integrator=True,
+    )
+
+    expected_retained_integral_mps2 = authority_rail_mps2 - base_effort_mps2
+    assert vdas.inner_pid.i == pytest.approx(expected_retained_integral_mps2)
+
+  def test_physical_pedal_rail_freezes_and_unwinds_acceleration_integral(self, tmp_path):
+    high_table = {
+      'speed_bp': [0.0, 40.0],
+      'accel_bp': [REGEN_MAX, 0.0, ACCEL_MAX],
+      'table': [
+        [PEDAL_DI_MIN, 0.0, max(PEDAL_MAX_VALUES)],
+        [PEDAL_DI_MIN, 0.0, max(PEDAL_MAX_VALUES)],
+      ],
+    }
+    table_path = tmp_path / "valid_high_table.json"
+    table_path.write_text(json.dumps(high_table))
+    vdas = VirtualDAS(dt=0.02)
+    vdas.ff_model = FeedforwardModel(table_path=str(table_path))
+
+    v_ego = 0.0
+    desired_acceleration_mps2 = 1.5
+    max_profile_pedal_di = float(np.interp(v_ego, PEDAL_BP, PEDAL_MAX_VALUES))
+    raw_table_request_di = vdas.ff_model.get(desired_acceleration_mps2, v_ego, zero_torque_di=0.0)
+    assert vdas.ff_model.table == high_table['table']
+    assert raw_table_request_di > max_profile_pedal_di
+
+    initial_integral_mps2 = 0.2
+    vdas.reset(
+      measured_accel=0.0,
+      commanded_accel=desired_acceleration_mps2,
+      pedal_di_init=max_profile_pedal_di,
+    )
+    vdas.inner_pid.i = initial_integral_mps2
+
+    pedal_outputs_di = []
+    for _ in range(20):
+      pedal_outputs_di.append(vdas.update(
+        desired_acceleration_mps2,
+        v_ego=v_ego,
+        prev_pedal_di=max_profile_pedal_di,
+        a_ego=0.0,
+        freeze_integrator=False,
+      ))
+
+    assert pedal_outputs_di == [max_profile_pedal_di] * 20
+    assert vdas.inner_pid.i == pytest.approx(initial_integral_mps2), (
+      f"integral grew against the physical pedal rail: {initial_integral_mps2:.3f} -> {vdas.inner_pid.i:.3f}"
+    )
+
+    reversed_measurement_mps2 = 2.0
+    vdas.a_ego_filter.x = reversed_measurement_mps2
+    vdas.prev_a_ego_filtered = reversed_measurement_mps2
+    vdas.update(
+      desired_acceleration_mps2,
+      v_ego=v_ego,
+      prev_pedal_di=max_profile_pedal_di,
+      a_ego=reversed_measurement_mps2,
+      freeze_integrator=False,
+    )
+
+    assert vdas.inner_pid.i < initial_integral_mps2
+
+  @pytest.mark.parametrize(("target_acceleration_mps2", "measured_acceleration_mps2"), [
+    (ACCEL_MAX, -1.0),
+    (REGEN_MAX, 1.0),
+  ])
+  def test_feedback_respects_remaining_acceleration_authority(
+      self, monkeypatch, target_acceleration_mps2, measured_acceleration_mps2):
+    feedforward_inputs_mps2 = []
+    vdas = VirtualDAS(dt=0.02)
+    real_feedforward = vdas._feedforward
+    initial_pedal_di = real_feedforward(target_acceleration_mps2, v_ego=15.0)
+    vdas.reset(
+      measured_accel=measured_acceleration_mps2,
+      commanded_accel=target_acceleration_mps2,
+      pedal_di_init=initial_pedal_di,
+    )
+
+    def record_feedforward(acceleration_effort_mps2, v_ego):
+      feedforward_inputs_mps2.append(acceleration_effort_mps2)
+      return real_feedforward(acceleration_effort_mps2, v_ego)
+
+    monkeypatch.setattr(vdas, '_feedforward', record_feedforward)
+
+    for _ in range(300):
+      vdas.update(
+        target_acceleration_mps2,
+        v_ego=15.0,
+        prev_pedal_di=vdas.prev_pedal_di,
+        a_ego=measured_acceleration_mps2,
+        freeze_integrator=False,
+      )
+
+    assert min(feedforward_inputs_mps2) >= REGEN_MAX
+    assert max(feedforward_inputs_mps2) <= ACCEL_MAX
+    if target_acceleration_mps2 == ACCEL_MAX:
+      assert vdas.inner_pid.i <= 1e-12, (
+        f"positive integral {vdas.inner_pid.i:.3f} exceeded zero remaining acceleration authority"
+      )
+    else:
+      assert vdas.inner_pid.i >= -1e-12, (
+        f"negative integral {vdas.inner_pid.i:.3f} exceeded zero remaining regen authority"
+      )
+
+  @pytest.mark.parametrize((
+    "target_acceleration_mps2",
+    "initial_integral_mps2",
+    "forced_feedforward_di",
+    "previous_pedal_di",
+    "expected_pedal_di",
+    "reversed_measurement_mps2",
+    "blocked_direction",
+  ), [
+    (0.5, 0.2, 60.0, 0.0, PEDAL_RAMP_RATE_UP, 1.5, 1.0),
+    (-0.5, -0.2, PEDAL_DI_MIN, 50.0, 50.0 - PEDAL_RAMP_RATE_DOWN, -1.5, -1.0),
+  ])
+  def test_final_di_slew_backstop_freezes_and_unwinds_acceleration_integral(
+      self, monkeypatch, target_acceleration_mps2, initial_integral_mps2,
+      forced_feedforward_di, previous_pedal_di, expected_pedal_di,
+      reversed_measurement_mps2, blocked_direction):
+    vdas = VirtualDAS(dt=0.02)
+    vdas.reset(
+      measured_accel=0.0,
+      commanded_accel=target_acceleration_mps2,
+      pedal_di_init=previous_pedal_di,
+    )
+    vdas.inner_pid.i = initial_integral_mps2
+    monkeypatch.setattr(vdas, '_feedforward', lambda _acceleration, _v_ego: forced_feedforward_di)
+
+    pedal_di = vdas.update(
+      target_acceleration_mps2,
+      v_ego=20.0,
+      prev_pedal_di=previous_pedal_di,
+      a_ego=0.0,
+      freeze_integrator=False,
+    )
+
+    assert pedal_di == pytest.approx(expected_pedal_di)
+    assert vdas.inner_pid.i == pytest.approx(initial_integral_mps2), (
+      f"integral grew into a blocked DI request: {initial_integral_mps2:.3f} -> {vdas.inner_pid.i:.3f}"
+    )
+
+    vdas.a_ego_filter.x = reversed_measurement_mps2
+    vdas.prev_a_ego_filtered = reversed_measurement_mps2
+    vdas.update(
+      target_acceleration_mps2,
+      v_ego=20.0,
+      prev_pedal_di=previous_pedal_di,
+      a_ego=reversed_measurement_mps2,
+      freeze_integrator=False,
+    )
+
+    assert (vdas.inner_pid.i - initial_integral_mps2) * blocked_direction < 0.0
 
   def test_transient_grade_compensation_enters_feedforward_in_acceleration_domain(self):
     class FixedGradeEstimator:

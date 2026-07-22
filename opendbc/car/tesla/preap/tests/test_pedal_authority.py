@@ -760,15 +760,18 @@ def test_max_regen_does_not_prompt_when_requested_decel_is_delivered(controller_
   controller, cc, cs, tesla_can = controller_env
   _activate_longitudinal(cc, cs)
   cc.actuators.accel = -1.5
-  cs.out.aEgo = -1.5
 
   max_regen_prompted = False
   for frame in range(0, 400, 2):
+    # Model delivered deceleration as a one-update response to the controller's
+    # previous jerk-limited command, beginning from the vehicle's current zero.
+    cs.out.aEgo = controller.vdas.jerk_limiter.a_limited
     # CarController clears edge events before each PreAP controller update.
     cs.pccEvent = None
     controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
     max_regen_prompted |= cs.pccEvent == "pedalMaxRegen"
 
+  assert controller.vdas.jerk_limiter.a_limited == pytest.approx(cc.actuators.accel)
   assert controller.prev_pedal_di < -4.75
   assert not max_regen_prompted
 

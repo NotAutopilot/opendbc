@@ -20,20 +20,16 @@ ACCEL_PREAP_PROFILES = {
 # Open road uses the full profile above; this only limits follow mode.
 ACCEL_PREAP_FOLLOW = [0.3, 0.6, 0.9, 0.8, 0.7, 0.5, 0.45]
 
-# Feedforward-dominant longitudinal tune (FrogPilot/OPGM Bolt-inspired).
-# kp=0: no proportional term — eliminates aEgo sensor noise amplification.
-# kf=1.0: full a_target passthrough — the MPC plan (jerk-constrained, smooth)
-#   is the dominant control signal.
-# ki low: slow integral trim handles steady-state offset (hills, wind, regen).
-#   Lower than FP Bolt (0.125-0.33) because our kf=1.0 vs their kf=0.25.
+# Generic LongControl passes the planner acceleration target through with
+# kf=1.0 and no feedback. VirtualDAS owns acceleration feedback and converts
+# the target into pedal DI.
 PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
 PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
-PEDAL_LONG_KI_V = [0.05, 0.08, 0.10, 0.15]
+PEDAL_LONG_KI_V = [0.0, 0.0, 0.0, 0.0]
 
-# Virtual DAS inner PID — sits inside carcontroller, corrects the
-# feedforward output by tracking (a_cmd - a_ego_future). Conservative
-# initial tune: no kp (same philosophy as outer loop), ki faster than
-# outer so inner loop settles before outer reacts.
+# Virtual DAS inner PID corrects residual acceleration tracking error before
+# the acceleration-to-DI feedforward map. Error input and output trim are both
+# m/s²: KP is dimensionless and KI is 1/s.
 VDAS_INNER_K_BP = [0.0, 5.0, 35.0]
 VDAS_INNER_KP_V = [0.0, 0.0, 0.0]
 VDAS_INNER_KI_V = [0.3, 0.2, 0.15]

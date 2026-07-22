@@ -9,12 +9,13 @@ leaves the panda in elm327 safe mode and surfaces as 'Unknown Vehicle Variant'
 (canError) in the UI.
 """
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, PropertyMock
 
 from opendbc.can import CANPacker
 from opendbc.car import CanData
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.tesla.preap.nap_conf import nap_conf
 
 
 class TestPreAPCarStateUpdate(unittest.TestCase):
@@ -93,10 +94,11 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CI.CS.engagement.enableLongControl = True
     CI.CS.pedal_authority_active = False
 
-    self.assertFalse(CI.update([]).pedalLongActive)
+    with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True):
+      self.assertFalse(CI.update([]).pedalLongActive)
 
-    CI.CS.pedal_authority_active = True
-    self.assertTrue(CI.update([]).pedalLongActive)
+      CI.CS.pedal_authority_active = True
+      self.assertTrue(CI.update([]).pedalLongActive)
 
   def test_hands_on_level_two_disengages(self):
     for hands_on_level, should_disengage in ((1, False), (2, True), (3, True)):

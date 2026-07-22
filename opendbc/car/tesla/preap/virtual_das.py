@@ -375,7 +375,8 @@ class VirtualDAS:
   """Cascaded longitudinal controller for Pre-AP Tesla pedal control.
 
   Jerk limiter smooths the input, feedforward maps accel→DI, inner PID
-  corrects residual error using predicted future acceleration.
+  corrects residual error in acceleration space using predicted future
+  acceleration.
   """
 
   def __init__(self, dt: float = 0.02):
@@ -389,8 +390,8 @@ class VirtualDAS:
       k_p=(VDAS_INNER_K_BP, VDAS_INNER_KP_V),
       k_i=(VDAS_INNER_K_BP, VDAS_INNER_KI_V),
       k_f=0.0,
-      pos_limit=PEDAL_RAMP_RATE_UP,
-      neg_limit=-PEDAL_RAMP_RATE_DOWN,
+      pos_limit=ACCEL_MAX,
+      neg_limit=REGEN_MAX,
       rate=1.0 / dt,
     )
     self.a_ego_filter = FirstOrderFilter(0.0, VDAS_AEGO_FILTER_RC, dt)
@@ -418,8 +419,11 @@ class VirtualDAS:
     grade_accel, pitch_compensation = self.grade_estimator.update(
       orientation_ned if orientation_ned is not None else [])
 
-    ff_accel = a_limited + pitch_compensation
-    ff_di = self._feedforward(ff_accel, v_ego)
+    base_accel_effort = float(clip(
+      a_limited + pitch_compensation,
+      REGEN_MAX,
+      ACCEL_MAX,
+    ))
 
     # Subtract grade from a_ego so the PID doesn't fight gravity
     a_ego_corrected = a_ego - grade_accel
@@ -439,16 +443,41 @@ class VirtualDAS:
     if abs(error) < PID_ERROR_DEADBAND:
       error = 0.0
 
-    pid_correction = float(self.inner_pid.update(
+    # Keep residual control in acceleration space. The PID can use only the
+    # authority left after the desired acceleration and transient grade term.
+    self.inner_pid.neg_limit = REGEN_MAX - base_accel_effort
+    self.inner_pid.pos_limit = ACCEL_MAX - base_accel_effort
+    self.inner_pid.i = float(clip(
+      self.inner_pid.i,
+      self.inner_pid.neg_limit,
+      self.inner_pid.pos_limit,
+    ))
+    integral_before_update = self.inner_pid.i
+    accel_trim = float(self.inner_pid.update(
       error, speed=v_ego, freeze_integrator=freeze_integrator))
+    accel_effort = float(clip(
+      base_accel_effort + accel_trim,
+      REGEN_MAX,
+      ACCEL_MAX,
+    ))
 
-    pedal_di = ff_di + pid_correction
+    pedal_di_unclipped = self._feedforward(accel_effort, v_ego)
 
     pedal_profile = nap_conf.get_pedal_profile_values()
     max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
-    pedal_di = float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
+    pedal_di_bounded = float(clip(pedal_di_unclipped, PEDAL_DI_MIN, max_pedal_value))
 
-    pedal_di = self._rate_limit(pedal_di, prev_pedal_di)
+    pedal_di = self._rate_limit(pedal_di_bounded, prev_pedal_di)
+    physical_bound_blocks_error = (
+      (pedal_di_bounded < pedal_di_unclipped and error > 0.0)
+      or (pedal_di_bounded > pedal_di_unclipped and error < 0.0)
+    )
+    slew_bound_blocks_error = (
+      (pedal_di < pedal_di_bounded and error > 0.0)
+      or (pedal_di > pedal_di_bounded and error < 0.0)
+    )
+    if physical_bound_blocks_error or slew_bound_blocks_error:
+      self.inner_pid.i = integral_before_update
 
     self.prev_pedal_di = pedal_di
     return pedal_di
@@ -482,14 +511,9 @@ class VirtualDAS:
     self.prev_pedal_di = pedal_di_init
 
   def _feedforward(self, a_cmd: float, v_ego: float) -> float:
-    """Map acceleration to pedal DI via 2D lookup table."""
+    """Map acceleration to raw pedal DI via the finite 2D lookup table."""
     zero_torque_di = get_zero_torque().get(v_ego)
-    pedal_profile = nap_conf.get_pedal_profile_values()
-    max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
-
-    pedal_di = self.ff_model.get(a_cmd, v_ego, zero_torque_di)
-
-    return float(clip(pedal_di, PEDAL_DI_MIN, max_pedal_value))
+    return self.ff_model.get(a_cmd, v_ego, zero_torque_di)
 
   def _rate_limit(self, pedal_di: float, prev_pedal_di: float) -> float:
     """Safety backstop: asymmetric DI rate limit."""

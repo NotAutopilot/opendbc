@@ -46,7 +46,8 @@ jobs:
           opendbc/car/tesla/preap/tests/test_pedal_authority.py \
           opendbc/car/tesla/preap/tests/test_virtual_das.py \
           opendbc/car/tesla/preap/tests/test_accel_limits.py \
-          opendbc/car/tesla/preap/tests/test_engage_grace.py
+          opendbc/car/tesla/preap/tests/test_engage_grace.py \
+          opendbc/car/tesla/preap/tests/test_longitudinal_tuning.py
     - name: Run historical mutation checks
       run: |
         source .venv/bin/activate

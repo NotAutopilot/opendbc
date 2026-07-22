@@ -19,6 +19,10 @@ def indented_block(document: str, header: str) -> str:
   return "\n".join(block)
 
 
+def normalized_lines(block: str) -> set[str]:
+  return {line.strip().removesuffix("\\").rstrip() for line in block.splitlines()}
+
+
 class TestWorkflowContract(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
@@ -33,12 +37,30 @@ class TestWorkflowContract(unittest.TestCase):
   def test_focused_longitudinal_job_is_present(self):
     focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
 
-    self.assertIn("name: Tesla Pre-AP longitudinal regressions", focused_job)
+    self.assertIn("name: Tesla Pre-AP longitudinal regressions", normalized_lines(focused_job))
 
   def test_historical_mutations_run_in_focused_job(self):
     focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
 
-    self.assertIn("python .github/ci/tesla_preap_longitudinal_mutations.py", focused_job)
+    self.assertIn(
+      "python .github/ci/tesla_preap_longitudinal_mutations.py",
+      normalized_lines(focused_job),
+    )
+
+  def test_focused_longitudinal_tests_are_pinned(self):
+    focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
+
+    required_test_paths = (
+      "opendbc/car/tesla/preap/tests/test_longitudinal_tuning.py",
+      "opendbc/car/tesla/preap/tests/test_virtual_das.py",
+    )
+    for test_path in required_test_paths:
+      self.assertIn(test_path, normalized_lines(focused_job))
+
+  def test_focused_longitudinal_job_cannot_be_skipped_or_soft_failed(self):
+    focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
+
+    self.assertIsNone(re.search(r"^\s*(?:if|continue-on-error)\s*:", focused_job, re.MULTILINE))
 
 
 if __name__ == "__main__":

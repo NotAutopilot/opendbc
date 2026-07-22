@@ -1,0 +1,6 @@
+# Tesla Pre-AP longitudinal gate and its protected implementation surface
+/.github/CODEOWNERS @daggerhashjack @SloPOS
+/.github/workflows/tests.yml @daggerhashjack @SloPOS
+/.github/ci/tesla_preap_longitudinal_mutations.py @daggerhashjack @SloPOS
+/.github/ci/test_tests_workflow.py @daggerhashjack @SloPOS
+/opendbc/car/tesla/preap/ @daggerhashjack @SloPOS
