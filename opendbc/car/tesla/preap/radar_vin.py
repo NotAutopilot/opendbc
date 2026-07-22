@@ -66,6 +66,92 @@ class RadarVinLearnerOutput:
   cleanup_confirmed: bool = False
 
 
+class RadarIsoTpResponseState(Enum):
+  INCOMPLETE = auto()
+  COMPLETE = auto()
+  MALFORMED = auto()
+
+
+@dataclass(frozen=True)
+class RadarIsoTpResponse:
+  state: RadarIsoTpResponseState
+  payload: bytes | None = None
+  can_sends: tuple[CanData, ...] = ()
+  prefix_mismatch: bool = False
+  multiframe: bool = False
+
+
+class RadarIsoTpResponseAssembler:
+  def __init__(self, max_payload_length: int = 0xFFF):
+    if not 8 <= max_payload_length <= 0xFFF:
+      raise ValueError("ISO-TP response limit must be between 8 and 4095 bytes")
+    self.max_payload_length = max_payload_length
+    self._payload = bytearray()
+    self._length: int | None = None
+    self._sequence = 1
+
+  def consume(self, data: bytes, expected_prefixes: tuple[bytes, ...]) -> RadarIsoTpResponse:
+    if len(data) != 8:
+      return self._malformed()
+
+    frame_type = data[0] >> 4
+    if frame_type == 0:
+      length = data[0] & 0x0F
+      if self._length is not None or not 1 <= length <= 7:
+        return self._malformed()
+      payload = data[1:1 + length]
+      if not self._prefix_matches(payload, expected_prefixes):
+        return self._malformed(payload=payload, prefix_mismatch=True)
+      return RadarIsoTpResponse(RadarIsoTpResponseState.COMPLETE, payload)
+
+    if frame_type == 1:
+      length = ((data[0] & 0x0F) << 8) | data[1]
+      if self._length is not None or not 7 < length <= self.max_payload_length:
+        return self._malformed(multiframe=True)
+      payload_prefix = data[2:]
+      if not self._prefix_matches(payload_prefix, expected_prefixes):
+        return self._malformed(payload=payload_prefix, prefix_mismatch=True, multiframe=True)
+      self._payload = bytearray(payload_prefix)
+      self._length = length
+      self._sequence = 1
+      flow_control = CanData(RADAR_TX_ADDRESS, FLOW_CONTROL, RADAR_BUS)
+      return RadarIsoTpResponse(RadarIsoTpResponseState.INCOMPLETE, can_sends=(flow_control,), multiframe=True)
+
+    if frame_type == 2:
+      sequence = data[0] & 0x0F
+      if self._length is None or sequence != self._sequence:
+        return self._malformed(multiframe=True)
+      self._sequence = (self._sequence + 1) & 0x0F
+      remaining = self._length - len(self._payload)
+      self._payload.extend(data[1:1 + remaining])
+      if len(self._payload) < self._length:
+        return RadarIsoTpResponse(RadarIsoTpResponseState.INCOMPLETE, multiframe=True)
+      payload = bytes(self._payload)
+      self.reset()
+      return RadarIsoTpResponse(RadarIsoTpResponseState.COMPLETE, payload, multiframe=True)
+
+    return self._malformed(multiframe=self._length is not None)
+
+  def reset(self) -> None:
+    self._payload.clear()
+    self._length = None
+    self._sequence = 1
+
+  @staticmethod
+  def _prefix_matches(payload: bytes, expected_prefixes: tuple[bytes, ...]) -> bool:
+    return not expected_prefixes or any(payload.startswith(prefix) for prefix in expected_prefixes)
+
+  def _malformed(
+    self,
+    *,
+    payload: bytes | None = None,
+    prefix_mismatch: bool = False,
+    multiframe: bool = False,
+  ) -> RadarIsoTpResponse:
+    self.reset()
+    return RadarIsoTpResponse(RadarIsoTpResponseState.MALFORMED, payload, prefix_mismatch=prefix_mismatch, multiframe=multiframe)
+
+
 @dataclass
 class _ActiveRequest:
   payload: bytes
@@ -162,9 +248,7 @@ class RadarVinLearner:
     self._ecu_responsive = False
     self._cleanup_confirmed = False
     self._pending_result: RadarVinLearnerResult | None = None
-    self._rx_payload = bytearray()
-    self._rx_length: int | None = None
-    self._rx_sequence = 1
+    self._response_assembler = RadarIsoTpResponseAssembler()
 
   def start(self, target_vin: str, now: float) -> None:
     try:
@@ -216,14 +300,19 @@ class RadarVinLearner:
         for packet in can_packets:
           if packet.address != RADAR_RX_ADDRESS or packet.src != RADAR_BUS:
             continue
-          payload, flow_control, malformed = self._consume_isotp(packet.dat)
-          if flow_control:
-            can_sends.append(self._make_send(FLOW_CONTROL))
-          if malformed:
-            self._fail(RadarVinFailure.MALFORMED_RESPONSE)
+          single_frame = len(packet.dat) == 8 and packet.dat[0] >> 4 == 0
+          expected_prefixes = (self._active_request.positive_prefix,)
+          if single_frame:
+            expected_prefixes += (b"\x7f",)
+          response = self._response_assembler.consume(packet.dat, expected_prefixes)
+          can_sends.extend(response.can_sends)
+          if response.state == RadarIsoTpResponseState.MALFORMED:
+            failure = RadarVinFailure.UNEXPECTED_RESPONSE if response.prefix_mismatch and not response.multiframe else RadarVinFailure.MALFORMED_RESPONSE
+            self._fail(failure)
             return self._output(can_sends)
-          if payload is not None:
-            self._handle_payload(payload, now)
+          if response.state == RadarIsoTpResponseState.COMPLETE:
+            assert response.payload is not None
+            self._handle_payload(response.payload, now)
             return self._output(can_sends)
 
         return self._output(can_sends)
@@ -284,52 +373,6 @@ class RadarVinLearner:
 
   def _make_send(self, data: bytes) -> CanData:
     return CanData(RADAR_TX_ADDRESS, data.ljust(8, b"\x00"), RADAR_BUS)
-
-  def _consume_isotp(self, data: bytes) -> tuple[bytes | None, bool, bool]:
-    if len(data) != 8:
-      return None, False, True
-
-    frame_type = data[0] >> 4
-    if frame_type == 0:
-      length = data[0] & 0x0F
-      if length > 7:
-        return None, False, True
-      return data[1:1 + length], False, False
-
-    if frame_type == 1:
-      total_length = ((data[0] & 0x0F) << 8) | data[1]
-      if total_length <= 7:
-        return None, False, True
-      self._rx_payload = bytearray(data[2:])
-      self._rx_length = total_length
-      self._rx_sequence = 1
-      if len(self._rx_payload) >= total_length:
-        self._reset_rx()
-        return None, False, True
-      if self._active_request is None or not self._rx_prefix_is_valid(bytes(self._rx_payload)):
-        self._reset_rx()
-        return None, False, True
-      return None, True, False
-
-    if frame_type == 2:
-      if self._rx_length is None or (data[0] & 0x0F) != self._rx_sequence:
-        self._reset_rx()
-        return None, False, True
-      self._rx_sequence = (self._rx_sequence + 1) & 0x0F
-      remaining_length = self._rx_length - len(self._rx_payload)
-      self._rx_payload.extend(data[1:1 + remaining_length])
-      if len(self._rx_payload) < self._rx_length:
-        return None, False, False
-      payload = bytes(self._rx_payload)
-      self._reset_rx()
-      return payload, False, False
-
-    return None, False, True
-
-  def _rx_prefix_is_valid(self, payload: bytes) -> bool:
-    assert self._active_request is not None
-    prefix = self._active_request.positive_prefix
-    return len(payload) >= len(prefix) and payload.startswith(prefix)
 
   def _handle_payload(self, payload: bytes, now: float) -> None:
     assert self._active_request is not None
@@ -461,9 +504,7 @@ class RadarVinLearner:
     self._reset_rx()
 
   def _reset_rx(self) -> None:
-    self._rx_payload.clear()
-    self._rx_length = None
-    self._rx_sequence = 1
+    self._response_assembler.reset()
 
   def _output(self, can_sends: list[CanData]) -> RadarVinLearnerOutput:
     result = self.result if self.state in (RadarVinLearnerState.COMPLETE, RadarVinLearnerState.FAILED) else None

@@ -141,6 +141,65 @@ def test_tesla_preap_safety_flags_are_stable():
   assert TeslaPreAPSafetyFlags.RADAR_VIN_LEARN == 8
 
 
+def test_radar_isotp_response_assembler_accepts_single_frame_padding():
+  radar_vin = _module()
+  assembler = radar_vin.RadarIsoTpResponseAssembler()
+
+  response = assembler.consume(b"\x02\x50\x01\xaa\xbb\xcc\xdd\xee", (b"\x50\x01",))
+
+  assert response.state == radar_vin.RadarIsoTpResponseState.COMPLETE
+  assert response.payload == b"\x50\x01"
+  assert response.can_sends == ()
+
+
+def test_radar_isotp_response_assembler_emits_flow_control_and_completes_multiframe():
+  radar_vin = _module()
+  assembler = radar_vin.RadarIsoTpResponseAssembler()
+  payload = b"\x50\x01\x00\x32\x01\xf4\x12\x34\x56"
+
+  first = assembler.consume(b"\x10\x09" + payload[:6], (b"\x50\x01",))
+  final = assembler.consume(b"\x21" + payload[6:] + b"\xaa\xbb\xcc\xdd", (b"\x50\x01",))
+
+  assert first.state == radar_vin.RadarIsoTpResponseState.INCOMPLETE
+  assert first.payload is None
+  assert first.can_sends == (_can(RADAR_TX_ADDRESS, b"\x30\x00\x00\x00\x00\x00\x00\x00"),)
+  assert final.state == radar_vin.RadarIsoTpResponseState.COMPLETE
+  assert final.payload == payload
+  assert final.can_sends == ()
+
+
+@pytest.mark.parametrize(
+  "frames",
+  (
+    (b"\x02\x50\x01\x00\x00\x00\x00",),
+    (b"\x10\x07\x50\x01\x00\x00\x00\x00",),
+    (b"\x10\x09\x50\x01\x00\x32\x01\xf4", b"\x22\x12\x34\x56\x00\x00\x00\x00"),
+  ),
+)
+def test_radar_isotp_response_assembler_rejects_bad_frame_length_and_sequence(frames):
+  radar_vin = _module()
+  assembler = radar_vin.RadarIsoTpResponseAssembler()
+
+  response = None
+  for frame in frames:
+    response = assembler.consume(frame, (b"\x50\x01",))
+
+  assert response is not None
+  assert response.state == radar_vin.RadarIsoTpResponseState.MALFORMED
+  assert not response.prefix_mismatch
+
+
+def test_radar_isotp_response_assembler_rejects_bad_prefix_before_flow_control():
+  radar_vin = _module()
+  assembler = radar_vin.RadarIsoTpResponseAssembler()
+
+  response = assembler.consume(b"\x10\x09\x51\x01\x00\x32\x01\xf4", (b"\x50\x01",))
+
+  assert response.state == radar_vin.RadarIsoTpResponseState.MALFORMED
+  assert response.prefix_mismatch
+  assert response.can_sends == ()
+
+
 def test_radar_vin_assembler_reconstructs_out_of_order_fragments():
   radar_vin = _module()
   assembler = radar_vin.RadarVinAssembler()
