@@ -4,6 +4,14 @@ from pathlib import Path
 
 
 WORKFLOW_PATH = Path(__file__).resolve().parents[1] / "workflows" / "tests.yml"
+NAP_JOB_CONDITION = "".join((
+  "if: ${{ startsWith(github.ref_name, 'nap-') || startsWith(github.base_ref, 'nap-') || ",
+  "startsWith(github.ref_name, 'naponsp-') || startsWith(github.base_ref, 'naponsp-') }}",
+))
+UPSTREAM_JOB_CONDITION = "".join((
+  "if: ${{ !startsWith(github.ref_name, 'nap-') && !startsWith(github.base_ref, 'nap-') && ",
+  "!startsWith(github.ref_name, 'naponsp-') && !startsWith(github.base_ref, 'naponsp-') }}",
+))
 
 
 def indented_block(document: str, header: str) -> str:
@@ -33,6 +41,45 @@ class TestWorkflowContract(unittest.TestCase):
     push_branches = indented_block(push_config, "    branches:")
 
     self.assertRegex(push_branches, re.compile(r"^\s*-\s+['\"]?nap-\*['\"]?\s*$", re.MULTILINE))
+    self.assertRegex(push_branches, re.compile(r"^\s*-\s+['\"]?naponsp-\*['\"]?\s*$", re.MULTILINE))
+
+  def test_nap_gate_routes_pushes_and_pull_requests(self):
+    nap_job = indented_block(self.workflow, "  nap_tests:")
+    nap_lines = normalized_lines(nap_job)
+
+    self.assertIn("name: NAP build and safety", nap_lines)
+    self.assertIn(NAP_JOB_CONDITION, nap_lines)
+
+  def test_upstream_jobs_are_isolated_from_nap_branches(self):
+    for job_header in ("  tests:", "  safety_tests:", "  mutation:", "  test_models:"):
+      with self.subTest(job=job_header):
+        job = indented_block(self.workflow, job_header)
+        self.assertEqual(re.findall(r"^    if: .+$", job, re.MULTILINE), [f"    {UPSTREAM_JOB_CONDITION}"])
+
+  def test_nap_gate_pins_build_lint_and_safety_suites(self):
+    nap_job = indented_block(self.workflow, "  nap_tests:")
+    required_steps = (
+      ("    - name: Build NAP opendbc", ("scons -j$(nproc)",)),
+      ("    - name: Lint NAP implementation and gates", ("ruff check",)),
+      ("    - name: Run NAP car and safety suites", (
+        "opendbc/car/tesla/preap/tests/",
+        "opendbc/safety/tests/test_tesla_preap.py",
+        "opendbc/safety/tests/test_mg.py",
+      )),
+    )
+
+    for step_header, required_commands in required_steps:
+      with self.subTest(step=step_header):
+        step = indented_block(nap_job, step_header)
+        self.assertNotRegex(step, r"^\s+(?:if|continue-on-error):", msg=f"{step_header} must be unconditional")
+        for command in required_commands:
+          self.assertIn(command, step)
+
+  def test_nap_gate_cannot_be_skipped_or_soft_failed(self):
+    nap_job = indented_block(self.workflow, "  nap_tests:")
+
+    self.assertEqual(re.findall(r"^    if: .+$", nap_job, re.MULTILINE), [f"    {NAP_JOB_CONDITION}"])
+    self.assertIsNone(re.search(r"^\s+continue-on-error:", nap_job, re.MULTILINE))
 
   def test_focused_longitudinal_job_is_present(self):
     focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
@@ -65,6 +112,33 @@ class TestWorkflowContract(unittest.TestCase):
     focused_job = indented_block(self.workflow, "  tesla_preap_longitudinal_regression:")
 
     self.assertIsNone(re.search(r"^\s*(?:if|continue-on-error)\s*:", focused_job, re.MULTILINE))
+
+  def test_model_job_uses_supported_openpilot_setup(self):
+    model_job = indented_block(self.workflow, "  test_models:")
+    model_lines = normalized_lines(model_job)
+
+    self.assertIn("- run: ./tools/op.sh setup", model_lines)
+    self.assertNotIn("uses: ./.github/workflows/setup-with-retry", model_lines)
+    self.assertNotIn("setup-step.outputs.duration", model_job)
+    self.assertLess(model_job.index("repository: 'commaai/openpilot'"), model_job.index("- run: ./tools/op.sh setup"))
+    self.assertLess(model_job.index("- run: ./tools/op.sh setup"), model_job.index("- run: rm -rf opendbc_repo/"))
+
+  def test_model_job_uses_current_openpilot_layout(self):
+    model_job = indented_block(self.workflow, "  test_models:")
+    model_lines = normalized_lines(model_job)
+    model_test_command = " ".join((
+      "run: MAX_EXAMPLES=1 pytest --continue-on-collection-errors --durations=0 --durations-min=5 -n logical",
+      "openpilot/selfdrive/car/tests/test_models.py",
+    ))
+
+    self.assertIn("CI: 1", model_lines)
+    self.assertIn(
+      "run: scons -j$(nproc) openpilot/common/ openpilot/cereal/ openpilot/selfdrive/pandad/ msgq_repo/ opendbc_repo",
+      model_lines,
+    )
+    self.assertIn(model_test_command, model_lines)
+    for obsolete_variable in ("BASE_IMAGE:", "BUILD:", "RUN:", "PYTEST:"):
+      self.assertNotIn(obsolete_variable, model_job)
 
 
 if __name__ == "__main__":

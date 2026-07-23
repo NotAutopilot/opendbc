@@ -1,6 +1,6 @@
 import numpy as np
 
-from opendbc.car import get_safety_config, structs, STD_CARGO_KG
+from opendbc.car import get_safety_config, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.tesla.preap.nap_conf import nap_conf
 

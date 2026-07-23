@@ -37,7 +37,6 @@ from opendbc.car.tesla.preap.constants import (
 from opendbc.car.tesla.pedal.controller import (
   compute_pedal_command, PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
 )
-from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN as TC_PEDAL_DI_MIN
 
 
@@ -49,11 +48,10 @@ class TestFeedforwardDominantGains(unittest.TestCase):
     for kp in PEDAL_LONG_KP_V:
       self.assertAlmostEqual(kp, 0.0)
 
-  def test_ki_values(self):
-    """ki should be low (0.05-0.15) for slow integral trim with kf=1.0."""
-    expected = [0.05, 0.08, 0.10, 0.15]
-    for got, exp in zip(PEDAL_LONG_KI_V, expected):
-      self.assertAlmostEqual(got, exp)
+  def test_outer_integral_is_disabled(self):
+    """VDAS owns acceleration feedback; the framework loop must not integrate it again."""
+    self.assertEqual(len(PEDAL_LONG_KI_V), len(PEDAL_LONG_KP_V))
+    self.assertTrue(all(ki == 0.0 for ki in PEDAL_LONG_KI_V))
 
   def test_ki_monotonically_increasing(self):
     """ki should increase with speed (more correction at highway)."""
