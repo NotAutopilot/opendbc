@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -846,3 +848,69 @@ def test_regen_prompt_clears_as_soon_as_pedal_control_releases():
   assert monitor.active
 
   assert not _update_regen_monitor(monitor, pedal_control_active=False)
+
+
+def test_regen_prompt_survives_brief_shortfall_dropouts():
+  # Acceleration-estimate noise dips the shortfall below the trigger for a
+  # single update every so often. Accumulated evidence must survive those
+  # dropouts instead of restarting from zero.
+  monitor = RegenDecelMonitor()
+  fired = False
+  for _ in range(3 * REGEN_DECEL_PROMPT_DWELL_UPDATES):
+    for _ in range(9):
+      fired = _update_regen_monitor(monitor) or fired
+    # shortfall 0.3 m/s²: below the trigger, above the clear threshold
+    fired = _update_regen_monitor(monitor, actual_accel=-1.2) or fired
+    if fired:
+      break
+  assert fired
+
+
+def test_regen_prompt_requires_deep_regen_command():
+  # A command still in the shallow-regen range has authority left; the
+  # driver does not need the brake yet.
+  monitor = RegenDecelMonitor()
+  for _ in range(3 * REGEN_DECEL_PROMPT_DWELL_UPDATES):
+    assert not _update_regen_monitor(monitor, pedal_di=-1.5)
+
+
+def _replay_fixture(name):
+  with open(Path(__file__).parent / 'data' / name) as f:
+    return json.load(f)['samples']
+
+
+def _replay_monitor(samples):
+  # Drive the monitor the way PreAPLongController wires it: driver pedal
+  # input or authority loss resets, everything else goes through update().
+  monitor = RegenDecelMonitor()
+  first_active = None
+  for i, (v_ego, a_ego, limited_accel, pedal_di, brake, gas, long_active) in enumerate(samples):
+    if not long_active or brake or gas:
+      monitor.reset()
+      continue
+    active = monitor.update(
+      pedal_control_active=True,
+      in_engage_grace=False,
+      pedal_di=pedal_di,
+      limited_accel=limited_accel,
+      actual_accel=a_ego,
+      v_ego=v_ego,
+    )
+    if active and first_active is None:
+      first_active = i
+  return first_active
+
+
+def test_regen_prompt_fires_on_captured_weak_regen_drive():
+  # 2026-07-22 field capture, minutes after supercharging: regen delivered
+  # only -0.3 m/s² of a ~-1.0 m/s² request for several seconds while the
+  # command walked down to the regen rail and the driver never braked.
+  samples = _replay_fixture('regen_underdelivery_50hz.json')
+  assert _replay_monitor(samples) is not None
+
+
+def test_regen_prompt_stays_silent_on_captured_grade_decel():
+  # Same drive, mountain uphill: deceleration requests are delivered through
+  # grade compensation with the pedal still in the propulsion range.
+  samples = _replay_fixture('grade_decel_positive_di_50hz.json')
+  assert _replay_monitor(samples) is None

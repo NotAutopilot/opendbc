@@ -4,7 +4,7 @@ import numpy as np
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus
-from opendbc.car.tesla.preap.nap_conf import nap_conf, PEDAL_DI_MIN
+from opendbc.car.tesla.preap.nap_conf import nap_conf
 from opendbc.car.tesla.preap.interface import get_preap_accel_limits
 from opendbc.car.tesla.pedal.controller import get_zero_torque, PEDAL_RAMP_RATE_UP
 from opendbc.car.tesla.preap.virtual_das import VirtualDAS
@@ -26,29 +26,39 @@ def init_preap_can(dbc_names, packers):
 ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
 
-# The pedal controller updates at 50 Hz. Only prompt after the regen rail has
-# been near its physical limit while measured deceleration trails the shaped
-# request for a sustained interval. Trigger and clear thresholds are separated
-# so ordinary acceleration-estimate noise cannot chatter a driver prompt.
-REGEN_DECEL_PROMPT_DWELL_UPDATES = 25  # 0.5s at 50Hz
+# The pedal controller updates at 50 Hz. Prompt when a sustained deceleration
+# request is not being delivered while the command sits deep in the regen
+# range. Available regen varies with SOC and battery temperature, so proximity
+# to the DI rail is not a reliable "at the limit" signal: on a full battery the
+# rail delivers a fraction of nominal regen, and the integrator only reaches it
+# near the end of an under-delivery event. Field capture (2026-07-22, minutes
+# after supercharging) showed the command within 0.5 DI of the rail for just
+# 0.3 s of a multi-second under-delivery, so a rail gate plus a consecutive
+# dwell can never complete. Evidence instead accumulates in a saturating
+# up/down counter, which also rides through single-update shortfall noise.
+# Trigger and clear thresholds are separated so the visible prompt cannot
+# chatter.
+REGEN_DECEL_PROMPT_DWELL_UPDATES = 40  # 0.8s of net evidence at 50Hz
 REGEN_DECEL_PROMPT_MIN_SPEED = 2.0  # m/s; do not prompt for a stopped/settling car
 REGEN_DECEL_PROMPT_CLEAR_SPEED = 1.0  # m/s
-REGEN_DECEL_SHORTFALL_TRIGGER = 0.4  # m/s²
-REGEN_DECEL_SHORTFALL_CLEAR = 0.2  # m/s²
-REGEN_LIMIT_TRIGGER_DI = PEDAL_DI_MIN + 0.5
-REGEN_LIMIT_CLEAR_DI = PEDAL_DI_MIN + 1.0
+REGEN_DECEL_SHORTFALL_TRIGGER = 0.35  # m/s²
+REGEN_DECEL_SHORTFALL_CLEAR = 0.15  # m/s²
+REGEN_COMMAND_TRIGGER_DI = -2.0  # command deep in the regen range
+REGEN_COMMAND_CLEAR_DI = -1.0
+REGEN_DECEL_REQUEST_TRIGGER = -0.5  # m/s²; a meaningful deceleration request
+REGEN_DECEL_REQUEST_CLEAR = -0.2  # m/s²
 
 
 class RegenDecelMonitor:
-  """Detect when the regen rail cannot deliver the requested deceleration."""
+  """Detect when the regen path cannot deliver the requested deceleration."""
 
   def __init__(self):
     self.active = False
-    self.under_delivery_updates = 0
+    self.evidence_updates = 0
 
   def reset(self):
     self.active = False
-    self.under_delivery_updates = 0
+    self.evidence_updates = 0
 
   def update(self, *, pedal_control_active, in_engage_grace, pedal_di,
              limited_accel, actual_accel, v_ego):
@@ -65,7 +75,8 @@ class RegenDecelMonitor:
       keep_prompting = (
         monitoring_allowed
         and v_ego > REGEN_DECEL_PROMPT_CLEAR_SPEED
-        and pedal_di <= REGEN_LIMIT_CLEAR_DI
+        and pedal_di <= REGEN_COMMAND_CLEAR_DI
+        and limited_accel <= REGEN_DECEL_REQUEST_CLEAR
         and decel_shortfall > REGEN_DECEL_SHORTFALL_CLEAR
       )
       if not keep_prompting:
@@ -75,11 +86,15 @@ class RegenDecelMonitor:
     under_delivering = (
       monitoring_allowed
       and v_ego >= REGEN_DECEL_PROMPT_MIN_SPEED
-      and pedal_di <= REGEN_LIMIT_TRIGGER_DI
+      and pedal_di <= REGEN_COMMAND_TRIGGER_DI
+      and limited_accel <= REGEN_DECEL_REQUEST_TRIGGER
       and decel_shortfall >= REGEN_DECEL_SHORTFALL_TRIGGER
     )
-    self.under_delivery_updates = self.under_delivery_updates + 1 if under_delivering else 0
-    self.active = self.under_delivery_updates >= REGEN_DECEL_PROMPT_DWELL_UPDATES
+    if under_delivering:
+      self.evidence_updates = min(self.evidence_updates + 1, REGEN_DECEL_PROMPT_DWELL_UPDATES)
+    else:
+      self.evidence_updates = max(self.evidence_updates - 1, 0)
+    self.active = self.evidence_updates >= REGEN_DECEL_PROMPT_DWELL_UPDATES
     return self.active
 
 
