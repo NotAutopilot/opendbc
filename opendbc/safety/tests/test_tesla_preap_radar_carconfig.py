@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import pytest
+
 from opendbc.car.structs import CarParams
 from opendbc.safety import DLC_TO_LEN
 from opendbc.safety.tests.libsafety import libsafety_py
@@ -14,8 +16,8 @@ class TestTeslaPreAPRadarCarConfig:
   def setup_method(self):
     self.safety = libsafety_py.libsafety
 
-  def _set_safety_hooks(self, radar_emulation):
-    radar_flags = PREAP_FLAG_RADAR_BEHIND_NOSECONE
+  def _set_safety_hooks(self, radar_emulation, behind_nosecone=True):
+    radar_flags = PREAP_FLAG_RADAR_BEHIND_NOSECONE if behind_nosecone else 0
     if radar_emulation:
       radar_flags |= PREAP_FLAG_RADAR_EMULATION
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, radar_flags)
@@ -47,3 +49,32 @@ class TestTeslaPreAPRadarCarConfig:
       expected_payloads.append(expected_data.hex())
 
     assert actual_payloads == expected_payloads
+
+  def test_front_radar_position_is_emitted(self):
+    self._set_safety_hooks(True, behind_nosecone=False)
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
+
+    assert bytes(self.safety.tesla_preap_radar_car_config_data(i) for i in range(8)) == bytes.fromhex("4285555300000010")
+
+  @pytest.mark.parametrize("data", (b"", b"\x02\x81", bytes.fromhex("02815553"), bytes(12)))
+  def test_malformed_source_is_not_emitted(self, data):
+    self._set_safety_hooks(True)
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, data))
+
+    assert not self.safety.tesla_preap_radar_car_config_captured()
+
+  def test_capture_is_cleared_on_safety_reinit(self):
+    self._set_safety_hooks(True)
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
+    assert self.safety.tesla_preap_radar_car_config_captured()
+
+    self._set_safety_hooks(False)
+
+    assert not self.safety.tesla_preap_radar_car_config_captured()
+    assert bytes(self.safety.tesla_preap_radar_car_config_data(i) for i in range(8)) == bytes(8)
+
+  @pytest.mark.parametrize("index", (-1, 8))
+  def test_capture_accessor_rejects_invalid_index(self, index):
+    self._set_safety_hooks(True)
+
+    assert self.safety.tesla_preap_radar_car_config_data(index) == 0

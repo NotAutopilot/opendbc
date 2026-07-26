@@ -101,8 +101,7 @@ static uint32_t preap_last_stalk_engage_us = 0;
 // Radar emulation state
 static int preap_radar_status = 0;
 static uint32_t preap_last_radar_signal = 0;
-static int preap_radar_epas_type = 0;
-static int preap_radar_position = 0;
+static uint32_t preap_radar_position = 0U;
 
 // ============================================
 // Checksum and counter (for EPAS validation)
@@ -202,11 +201,11 @@ static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
 
 static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t *dst) {
   *dst = (CANPacket_t){.returned = 0U, .rejected = 0U, .extended = src->extended,
-                       .bus = 1, .addr = 0x2A9, .data_len_code = src->data_len_code};
+                       .bus = 1, .addr = 0x2A9, .data_len_code = 8U};
   uint32_t lo = PREAP_GET_BYTES_04(src);
   uint32_t hi = PREAP_GET_BYTES_48(src);
-  lo = (lo & 0xFFFFF33F) | 0x100 | 0x440;  // country=US, radar_type=Bosch
-  hi = (hi & 0xCFFF0F0F) | 0x10000000 | (preap_radar_position << 4) | (preap_radar_epas_type << 12);
+  lo = (lo & 0xFFFFF33FU) | 0x100U | 0x440U;  // DAS hardware, Bosch radar, and park assist
+  hi = (hi & 0xCFFF0F0FU) | 0x10000000U | (preap_radar_position << 4U);
   PREAP_WORD_TO_BYTES(&dst->data[0], lo);
   PREAP_WORD_TO_BYTES(&dst->data[4], hi);
 }
@@ -238,7 +237,7 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
     }
 
     // Group B: GTW_carConfig (0x398) → 0x2A9 with bitfield patching
-    if (addr == 0x398) {
+    if ((addr == 0x398) && (GET_LEN(to_fwd) == 8U)) {
       CANPacket_t pkt;
       preap_transform_radar_car_config(to_fwd, &pkt);
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
@@ -606,9 +605,10 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_radar_status = 0;
   preap_last_radar_signal = 0;
   preap_last_stalk_engage_us = 0;
-  preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+  preap_radar_position = preap_radar_behind_nosecone ? 1U : 0U;
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
   preap_radar_car_config_captured = false;
+  preap_radar_car_config_capture = (CANPacket_t){0};
 #endif
 
   // TX whitelist — no harness relay on Pre-AP

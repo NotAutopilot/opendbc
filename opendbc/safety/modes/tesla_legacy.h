@@ -27,8 +27,7 @@ static bool tesla_legacy_stock_aeb = false;
 static bool tesla_legacy_stock_lkas = false;
 static bool tesla_legacy_stock_lkas_prev = false;
 
-// Note: checksum/CRC functions that were here moved to tesla_preap.h
-// as preap_byte_sum_checksum() and preap_compute_crc8() respectively.
+// Pre-AP checksum and CRC handling lives in tesla_preap.h.
 
 // Handles manual forwarding modification since safety hooks don't allow modification
 static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
