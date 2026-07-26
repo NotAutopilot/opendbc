@@ -60,10 +60,14 @@ class TestWorkflowContract(unittest.TestCase):
     nap_job = indented_block(self.workflow, "  nap_tests:")
     required_steps = (
       ("    - name: Build NAP opendbc", ("scons -j$(nproc)",)),
-      ("    - name: Lint NAP implementation and gates", ("ruff check",)),
+      ("    - name: Lint NAP implementation and gates", (
+        "ruff check",
+        "opendbc/safety/tests/test_tesla_preap_radar_carconfig.py",
+      )),
       ("    - name: Run NAP car and safety suites", (
         "opendbc/car/tesla/preap/tests/",
         "opendbc/safety/tests/test_tesla_preap.py",
+        "opendbc/safety/tests/test_tesla_preap_radar_carconfig.py",
         "opendbc/safety/tests/test_mg.py",
       )),
     )

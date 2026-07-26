@@ -32,7 +32,8 @@ jobs:
           opendbc/car/tesla/preap \
           opendbc/car/tesla/test_pedal_regen.py \
           opendbc/safety/tests/test_mg.py \
-          opendbc/safety/tests/test_tesla_preap.py
+          opendbc/safety/tests/test_tesla_preap.py \
+          opendbc/safety/tests/test_tesla_preap_radar_carconfig.py
     - name: Run NAP car and safety suites
       run: |
         source .venv/bin/activate
@@ -40,7 +41,8 @@ jobs:
           opendbc/car/tesla/preap/tests/ \
           opendbc/car/tesla/test_pedal_regen.py \
           opendbc/safety/tests/test_mg.py \
-          opendbc/safety/tests/test_tesla_preap.py
+          opendbc/safety/tests/test_tesla_preap.py \
+          opendbc/safety/tests/test_tesla_preap_radar_carconfig.py
 
   tests:
     name: ./test.sh
