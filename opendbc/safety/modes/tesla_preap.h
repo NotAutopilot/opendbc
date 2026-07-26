@@ -200,14 +200,21 @@ static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
 #endif
 }
 
-static uint8_t preap_byte_sum_checksum(const CANPacket_t *pkt) {
-  uint8_t chksum = (uint8_t)(pkt->addr & 0xFFU) + (uint8_t)((pkt->addr >> 8) & 0xFFU);
-  int len = GET_LEN(pkt);
-  for (int i = 0; i < (len - 1); i++) {
-    chksum += pkt->data[i];
-  }
-  return chksum;
+static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t *dst) {
+  *dst = (CANPacket_t){.returned = 0U, .rejected = 0U, .extended = src->extended,
+                       .bus = 1, .addr = 0x2A9, .data_len_code = src->data_len_code};
+  uint32_t lo = PREAP_GET_BYTES_04(src);
+  uint32_t hi = PREAP_GET_BYTES_48(src);
+  lo = (lo & 0xFFFFF33F) | 0x100 | 0x440;  // country=US, radar_type=Bosch
+  hi = (hi & 0xCFFF0F0F) | 0x10000000 | (preap_radar_position << 4) | (preap_radar_epas_type << 12);
+  PREAP_WORD_TO_BYTES(&dst->data[0], lo);
+  PREAP_WORD_TO_BYTES(&dst->data[4], hi);
 }
+
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+static bool preap_radar_car_config_captured = false;
+static CANPacket_t preap_radar_car_config_capture;
+#endif
 
 // ============================================
 // GTW Emulation: CAN0 → CAN1 for Bosch radar
@@ -232,15 +239,12 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
 
     // Group B: GTW_carConfig (0x398) → 0x2A9 with bitfield patching
     if (addr == 0x398) {
-      CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = to_fwd->extended,
-                         .bus = 1, .addr = 0x2A9, .data_len_code = to_fwd->data_len_code};
-      uint32_t lo = PREAP_GET_BYTES_04(to_fwd);
-      uint32_t hi = PREAP_GET_BYTES_48(to_fwd);
-      lo = (lo & 0xFFFFF33F) | 0x100 | 0x440;  // country=US, radar_type=Bosch
-      hi = (hi & 0xCFFF0F0F) | 0x10000000 | (preap_radar_position << 4) | (preap_radar_epas_type << 12);
-      PREAP_WORD_TO_BYTES(&pkt.data[0], lo);
-      PREAP_WORD_TO_BYTES(&pkt.data[4], hi);
-      pkt.data[7] = preap_byte_sum_checksum(&pkt);
+      CANPacket_t pkt;
+      preap_transform_radar_car_config(to_fwd, &pkt);
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+      preap_radar_car_config_capture = pkt;
+      preap_radar_car_config_captured = true;
+#endif
 #if defined(STM32H7) || defined(STM32F4)
       can_set_checksum(&pkt);
       can_send(&pkt, 1, true);
@@ -327,6 +331,31 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
     }
   }
 }
+
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+bool tesla_preap_radar_car_config_captured(void) {
+  return preap_radar_car_config_captured;
+}
+
+uint32_t tesla_preap_radar_car_config_addr(void) {
+  return preap_radar_car_config_capture.addr;
+}
+
+uint8_t tesla_preap_radar_car_config_bus(void) {
+  return preap_radar_car_config_capture.bus;
+}
+
+uint8_t tesla_preap_radar_car_config_dlc(void) {
+  return preap_radar_car_config_capture.data_len_code;
+}
+
+uint8_t tesla_preap_radar_car_config_data(int index) {
+  if ((index < 0) || (index >= 8)) {
+    return 0U;
+  }
+  return preap_radar_car_config_capture.data[index];
+}
+#endif
 
 // ============================================
 // RX Hook
@@ -578,6 +607,9 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_last_radar_signal = 0;
   preap_last_stalk_engage_us = 0;
   preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  preap_radar_car_config_captured = false;
+#endif
 
   // TX whitelist — no harness relay on Pre-AP
   static const CanMsg PREAP_TX_MSGS[] = {
