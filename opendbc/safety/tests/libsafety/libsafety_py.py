@@ -72,6 +72,7 @@ bool safety_config_valid();
 
 void init_tests(void);
 
+bool tesla_preap_diagnostic_latched(void);
 bool tesla_preap_radar_car_config_captured(void);
 uint32_t tesla_preap_radar_car_config_addr(void);
 uint8_t tesla_preap_radar_car_config_bus(void);

@@ -180,6 +180,8 @@ class RadarDiagnosticProbe:
   CLEANUP_TIMEOUT = 3.0
   # Must exceed Panda's outstanding cleanup timeout before a restarted host transmits.
   RECOVERY_DRAIN_TIMEOUT = 3.5
+  # Panda abandons the diagnostic latch after 60 seconds regardless of response-pending traffic.
+  RECOVERY_MAX_DRAIN_TIMEOUT = 60.0 + RECOVERY_DRAIN_TIMEOUT
   OVERALL_TIMEOUT = 45.0
   MAX_DTC_DETAILS = 16
   MAX_DTC_DETAIL_RESPONSE_LENGTH = 256
@@ -198,6 +200,7 @@ class RadarDiagnosticProbe:
     self._started_at = now
     self._cleanup_deadline_at: float | None = None
     self._recovery_drain_deadline_at: float | None = None
+    self._recovery_drain_limit_at: float | None = None
     self._active_request: _ActiveRequest | None = None
     self._identifier_index = 0
     self._records: list[RadarIdentityRecord] = []
@@ -217,7 +220,19 @@ class RadarDiagnosticProbe:
     self.start(now)
     self._cleanup_acks_remaining = 2
     self._recovery_drain_deadline_at = now + self.RECOVERY_DRAIN_TIMEOUT
+    self._recovery_drain_limit_at = now + self.RECOVERY_MAX_DRAIN_TIMEOUT
     self.state = RadarDiagnosticState.CLEANUP
+
+  @staticmethod
+  def _is_cleanup_response_pending(packet: CanData) -> bool:
+    return (
+      packet.address == RADAR_DIAGNOSTIC_RX_ADDRESS
+      and packet.src == RADAR_DIAGNOSTIC_BUS
+      and len(packet.dat) == 8
+      and packet.dat[0] == 0x03
+      and packet.dat[1:4] == b"\x7f\x10\x78"
+      and packet.dat[4:] == b"\x00\x00\x00\x00"
+    )
 
   def abort(self, now: float) -> RadarDiagnosticOutput:
     if self.state not in (RadarDiagnosticState.IDLE, RadarDiagnosticState.COMPLETE, RadarDiagnosticState.FAILED):
@@ -257,9 +272,13 @@ class RadarDiagnosticProbe:
           return self._output(can_sends)
       return self._output(can_sends)
     if self._recovery_drain_deadline_at is not None:
+      if any(self._is_cleanup_response_pending(packet) for packet in can_packets):
+        assert self._recovery_drain_limit_at is not None
+        self._recovery_drain_deadline_at = min(now + self.RECOVERY_DRAIN_TIMEOUT, self._recovery_drain_limit_at)
       if now < self._recovery_drain_deadline_at:
         return self._output(can_sends)
       self._recovery_drain_deadline_at = None
+      self._recovery_drain_limit_at = None
     request = self._request_for_state()
     if request is not None:
       payload, prefix = request

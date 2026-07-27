@@ -372,7 +372,13 @@ static void preap_diag_rx_frame(const CANPacket_t *msg) {
   uint8_t frame_type = msg->data[0] >> 4U;
   if (frame_type == 0U) {
     uint8_t length = msg->data[0] & 0x0FU;
-    if (preap_diag_rx_in_progress || (length == 0U) || (length > 7U)) preap_diag_poison();
+    bool cleanup_pending = (preap_diag_phase == PREAP_DIAG_AWAIT_CLEANUP) && (length == 3U) &&
+                           (msg->data[1] == 0x7FU) && (msg->data[2] == 0x10U) && (msg->data[3] == 0x78U);
+    bool cleanup_pending_padding_valid = true;
+    if (cleanup_pending) {
+      for (uint8_t index = 4U; index < 8U; index++) cleanup_pending_padding_valid &= msg->data[index] == 0U;
+    }
+    if (preap_diag_rx_in_progress || (length == 0U) || (length > 7U) || !cleanup_pending_padding_valid) preap_diag_poison();
     else preap_diag_handle_payload(&msg->data[1], length);
   } else if (frame_type == 1U) {
     uint16_t length = (((uint16_t)msg->data[0] & 0x0FU) << 8U) | msg->data[1];
@@ -427,8 +433,10 @@ static bool preap_diag_tx_frame(const CANPacket_t *msg) {
                              (preap_diag_phase != PREAP_DIAG_CLEANUP) &&
                              (preap_diag_phase != PREAP_DIAG_AWAIT_CLEANUP);
   if (is_latched_recovery) {
+    uint32_t now = microsecond_timer_get();
+    preap_diag_started_at_us = now;
+    preap_diag_last_activity_us = now;
     preap_diag_set_phase(PREAP_DIAG_AWAIT_CLEANUP);
-    preap_diag_note_activity();
     return true;
   }
   bool allowed = false;
@@ -722,6 +730,10 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
 }
 
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+bool tesla_preap_diagnostic_latched(void) {
+  return preap_diag_latched();
+}
+
 bool tesla_preap_radar_car_config_captured(void) {
   return preap_radar_car_config_captured;
 }

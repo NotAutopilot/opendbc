@@ -150,6 +150,46 @@ def test_failed_normal_cleanup_can_restart_two_ack_recovery(cleanup_failure):
   assert output.report is not None and output.report.cleanup_confirmed
 
 
+def test_recovery_drain_tracks_only_cleanup_response_pending():
+  pending = _response(b"\x7f\x10\x78")
+  stale_positive = _response(b"\x50\x01")
+  recovery = RadarDiagnosticProbe()
+  recovery.start_cleanup(0.0)
+
+  assert recovery.update([pending], 3.4).can_sends == ()
+  assert recovery.update([stale_positive], 6.89).can_sends == ()
+  assert recovery.update([], 6.9).can_sends
+
+
+@pytest.mark.parametrize("packet", (
+  CanData(RADAR_DIAGNOSTIC_RX_ADDRESS, b"\x04\x7f\x10\x78\x00\x00\x00\x00", RADAR_DIAGNOSTIC_BUS),
+  CanData(RADAR_DIAGNOSTIC_RX_ADDRESS, b"\x03\x7f\x10\x78\x01\x00\x00\x00", RADAR_DIAGNOSTIC_BUS),
+  CanData(RADAR_DIAGNOSTIC_RX_ADDRESS, b"\x10\x03\x7f\x10\x78\x00\x00\x00", RADAR_DIAGNOSTIC_BUS),
+  CanData(RADAR_DIAGNOSTIC_RX_ADDRESS, b"\x03\x7f\x11\x78\x00\x00\x00\x00", RADAR_DIAGNOSTIC_BUS),
+  CanData(RADAR_DIAGNOSTIC_RX_ADDRESS, b"\x03\x7f\x10\x22\x00\x00\x00\x00", RADAR_DIAGNOSTIC_BUS),
+  CanData(RADAR_DIAGNOSTIC_RX_ADDRESS, b"\x03\x7f\x10\x78\x00\x00\x00\x00", 0),
+  CanData(0x652, b"\x03\x7f\x10\x78\x00\x00\x00\x00", RADAR_DIAGNOSTIC_BUS),
+))
+def test_unrelated_packets_do_not_extend_recovery_drain(packet):
+  recovery = RadarDiagnosticProbe()
+  recovery.start_cleanup(0.0)
+
+  assert recovery.update([packet], 3.49).can_sends == ()
+  assert recovery.update([], 3.5).can_sends
+
+
+def test_response_pending_cannot_extend_drain_past_panda_overall_timeout():
+  recovery = RadarDiagnosticProbe()
+  recovery.start_cleanup(0.0)
+  pending = _response(b"\x7f\x10\x78")
+
+  for pending_at in (3.4 * index for index in range(1, 19)):
+    assert recovery.update([pending], pending_at).can_sends == ()
+
+  assert recovery.update([], recovery.RECOVERY_MAX_DRAIN_TIMEOUT - 0.01).can_sends == ()
+  assert recovery.update([pending], recovery.RECOVERY_MAX_DRAIN_TIMEOUT).can_sends
+
+
 def test_detail_response_limit_rejects_oversized_isotp_payload_then_cleans_up():
   probe = RadarDiagnosticProbe()
   _enter_dtc_inventory(probe)

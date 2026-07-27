@@ -15,6 +15,7 @@ DEFAULT_SESSION = b"\x02\x10\x01\x00\x00\x00\x00\x00"
 EXTENDED_SESSION = b"\x02\x10\x03\x00\x00\x00\x00\x00"
 READ_DTCS = b"\x03\x19\x02\xff\x00\x00\x00\x00"
 FLOW_CONTROL = b"\x30\x00\x00\x00\x00\x00\x00\x00"
+CLEANUP_PENDING = b"\x03\x7f\x10\x78\x00\x00\x00\x00"
 DIDS = (0xA022, 0xF014, 0xF015, 0xF180, 0xF181, 0xF182, 0xF187, 0xF188, 0xF189, 0xF18A, 0xF18C, 0xF191, 0xF192, 0xF193, 0xF194, 0xF195, 0xF197, 0xF19E)
 
 
@@ -33,8 +34,8 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
   def tx(self, data: bytes, addr: int = TX_ADDR, bus: int = BUS) -> bool:
     return self.safety.safety_tx_hook(libsafety_py.make_CANPacket(addr, bus, data))
 
-  def rx(self, data: bytes, addr: int = RX_ADDR, bus: int = BUS) -> None:
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(addr, bus, data))
+  def rx(self, data: bytes, addr: int = RX_ADDR, bus: int = BUS) -> bool:
+    return self.safety.safety_rx_hook(libsafety_py.make_CANPacket(addr, bus, data))
 
   def single(self, payload: bytes) -> None:
     assert len(payload) <= 7
@@ -73,8 +74,14 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     request = output.can_sends[0]
     assert self.tx(request.dat, addr=request.address, bus=request.src)
     response = b"\x02\x50\x01\x00\x00\x00\x00\x00"
-    self.rx(response)
+    assert self.rx(response)
+    assert not self.safety.tesla_preap_diagnostic_latched()
     return probe.update([CanData(RX_ADDR, response, BUS)], now)
+
+  def assert_normal_tx_released(self) -> None:
+    assert not self.safety.tesla_preap_diagnostic_latched()
+    self.safety.set_controls_allowed(True)
+    assert self.tx(b"\x40\x00\x00\x00", addr=0x488, bus=0)
 
   def multiframe(self, payload: bytes) -> None:
     self.rx(bytes([0x10 | (len(payload) >> 8), len(payload) & 0xFF]) + payload[:6])
@@ -200,6 +207,7 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
           assert not self.tx(TESTER_PRESENT)
           assert not self.tx(EXTENDED_SESSION)
           assert not self.tx(READ_DTCS)
+          self.assert_normal_tx_released()
 
   def test_cleanup_replay_drains_unacknowledged_request_before_two_fresh_acks(self):
     response = b"\x02\x50\x01\x00\x00\x00\x00\x00"
@@ -224,6 +232,7 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
           output = self.advance_recovery(probe, deadline + 0.1)
           assert output.state == RadarDiagnosticState.COMPLETE
           assert output.report is not None and output.report.cleanup_confirmed
+          self.assert_normal_tx_released()
 
   def test_restarting_during_cleanup_drain_restarts_the_quiet_period(self):
     self.setUp()
@@ -240,6 +249,81 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     output = self.advance_recovery(probe, 5.6)
     assert output.state == RadarDiagnosticState.COMPLETE
     assert output.report is not None and output.report.cleanup_confirmed
+    self.assert_normal_tx_released()
+
+  def test_late_cleanup_pending_extends_recovery_drain(self):
+    for reinitialize_panda in (False, True):
+      with self.subTest(reinitialize_panda=reinitialize_panda):
+        self.setUp()
+        assert self.tx(DEFAULT_SESSION)
+        probe = RadarDiagnosticProbe()
+        probe.start_cleanup(0.1)
+
+        self.safety.set_timer(2_900_000)
+        self.rx(CLEANUP_PENDING)
+        pending = CanData(RX_ADDR, CLEANUP_PENDING, BUS)
+        assert probe.update([pending], 2.9).can_sends == ()
+        if reinitialize_panda:
+          self.setUp()
+
+        assert probe.update([], 3.6).can_sends == ()
+        assert self.advance_recovery(probe, 6.4).state == RadarDiagnosticState.CLEANUP
+        output = self.advance_recovery(probe, 6.5)
+        assert output.state == RadarDiagnosticState.COMPLETE
+        assert output.report is not None and output.report.cleanup_confirmed
+        self.assert_normal_tx_released()
+
+  def test_repeated_cleanup_pending_extends_drain_until_panda_overall_timeout(self):
+    self.setUp()
+    assert self.tx(DEFAULT_SESSION)
+    probe = RadarDiagnosticProbe()
+    probe.start_cleanup(0.1)
+    pending = CanData(RX_ADDR, CLEANUP_PENDING, BUS)
+
+    pending_times = [2.9 * index for index in range(1, 21)]
+    for pending_at in pending_times:
+      self.safety.set_timer(round(pending_at * 1_000_000))
+      self.rx(CLEANUP_PENDING)
+      assert probe.update([pending], pending_at).can_sends == ()
+
+    deadline = pending_times[-1] + probe.RECOVERY_DRAIN_TIMEOUT
+    assert probe.update([], deadline - 0.01).can_sends == ()
+    assert self.advance_recovery(probe, deadline).state == RadarDiagnosticState.CLEANUP
+    output = self.advance_recovery(probe, deadline + 0.1)
+    assert output.state == RadarDiagnosticState.COMPLETE
+    assert output.report is not None and output.report.cleanup_confirmed
+    self.assert_normal_tx_released()
+
+  def test_other_drain_packets_do_not_delay_two_fresh_cleanup_acks(self):
+    packets = (
+      (RX_ADDR, BUS, b"\x02\x50\x01\x00\x00\x00\x00\x00"),
+      (RX_ADDR, BUS, b"\x04\x7f\x10\x78\x00\x00\x00\x00"),
+      (RX_ADDR, BUS, b"\x03\x7f\x10\x78\x01\x00\x00\x00"),
+      (RX_ADDR, BUS, b"\x10\x03\x7f\x10\x78\x00\x00\x00"),
+      (RX_ADDR, BUS, b"\x03\x7f\x11\x78\x00\x00\x00\x00"),
+      (RX_ADDR, BUS, b"\x03\x7f\x10\x22\x00\x00\x00\x00"),
+      (RX_ADDR, 0, CLEANUP_PENDING),
+      (0x652, BUS, CLEANUP_PENDING),
+    )
+    for addr, bus, data in packets:
+      for reinitialize_panda in (False, True):
+        with self.subTest(addr=addr, bus=bus, data=data, reinitialize_panda=reinitialize_panda):
+          self.setUp()
+          assert self.tx(DEFAULT_SESSION)
+          probe = RadarDiagnosticProbe()
+          probe.start_cleanup(0.1)
+
+          self.safety.set_timer(2_900_000)
+          self.rx(data, addr=addr, bus=bus)
+          assert probe.update([CanData(addr, data, bus)], 2.9).can_sends == ()
+          if reinitialize_panda:
+            self.setUp()
+
+          assert self.advance_recovery(probe, 3.6).state == RadarDiagnosticState.CLEANUP
+          output = self.advance_recovery(probe, 3.7)
+          assert output.state == RadarDiagnosticState.COMPLETE
+          assert output.report is not None and output.report.cleanup_confirmed
+          self.assert_normal_tx_released()
 
   def test_only_exact_cleanup_is_replayable_after_completion(self):
     assert self.tx(DEFAULT_SESSION)
