@@ -135,7 +135,9 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     assert not self.tx(TESTER_PRESENT)
     assert not self.tx(DEFAULT_SESSION)
 
-  def test_idle_cleanup_is_one_shot_crash_recovery_only(self):
+  def test_idle_cleanup_requires_two_ordered_acknowledgements(self):
+    assert self.tx(DEFAULT_SESSION)
+    self.single(b"\x50\x01")
     assert self.tx(DEFAULT_SESSION)
     self.single(b"\x50\x01")
     assert not self.tx(DEFAULT_SESSION)

@@ -154,6 +154,7 @@ static bool preap_diag_rx_in_progress = false;
 static uint16_t preap_diag_rx_length = 0U;
 static uint16_t preap_diag_rx_received = 0U;
 static uint8_t preap_diag_rx_sequence = 1U;
+static uint8_t preap_diag_cleanup_acks_remaining = 1U;
 
 static bool preap_diag_latched(void) {
   return preap_diag_phase != PREAP_DIAG_IDLE;
@@ -322,7 +323,10 @@ static void preap_diag_finish_positive(uint16_t length) {
       break;
     case PREAP_DIAG_AWAIT_READ_SNAPSHOT: preap_diag_set_phase(PREAP_DIAG_READ_EXTENDED_DATA); break;
     case PREAP_DIAG_AWAIT_READ_EXTENDED_DATA: preap_diag_advance_detail(); break;
-    case PREAP_DIAG_AWAIT_CLEANUP: preap_diag_set_phase(PREAP_DIAG_IDLE); break;
+    case PREAP_DIAG_AWAIT_CLEANUP:
+      if (preap_diag_cleanup_acks_remaining > 0U) preap_diag_cleanup_acks_remaining--;
+      preap_diag_set_phase((preap_diag_cleanup_acks_remaining == 0U) ? PREAP_DIAG_IDLE : PREAP_DIAG_CLEANUP);
+      break;
     default: preap_diag_poison(); break;
   }
 }
@@ -434,12 +438,16 @@ static bool preap_diag_tx_frame(const CANPacket_t *msg) {
         allowed = true;
       } else if (!controls_allowed && !preap_diag_attempt_consumed && is_cleanup) {
         preap_diag_attempt_consumed = true;
+        preap_diag_cleanup_acks_remaining = 2U;
         preap_diag_set_phase(PREAP_DIAG_AWAIT_CLEANUP);
         allowed = true;
       }
       break;
     case PREAP_DIAG_DEFAULT_SESSION:
       if (is_cleanup) { preap_diag_set_phase(PREAP_DIAG_AWAIT_DEFAULT_SESSION); allowed = true; }
+      break;
+    case PREAP_DIAG_CLEANUP:
+      if (is_cleanup) { preap_diag_set_phase(PREAP_DIAG_AWAIT_CLEANUP); allowed = true; }
       break;
     case PREAP_DIAG_EXTENDED_SESSION:
       if (preap_diag_payload_matches(msg, EXTENDED_SESSION)) { preap_diag_set_phase(PREAP_DIAG_AWAIT_EXTENDED_SESSION); allowed = true; }
@@ -989,6 +997,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
   preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
   preap_radar_diagnostic = GET_FLAG(param, PREAP_FLAG_RADAR_DIAGNOSTIC);
+  preap_diag_cleanup_acks_remaining = 1U;
 
   preap_gear = 4;
   preap_gear_prev = 4;

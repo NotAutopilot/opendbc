@@ -206,11 +206,13 @@ class RadarDiagnosticProbe:
     self._detail_index = 0
     self._ecu_responsive = False
     self._cleanup_confirmed = False
+    self._cleanup_acks_remaining = 1
     self._response_assembler.reset()
 
   def start_cleanup(self, now: float) -> None:
     """Recover a persisted transaction by issuing only the default-session cleanup."""
     self.start(now)
+    self._cleanup_acks_remaining = 2
     self.state = RadarDiagnosticState.CLEANUP
 
   def abort(self, now: float) -> RadarDiagnosticOutput:
@@ -341,8 +343,12 @@ class RadarDiagnosticProbe:
       if len(payload) < 2:
         self._fail(RadarDiagnosticFailure.MALFORMED_RESPONSE, now)
       else:
-        self._cleanup_confirmed = True
-        self.state = RadarDiagnosticState.FAILED if self.failure else RadarDiagnosticState.COMPLETE
+        self._cleanup_acks_remaining -= 1
+        if self._cleanup_acks_remaining > 0:
+          self.state = RadarDiagnosticState.CLEANUP
+        else:
+          self._cleanup_confirmed = True
+          self.state = RadarDiagnosticState.FAILED if self.failure else RadarDiagnosticState.COMPLETE
 
   def _handle_negative_response(self, payload: bytes, request_sid: int, now: float) -> None:
     if len(payload) != 3 or payload[1] != request_sid:
