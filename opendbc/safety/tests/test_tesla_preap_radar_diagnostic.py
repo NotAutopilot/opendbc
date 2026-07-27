@@ -60,6 +60,10 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     assert self.tx(DEFAULT_SESSION)
     self.single(b"\x50\x01")
 
+  def recover(self) -> None:
+    self.cleanup()
+    self.cleanup()
+
   def multiframe(self, payload: bytes) -> None:
     self.rx(bytes([0x10 | (len(payload) >> 8), len(payload) & 0xFF]) + payload[:6])
     assert self.tx(FLOW_CONTROL)
@@ -91,7 +95,7 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
         self.setUp()
         self.enter_read_did()
         assert not self.tx(request)
-        self.cleanup()
+        self.recover()
 
   def test_inventory_binds_and_bounds_detail_requests(self):
     self.enter_dtc_inventory()
@@ -111,19 +115,19 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     self.rx(b"\x10\x0b" + payload[:6])
     assert self.tx(FLOW_CONTROL)
     assert not self.tx(FLOW_CONTROL)
-    self.cleanup()
+    self.recover()
 
   def test_malformed_response_timeout_and_latched_controls_fail_closed(self):
     assert self.tx(TESTER_PRESENT)
     assert not self.tx(b"\x40\x00\x00\x00", addr=0x488, bus=0)
     self.single(b"\x7e\x01")
-    self.cleanup()
+    self.recover()
     assert not self.tx(TESTER_PRESENT)
 
     self.setUp()
     assert self.tx(TESTER_PRESENT)
     self.safety.set_timer(30_000_000)
-    self.cleanup()
+    self.recover()
     assert not self.tx(TESTER_PRESENT)
 
   def test_cleanup_releases_controls_and_consumes_the_attempt(self):
@@ -133,6 +137,28 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     self.safety.set_controls_allowed(True)
     assert self.tx(b"\x40\x00\x00\x00", addr=0x488, bus=0)
     assert not self.tx(TESTER_PRESENT)
+    assert not self.tx(DEFAULT_SESSION)
+
+  def test_failed_normal_cleanup_requires_two_ack_recovery(self):
+    for failure in ("malformed", "timeout"):
+      with self.subTest(failure=failure):
+        self.setUp()
+        self.enter_dtc_inventory()
+        self.request(READ_DTCS, b"\x59\x02\xff")
+        assert self.tx(DEFAULT_SESSION)
+        if failure == "malformed":
+          self.single(b"\x7e\x00")
+        else:
+          self.safety.set_timer(3_000_000)
+
+        self.recover()
+        assert not self.tx(DEFAULT_SESSION)
+        assert not self.tx(TESTER_PRESENT)
+
+  def test_duplicate_cleanup_is_rejected_while_response_is_outstanding(self):
+    assert self.tx(DEFAULT_SESSION)
+    assert not self.tx(DEFAULT_SESSION)
+    self.recover()
     assert not self.tx(DEFAULT_SESSION)
 
   def test_idle_cleanup_requires_two_ordered_acknowledgements(self):

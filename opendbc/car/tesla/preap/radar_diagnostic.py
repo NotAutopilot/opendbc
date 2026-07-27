@@ -388,7 +388,11 @@ class RadarDiagnosticProbe:
       self.failure = failure
     self._active_request = None
     self._response_assembler.reset()
-    self.state = RadarDiagnosticState.FAILED if self.state == RadarDiagnosticState.CLEANUP else RadarDiagnosticState.CLEANUP
+    if self.state == RadarDiagnosticState.CLEANUP:
+      self.state = RadarDiagnosticState.FAILED
+    else:
+      self._cleanup_acks_remaining = 2
+      self.state = RadarDiagnosticState.CLEANUP
 
   def _output(self, can_sends: list[CanData] | tuple[CanData, ...]) -> RadarDiagnosticOutput:
     report = None

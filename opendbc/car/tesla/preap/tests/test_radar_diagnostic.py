@@ -37,9 +37,14 @@ def _enter_dtc_inventory(probe: RadarDiagnosticProbe) -> None:
     _advance(probe, b"\x62" + did.to_bytes(2, "big"), index / 10)
 
 
-def _complete_cleanup(probe: RadarDiagnosticProbe, now: float):
-  probe.update([], now)
-  return probe.update([_response(b"\x50\x01")], now)
+def _complete_cleanup(probe: RadarDiagnosticProbe, now: float, acknowledgements: int = 1):
+  output = None
+  for acknowledgement in range(acknowledgements):
+    acknowledgement_at = now + (acknowledgement / 10)
+    assert probe.update([], acknowledgement_at).can_sends
+    output = probe.update([_response(b"\x50\x01")], acknowledgement_at)
+  assert output is not None
+  return output
 
 
 def test_probe_uses_only_the_curated_did_sequence():
@@ -107,7 +112,7 @@ def test_malformed_response_and_timeout_complete_fail_closed_cleanup():
   probe.update([], 0.2)
   output = probe.update([_response(b"\x50\x03")], 0.3)
   assert output.state == RadarDiagnosticState.CLEANUP
-  output = _complete_cleanup(probe, 0.4)
+  output = _complete_cleanup(probe, 0.4, acknowledgements=2)
   assert output.state == RadarDiagnosticState.FAILED
   assert output.report is not None and output.report.cleanup_confirmed
 
@@ -118,9 +123,29 @@ def test_malformed_response_and_timeout_complete_fail_closed_cleanup():
   probe.update([], 0.2)
   output = probe.update([], 3.3)
   assert output.state == RadarDiagnosticState.CLEANUP
-  output = _complete_cleanup(probe, 3.4)
+  output = _complete_cleanup(probe, 3.4, acknowledgements=2)
   assert output.state == RadarDiagnosticState.FAILED
   assert output.report is not None and output.report.failure == RadarDiagnosticFailure.TIMEOUT and output.report.cleanup_confirmed
+
+
+@pytest.mark.parametrize("cleanup_failure", ["malformed", "timeout"])
+def test_failed_normal_cleanup_can_restart_two_ack_recovery(cleanup_failure):
+  probe = RadarDiagnosticProbe(include_dtc_details=False)
+  _enter_dtc_inventory(probe)
+  assert _advance(probe, b"\x59\x02\xff", 2.4).state == RadarDiagnosticState.CLEANUP
+  assert probe.update([], 2.5).can_sends
+  if cleanup_failure == "malformed":
+    output = probe.update([_response(b"\x7e\x00")], 2.6)
+  else:
+    output = probe.update([], 5.5)
+  assert output.state == RadarDiagnosticState.FAILED
+  assert output.report is not None and not output.report.cleanup_confirmed
+
+  recovery = RadarDiagnosticProbe()
+  recovery.start_cleanup(6.0)
+  output = _complete_cleanup(recovery, 6.1, acknowledgements=2)
+  assert output.state == RadarDiagnosticState.COMPLETE
+  assert output.report is not None and output.report.cleanup_confirmed
 
 
 def test_detail_response_limit_rejects_oversized_isotp_payload_then_cleans_up():
@@ -133,6 +158,6 @@ def test_detail_response_limit_rejects_oversized_isotp_payload_then_cleans_up():
 
   assert output.state == RadarDiagnosticState.CLEANUP
   assert not output.can_sends
-  output = _complete_cleanup(probe, 2.7)
+  output = _complete_cleanup(probe, 2.7, acknowledgements=2)
   assert output.state == RadarDiagnosticState.FAILED
   assert output.report is not None and output.report.cleanup_confirmed
