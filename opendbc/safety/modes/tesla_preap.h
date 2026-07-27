@@ -397,7 +397,7 @@ static void preap_diag_rx_frame(const CANPacket_t *msg) {
       preap_diag_poison();
       return;
     }
-    uint16_t copied = ((preap_diag_rx_length - preap_diag_rx_received) < 7U) ? (preap_diag_rx_length - preap_diag_rx_received) : 7U;
+    uint16_t copied = ((preap_diag_rx_length - preap_diag_rx_received) < 7) ? (preap_diag_rx_length - preap_diag_rx_received) : 7;
     uint16_t offset = preap_diag_rx_received;
     preap_diag_rx_received += copied;
     if (preap_diag_phase == PREAP_DIAG_AWAIT_READ_DTCS) {
