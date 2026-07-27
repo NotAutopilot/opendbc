@@ -143,7 +143,9 @@ def test_failed_normal_cleanup_can_restart_two_ack_recovery(cleanup_failure):
 
   recovery = RadarDiagnosticProbe()
   recovery.start_cleanup(6.0)
-  output = _complete_cleanup(recovery, 6.1, acknowledgements=2)
+  stale_response = _response(b"\x50\x01")
+  assert recovery.update([stale_response], 9.49).can_sends == ()
+  output = _complete_cleanup(recovery, 9.5, acknowledgements=2)
   assert output.state == RadarDiagnosticState.COMPLETE
   assert output.report is not None and output.report.cleanup_confirmed
 

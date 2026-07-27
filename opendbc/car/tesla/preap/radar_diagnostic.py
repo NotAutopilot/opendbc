@@ -178,6 +178,8 @@ class RadarDiagnosticProbe:
   RESPONSE_TIMEOUT = 3.0
   RESPONSE_PENDING_TIMEOUT = 5.0
   CLEANUP_TIMEOUT = 3.0
+  # Must exceed Panda's outstanding cleanup timeout before a restarted host transmits.
+  RECOVERY_DRAIN_TIMEOUT = 3.5
   OVERALL_TIMEOUT = 45.0
   MAX_DTC_DETAILS = 16
   MAX_DTC_DETAIL_RESPONSE_LENGTH = 256
@@ -195,6 +197,7 @@ class RadarDiagnosticProbe:
     self.failure = None
     self._started_at = now
     self._cleanup_deadline_at: float | None = None
+    self._recovery_drain_deadline_at: float | None = None
     self._active_request: _ActiveRequest | None = None
     self._identifier_index = 0
     self._records: list[RadarIdentityRecord] = []
@@ -210,9 +213,10 @@ class RadarDiagnosticProbe:
     self._response_assembler.reset()
 
   def start_cleanup(self, now: float) -> None:
-    """Recover a persisted transaction by issuing only the default-session cleanup."""
+    """Recover a persisted transaction after allowing any abandoned request to expire."""
     self.start(now)
     self._cleanup_acks_remaining = 2
+    self._recovery_drain_deadline_at = now + self.RECOVERY_DRAIN_TIMEOUT
     self.state = RadarDiagnosticState.CLEANUP
 
   def abort(self, now: float) -> RadarDiagnosticOutput:
@@ -252,6 +256,10 @@ class RadarDiagnosticProbe:
           self._handle_payload(response.payload or b"", now)
           return self._output(can_sends)
       return self._output(can_sends)
+    if self._recovery_drain_deadline_at is not None:
+      if now < self._recovery_drain_deadline_at:
+        return self._output(can_sends)
+      self._recovery_drain_deadline_at = None
     request = self._request_for_state()
     if request is not None:
       payload, prefix = request

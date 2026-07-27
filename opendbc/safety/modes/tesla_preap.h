@@ -154,7 +154,6 @@ static bool preap_diag_rx_in_progress = false;
 static uint16_t preap_diag_rx_length = 0U;
 static uint16_t preap_diag_rx_received = 0U;
 static uint8_t preap_diag_rx_sequence = 1U;
-static uint8_t preap_diag_cleanup_acks_remaining = 1U;
 
 static bool preap_diag_latched(void) {
   return preap_diag_phase != PREAP_DIAG_IDLE;
@@ -324,8 +323,7 @@ static void preap_diag_finish_positive(uint16_t length) {
     case PREAP_DIAG_AWAIT_READ_SNAPSHOT: preap_diag_set_phase(PREAP_DIAG_READ_EXTENDED_DATA); break;
     case PREAP_DIAG_AWAIT_READ_EXTENDED_DATA: preap_diag_advance_detail(); break;
     case PREAP_DIAG_AWAIT_CLEANUP:
-      if (preap_diag_cleanup_acks_remaining > 0U) preap_diag_cleanup_acks_remaining--;
-      preap_diag_set_phase((preap_diag_cleanup_acks_remaining == 0U) ? PREAP_DIAG_IDLE : PREAP_DIAG_CLEANUP);
+      preap_diag_set_phase(PREAP_DIAG_IDLE);
       break;
     default: preap_diag_poison(); break;
   }
@@ -424,12 +422,11 @@ static bool preap_diag_tx_frame(const CANPacket_t *msg) {
   static const uint8_t READ_DTCS[8] = {0x03U, 0x19U, 0x02U, 0xFFU, 0U, 0U, 0U, 0U};
   static const uint8_t FLOW_CONTROL[8] = {0x30U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
   bool is_cleanup = preap_diag_payload_matches(msg, DEFAULT_SESSION);
-  bool is_recovery = preap_diag_latched() && is_cleanup &&
-                     (preap_diag_phase != PREAP_DIAG_DEFAULT_SESSION) &&
-                     (preap_diag_phase != PREAP_DIAG_CLEANUP) &&
-                     (preap_diag_phase != PREAP_DIAG_AWAIT_CLEANUP);
-  if (is_recovery) {
-    preap_diag_cleanup_acks_remaining = 2U;
+  bool is_latched_recovery = preap_diag_latched() && is_cleanup &&
+                             (preap_diag_phase != PREAP_DIAG_DEFAULT_SESSION) &&
+                             (preap_diag_phase != PREAP_DIAG_CLEANUP) &&
+                             (preap_diag_phase != PREAP_DIAG_AWAIT_CLEANUP);
+  if (is_latched_recovery) {
     preap_diag_set_phase(PREAP_DIAG_AWAIT_CLEANUP);
     preap_diag_note_activity();
     return true;
@@ -441,9 +438,8 @@ static bool preap_diag_tx_frame(const CANPacket_t *msg) {
         preap_diag_attempt_consumed = true;
         preap_diag_set_phase(PREAP_DIAG_AWAIT_TESTER);
         allowed = true;
-      } else if (!controls_allowed && !preap_diag_attempt_consumed && is_cleanup) {
+      } else if (!controls_allowed && is_cleanup) {
         preap_diag_attempt_consumed = true;
-        preap_diag_cleanup_acks_remaining = 2U;
         preap_diag_set_phase(PREAP_DIAG_AWAIT_CLEANUP);
         allowed = true;
       }
@@ -1002,8 +998,6 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
   preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
   preap_radar_diagnostic = GET_FLAG(param, PREAP_FLAG_RADAR_DIAGNOSTIC);
-  preap_diag_cleanup_acks_remaining = 1U;
-
   preap_gear = 4;
   preap_gear_prev = 4;
   preap_doors_open = false;
