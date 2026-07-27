@@ -69,6 +69,15 @@ def test_read_only_probe_collects_bounded_dtc_details_and_cleans_up():
   assert output.report.cleanup_confirmed
 
 
+def test_inventory_only_probe_skips_dtc_detail_records():
+  probe = RadarDiagnosticProbe(include_dtc_details=False)
+  _enter_dtc_inventory(probe)
+
+  output = _advance(probe, b"\x59\x02\xff\x12\x34\x56\x09", 2.4)
+
+  assert output.state == RadarDiagnosticState.CLEANUP
+
+
 def test_response_pending_and_multiframe_dtc_response_are_bounded():
   probe = RadarDiagnosticProbe()
   probe.start(0.0)

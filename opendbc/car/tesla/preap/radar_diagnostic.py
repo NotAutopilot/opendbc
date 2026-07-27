@@ -183,8 +183,9 @@ class RadarDiagnosticProbe:
   MAX_DTC_DETAIL_RESPONSE_LENGTH = 256
   CLOCK_EPSILON = 1e-9
 
-  def __init__(self):
+  def __init__(self, *, include_dtc_details: bool = True):
     self.identifiers = RADAR_IDENTITY_DIDS
+    self.include_dtc_details = include_dtc_details
     self.state = RadarDiagnosticState.IDLE
     self.failure: RadarDiagnosticFailure | None = None
     self._response_assembler = RadarIsoTpResponseAssembler()
@@ -206,6 +207,11 @@ class RadarDiagnosticProbe:
     self._ecu_responsive = False
     self._cleanup_confirmed = False
     self._response_assembler.reset()
+
+  def start_cleanup(self, now: float) -> None:
+    """Recover a persisted transaction by issuing only the default-session cleanup."""
+    self.start(now)
+    self.state = RadarDiagnosticState.CLEANUP
 
   def abort(self, now: float) -> RadarDiagnosticOutput:
     if self.state not in (RadarDiagnosticState.IDLE, RadarDiagnosticState.COMPLETE, RadarDiagnosticState.FAILED):
@@ -315,8 +321,8 @@ class RadarDiagnosticProbe:
       else:
         self._dtc_response, self._dtc_mask = payload, payload[2]
         self._dtc_codes = [payload[index : index + 3] for index in range(3, len(payload), 4)][: self.MAX_DTC_DETAILS]
-        self._dtc_details = [RadarDtcDetailRecord(code) for code in self._dtc_codes]
-        self.state = RadarDiagnosticState.READ_DTC_SNAPSHOT if self._dtc_codes else RadarDiagnosticState.CLEANUP
+        self._dtc_details = [RadarDtcDetailRecord(code) for code in self._dtc_codes] if self.include_dtc_details else []
+        self.state = RadarDiagnosticState.READ_DTC_SNAPSHOT if self._dtc_details else RadarDiagnosticState.CLEANUP
     elif self.state == RadarDiagnosticState.READ_DTC_SNAPSHOT:
       if len(payload) < 6:
         self._fail(RadarDiagnosticFailure.MALFORMED_RESPONSE, now)
@@ -376,7 +382,7 @@ class RadarDiagnosticProbe:
       self.failure = failure
     self._active_request = None
     self._response_assembler.reset()
-    self.state = RadarDiagnosticState.FAILED if self.state == RadarDiagnosticState.CLEANUP or not self._ecu_responsive else RadarDiagnosticState.CLEANUP
+    self.state = RadarDiagnosticState.FAILED if self.state == RadarDiagnosticState.CLEANUP else RadarDiagnosticState.CLEANUP
 
   def _output(self, can_sends: list[CanData] | tuple[CanData, ...]) -> RadarDiagnosticOutput:
     report = None

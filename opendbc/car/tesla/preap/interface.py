@@ -1,8 +1,9 @@
 import numpy as np
 
-from opendbc.car import get_safety_config, structs, STD_CARGO_KG
+from opendbc.car import get_safety_config, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.tesla.preap.nap_conf import nap_conf
+from opendbc.car.tesla.preap.safety_flags import TeslaPreAPSafetyFlags
 
 # Safety param flags matching tesla_preap.h (renumbered — LONG_CONTROL removed as dead code)
 PREAP_FLAG_ENABLE_PEDAL = 1
@@ -45,6 +46,7 @@ def get_preap_params(ret, fingerprint):
     flags |= PREAP_FLAG_ENABLE_PEDAL
   if radar_enabled:
     flags |= PREAP_FLAG_RADAR_EMULATION
+    flags |= int(TeslaPreAPSafetyFlags.RADAR_DIAGNOSTIC)
   if radar_behind_nosecone:
     flags |= PREAP_FLAG_RADAR_BEHIND_NOSECONE
 

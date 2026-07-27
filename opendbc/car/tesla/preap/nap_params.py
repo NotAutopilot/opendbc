@@ -26,6 +26,11 @@ class NAPParamKeys:
   RADAR_ENABLED = "NAPRadarEnabled"
   RADAR_BEHIND_NOSECONE = "NAPRadarBehindNosecone"
   RADAR_OFFSET = "NAPRadarOffset"
+  RADAR_DIAGNOSTIC_REQUEST = "NAPRadarDiagnosticCaptureRequest"
+  RADAR_DIAGNOSTIC_PENDING = "NAPRadarDiagnosticCapturePending"
+  RADAR_DIAGNOSTIC_ATTEMPTED = "NAPRadarDiagnosticAttempted"
+  RADAR_DIAGNOSTIC_CLEANUP_REQUIRED = "NAPRadarDiagnosticCleanupRequired"
+  RADAR_DIAGNOSTIC_REPORT = "NAPRadarDiagnosticCaptureReport"
 
   # iBooster / Braking
   IBOOSTER_ENABLED = "NAPiBoosterEnabled"
