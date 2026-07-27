@@ -50,6 +50,16 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     for did in DIDS:
       self.request(_did_request(did), b"\x62" + did.to_bytes(2, "big"))
 
+  def enter_read_did(self) -> None:
+    self.request(TESTER_PRESENT, b"\x7e\x00")
+    self.request(DEFAULT_SESSION, b"\x50\x01")
+    self.request(EXTENDED_SESSION, b"\x50\x03")
+    self.request(TESTER_PRESENT, b"\x7e\x00")
+
+  def cleanup(self) -> None:
+    assert self.tx(DEFAULT_SESSION)
+    self.single(b"\x50\x01")
+
   def multiframe(self, payload: bytes) -> None:
     self.rx(bytes([0x10 | (len(payload) >> 8), len(payload) & 0xFF]) + payload[:6])
     assert self.tx(FLOW_CONTROL)
@@ -65,9 +75,23 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     assert not self.tx(TESTER_PRESENT, addr=TX_ADDR + 1)
     assert not self.tx(TESTER_PRESENT, bus=0)
     assert not self.tx(TESTER_PRESENT[:-1])
-    assert self.tx(TESTER_PRESENT)
-    assert not self.tx(b"\x03\x2e\xf1\x90" + bytes(4))
-    assert self.tx(DEFAULT_SESSION)
+    for request in (
+      _did_request(0xF190),
+      _did_request(0xA023),
+      b"\x04\x31\x01\x0a\x03\x00\x00\x00",
+      b"\x02\x11\x01\x00\x00\x00\x00\x00",
+      b"\x01\x14\xff\x00\x00\x00\x00\x00",
+      b"\x03\x2e\xf1\x90\x00\x00\x00\x00",
+      b"\x03\x23\x00\x00\x00\x00\x00\x00",
+      b"\x03\x34\x00\x00\x00\x00\x00\x00",
+      b"\x03\x36\x00\x00\x00\x00\x00\x00",
+      b"\x03\x37\x00\x00\x00\x00\x00\x00",
+    ):
+      with self.subTest(request=request):
+        self.setUp()
+        self.enter_read_did()
+        assert not self.tx(request)
+        self.cleanup()
 
   def test_inventory_binds_and_bounds_detail_requests(self):
     self.enter_dtc_inventory()
@@ -80,13 +104,27 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     assert not self.tx(b"\x06\x19\x04" + codes[16] + b"\xff\x00")
     assert self.tx(DEFAULT_SESSION)
 
-  def test_isotp_flow_control_is_one_shot_and_detail_limit_is_enforced(self):
+  def test_valid_isotp_flow_control_is_one_shot(self):
     self.enter_dtc_inventory()
-    self.request(READ_DTCS, b"\x59\x02\xff\x12\x34\x56\x09")
-    assert self.tx(b"\x06\x19\x04\x12\x34\x56\xff\x00")
-    self.rx(b"\x11\x01\x59\x04\x12\x34\x56\x00")
+    payload = b"\x59\x02\xff\x12\x34\x56\x09\xab\xcd\xef\x08"
+    assert self.tx(READ_DTCS)
+    self.rx(b"\x10\x0b" + payload[:6])
+    assert self.tx(FLOW_CONTROL)
     assert not self.tx(FLOW_CONTROL)
-    assert self.tx(DEFAULT_SESSION)
+    self.cleanup()
+
+  def test_malformed_response_timeout_and_latched_controls_fail_closed(self):
+    assert self.tx(TESTER_PRESENT)
+    assert not self.tx(b"\x40\x00\x00\x00", addr=0x488, bus=0)
+    self.single(b"\x7e\x01")
+    self.cleanup()
+    assert not self.tx(TESTER_PRESENT)
+
+    self.setUp()
+    assert self.tx(TESTER_PRESENT)
+    self.safety.set_timer(30_000_000)
+    self.cleanup()
+    assert not self.tx(TESTER_PRESENT)
 
   def test_cleanup_releases_controls_and_consumes_the_attempt(self):
     self.enter_dtc_inventory()
@@ -95,6 +133,17 @@ class TestTeslaPreAPRadarDiagnostic(unittest.TestCase):
     self.safety.set_controls_allowed(True)
     assert self.tx(b"\x40\x00\x00\x00", addr=0x488, bus=0)
     assert not self.tx(TESTER_PRESENT)
+    assert not self.tx(DEFAULT_SESSION)
+
+  def test_idle_cleanup_is_one_shot_crash_recovery_only(self):
+    assert self.tx(DEFAULT_SESSION)
+    self.single(b"\x50\x01")
+    assert not self.tx(DEFAULT_SESSION)
+    assert not self.tx(TESTER_PRESENT)
+
+    self.setUp()
+    self.safety.set_controls_allowed(True)
+    assert not self.tx(DEFAULT_SESSION)
 
 
 if __name__ == "__main__":

@@ -183,8 +183,8 @@ class RadarDiagnosticProbe:
   MAX_DTC_DETAIL_RESPONSE_LENGTH = 256
   CLOCK_EPSILON = 1e-9
 
-  def __init__(self, identifiers: tuple[int, ...] = RADAR_IDENTITY_DIDS):
-    self.identifiers = identifiers
+  def __init__(self):
+    self.identifiers = RADAR_IDENTITY_DIDS
     self.state = RadarDiagnosticState.IDLE
     self.failure: RadarDiagnosticFailure | None = None
     self._response_assembler = RadarIsoTpResponseAssembler()

@@ -432,7 +432,8 @@ static bool preap_diag_tx_frame(const CANPacket_t *msg) {
         preap_diag_attempt_consumed = true;
         preap_diag_set_phase(PREAP_DIAG_AWAIT_TESTER);
         allowed = true;
-      } else if (!controls_allowed && is_cleanup) {
+      } else if (!controls_allowed && !preap_diag_attempt_consumed && is_cleanup) {
+        preap_diag_attempt_consumed = true;
         preap_diag_set_phase(PREAP_DIAG_AWAIT_CLEANUP);
         allowed = true;
       }
