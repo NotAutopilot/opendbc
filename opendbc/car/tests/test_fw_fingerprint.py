@@ -6,6 +6,8 @@ from collections import defaultdict
 from opendbc.car.can_definitions import CanData
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.structs import CarParams
+from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
+from opendbc.car.tesla.values import CAR as TESLA_CAR
 from opendbc.car.fingerprints import FW_VERSIONS
 from opendbc.car.fw_versions import FW_QUERY_CONFIGS, FUZZY_EXCLUDE_ECUS, VERSIONS, build_fw_dict, \
                                     match_fw_to_car, get_brand_ecu_matches, get_fw_versions, get_present_ecus
@@ -22,6 +24,19 @@ class TestFwFingerprint:
     candidates = list(candidates)
     assert len(candidates) == 1, f"got more than one candidate: {candidates}"
     assert candidates[0] == expected
+
+  def test_exact_match_does_not_include_preap_for_hyundai_sonata(self):
+    sonata_versions = VERSIONS["hyundai"][HYUNDAI_CAR.HYUNDAI_SONATA]
+    car_fw = [
+      CarFw(ecu=ecu, fwVersion=fw_versions[0], brand="hyundai", address=address,
+            subAddress=0 if sub_address is None else sub_address)
+      for (ecu, address, sub_address), fw_versions in sonata_versions.items()
+    ]
+
+    _, matches = match_fw_to_car(car_fw, "", allow_fuzzy=False)
+
+    assert HYUNDAI_CAR.HYUNDAI_SONATA in matches
+    assert TESLA_CAR.TESLA_MODEL_S_PREAP not in matches
 
   @pytest.mark.parametrize("brand, car_model, ecus, test_non_essential",
                            [(b, c, e[c], n) for b, e in VERSIONS.items() for c in e for n in (True, False)])
