@@ -69,10 +69,6 @@ FW_VERSIONS = {
       b'\x10\x00A',
     ],
   },
-  CAR.TESLA_MODEL_S_PREAP: {
-    # Pre-AP uses NAPForcePreAP param to bypass fingerprinting entirely.
-    # No FW_VERSIONS needed — matches tinkla behavior.
-  },
   CAR.TESLA_MODEL_S_HW2: {
     (Ecu.eps, 0x730, None): [
       b'\x10#\x01',
