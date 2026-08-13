@@ -333,8 +333,13 @@ void init_tests(void){
   // assumes autopark on safety mode init to avoid a fault. get rid of that for testing
   tesla_autopark = false;
 
-  ignition_can_cnt = 3U;
-  ignition_can_1hz_tick();
+  // Pre-AP 0x348 prev counters are static and survive a plain ignition_can/cnt
+  // reset. Clear them through the production 1Hz stale-gap seam (same 4 ticks
+  // as panda main after 2s of no CAN), then restore a fresh test counter.
+  ignition_can_cnt = 0U;
+  for (uint32_t i = 0U; i < 4U; i++) {
+    ignition_can_1hz_tick();
+  }
   ignition_can = false;
   ignition_can_cnt = 0U;
 

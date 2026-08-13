@@ -10,6 +10,10 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
   def setUp(self):
     self.safety = libsafety_py.libsafety
     self.safety.init_tests()
+    # Production stale-gap seam: leftover per-bus prev from a prior method
+    # (e.g. wraparound 15->0) must not complete a later lone 0x348 frame.
+    self._tick_stale()
+    self.safety.init_tests()
     self.packer = CANPackerSafety("tesla_preap")
 
   def _msg(self, counter, drive_rail, bus=0):
@@ -60,6 +64,14 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     self.assertFalse(self.safety.get_ignition_can())
 
   def test_malformed_length_rejected(self):
+    # Wraparound pair leaves prev=0, the leftover unittest ordering can keep
+    # from test_ignition_on_bus0_and_bus1. A later 8-byte counter=1 frame would
+    # complete that sequence unless the production timeout clears prev.
+    self.safety.ignition_can_hook(self._msg(15, 1))
+    self.safety.ignition_can_hook(self._msg(0, 1))
+    self.assertTrue(self.safety.get_ignition_can())
+    self._tick_stale()
+    self.assertFalse(self.safety.get_ignition_can())
     self.safety.ignition_can_hook(make_CANPacket(0x348, 0, bytes([1, 0, 0, 0])))
     self.safety.ignition_can_hook(make_CANPacket(0x348, 0, bytes([1, 0, 0, 0, 0, 0, 1, 0])))
     self.assertFalse(self.safety.get_ignition_can())
