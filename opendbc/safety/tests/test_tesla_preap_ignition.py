@@ -4,19 +4,11 @@ from opendbc.safety.tests.common import CANPackerSafety
 from opendbc.safety.tests.libsafety import libsafety_py
 from opendbc.safety.tests.libsafety.libsafety_py import make_CANPacket
 
-# Production 1Hz ignition stale-gap seam. Declare before the shared library is loaded.
-try:
-  libsafety_py.ffi.cdef("void ignition_can_1hz_tick(void);")
-except Exception:
-  pass
 
 
 class TestTeslaPreAPIgnition(unittest.TestCase):
   def setUp(self):
     self.safety = libsafety_py.libsafety
-    self.safety.init_tests()
-    for _ in range(4):
-      self.safety.ignition_can_1hz_tick()
     self.safety.init_tests()
     self.packer = CANPackerSafety("tesla_preap")
 

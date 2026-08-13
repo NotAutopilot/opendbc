@@ -333,6 +333,8 @@ void init_tests(void){
   // assumes autopark on safety mode init to avoid a fault. get rid of that for testing
   tesla_autopark = false;
 
+  ignition_can_cnt = 3U;
+  ignition_can_1hz_tick();
   ignition_can = false;
   ignition_can_cnt = 0U;
 

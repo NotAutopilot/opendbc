@@ -116,8 +116,8 @@ int get_honda_hw(void);
 
 void mutation_set_active_mutant(int id);
 int mutation_get_active_mutant(void);
-
 void ignition_can_hook(const CANPacket_t *msg);
+void ignition_can_1hz_tick(void);
 bool get_ignition_can(void);
 void set_ignition_can(bool c);
 
