@@ -152,7 +152,9 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values
     CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
     CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
-    apply_preap_hardware_snapshot(CP, CP_SP, hardware_snapshot_from_values(pedal_enabled=True, radar_enabled=True))
+    apply_preap_hardware_snapshot(
+      CP, CP_SP, hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=2, radar_enabled=True, radar_offset=0.0),
+    )
     CI = CarInterface(CP, CP_SP)
     self.assertTrue(CP.openpilotLongitudinalControl)
     self.assertFalse(CP.radarUnavailable)

@@ -156,6 +156,8 @@ def hardware_snapshot_from_values(
   del mads_main_cruise_allowed, mads_unified_engagement_mode
   pedal_present = _as_bool(pedal_enabled)
   pedal_bus_present = _value_present(pedal_bus)
+  if not pedal_bus_present:
+    pedal_present = False
   try:
     bus = int(pedal_bus) if pedal_bus_present else 2
   except (TypeError, ValueError):
@@ -171,10 +173,11 @@ def hardware_snapshot_from_values(
 
   radar_present = _as_bool(radar_enabled)
   nosecone = _as_bool(radar_behind_nosecone) if radar_present else False
-
   offset = _finite_number(radar_offset)
-  if offset is None:
+  if offset is None or not -2.0 <= offset <= 2.0:
     offset = 0.0
+    radar_present = False
+    nosecone = False
   mode = parse_engagement_mode(engagement_mode)
   main_allowed, uem = compatibility_from_mode(mode)
   return PreAPHardwareSnapshot(

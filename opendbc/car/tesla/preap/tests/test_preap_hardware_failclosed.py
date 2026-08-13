@@ -27,6 +27,7 @@ def _make_preap(snapshot=None):
 
 VALID_CALIB = dict(
   pedal_enabled=True,
+  pedal_bus=2,
   pedal_calib_done=True,
   pedal_calib_factor=0.035,
   pedal_calib_zero=0.25,
@@ -38,14 +39,18 @@ VALID_CALIB = dict(
 class TestPreAPHardwareFailClosed(unittest.TestCase):
   def test_unknown_booleans_are_false(self):
     for value in (b"false", "false", "yes", b"true", 2, b"\x01", "TRUE"):
-      snap = hardware_snapshot_from_values(pedal_enabled=value, radar_enabled=value, radar_behind_nosecone=value)
+      snap = hardware_snapshot_from_values(
+        pedal_enabled=value, pedal_bus=2, radar_enabled=value, radar_behind_nosecone=value, radar_offset=0.0,
+      )
       self.assertFalse(snap.pedal_present, msg=repr(value))
       self.assertFalse(snap.radar_present, msg=repr(value))
       self.assertFalse(snap.radar_behind_nosecone, msg=repr(value))
 
   def test_canonical_true_booleans(self):
     for value in (True, 1, "1", b"1"):
-      snap = hardware_snapshot_from_values(pedal_enabled=value, radar_enabled=value, radar_behind_nosecone=value)
+      snap = hardware_snapshot_from_values(
+        pedal_enabled=value, pedal_bus=2, radar_enabled=value, radar_behind_nosecone=value, radar_offset=0.0,
+      )
       self.assertTrue(snap.pedal_present, msg=repr(value))
       self.assertTrue(snap.radar_present, msg=repr(value))
       self.assertTrue(snap.radar_behind_nosecone, msg=repr(value))
@@ -56,7 +61,7 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
     self.assertFalse(bool(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL))
 
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(
-      pedal_enabled=True, pedal_calib_done=True, pedal_calib_factor=1.0,
+      pedal_enabled=True, pedal_bus=2, pedal_calib_done=True, pedal_calib_factor=1.0,
       pedal_calib_zero=0.0, pedal_calib_min=-3.0, pedal_calib_max=99.6,
     ))
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE))
@@ -65,7 +70,7 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
   def test_nonfinite_negative_calib_rejected(self):
     for factor in (float("nan"), float("inf"), float("-inf"), -0.035, 0.0, None):
       snap = hardware_snapshot_from_values(
-        pedal_enabled=True, pedal_calib_done=True, pedal_calib_factor=factor,
+        pedal_enabled=True, pedal_bus=2, pedal_calib_done=True, pedal_calib_factor=factor,
         pedal_calib_zero=0.25, pedal_calib_min=-3.0, pedal_calib_max=99.6,
       )
       self.assertFalse(snap.pedal_calib_available, msg=repr(factor))
@@ -74,6 +79,7 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
     for factor, available in ((1e-9, False), (1e-6, False), (1.000001e-6, True)):
       snapshot = hardware_snapshot_from_values(
         pedal_enabled=True,
+        pedal_bus=2,
         pedal_calib_done=True,
         pedal_calib_factor=factor,
         pedal_calib_zero=0.25,
@@ -82,16 +88,23 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
       )
       self.assertEqual(snapshot.pedal_calib_available, available, msg=repr(factor))
 
-  def test_radar_offset_is_finite_and_immutable(self):
-    self.assertEqual(hardware_snapshot_from_values(radar_offset=float("nan")).radar_offset, 0.0)
-    snapshot = hardware_snapshot_from_values(radar_enabled=True, radar_offset=1.25)
-    CP, CP_SP = _make_preap(snapshot)
-    self.assertFalse(CP.radarUnavailable)
-    self.assertAlmostEqual(CP_SP.radarOffset, 1.25)
+  def test_radar_offset_is_bounded_and_immutable(self):
+    for invalid_offset in (float("nan"), -2.0001, 2.0001, 1e30):
+      snapshot = hardware_snapshot_from_values(radar_enabled=True, radar_offset=invalid_offset)
+      CP, CP_SP = _make_preap(snapshot)
+      self.assertTrue(CP.radarUnavailable, msg=repr(invalid_offset))
+      self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_PRESENT), msg=repr(invalid_offset))
+      self.assertEqual(CP_SP.radarOffset, 0.0, msg=repr(invalid_offset))
+
+    for valid_offset in (-2.0, 1.25, 2.0):
+      snapshot = hardware_snapshot_from_values(radar_enabled=True, radar_offset=valid_offset)
+      CP, CP_SP = _make_preap(snapshot)
+      self.assertFalse(CP.radarUnavailable)
+      self.assertAlmostEqual(CP_SP.radarOffset, valid_offset)
 
   def test_valid_calib_and_radar_bits_on_nooutput(self):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(
-      **VALID_CALIB, radar_enabled=True, radar_behind_nosecone=True,
+      **VALID_CALIB, radar_enabled=True, radar_behind_nosecone=True, radar_offset=0.0,
     ))
     self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL)

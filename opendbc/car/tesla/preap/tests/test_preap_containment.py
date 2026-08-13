@@ -16,6 +16,7 @@ class TestPreAPContainment(unittest.TestCase):
     CI = CarInterface(CP, CP_SP)
     setup_interfaces(CI, CP, CP_SP, params_list=[{
       "NAPPedalEnabled": True,
+      "NAPPedalCanBus": 2,
       "NAPPedalCalibDone": True,
       "NAPPedalCalibFactor": 0.035,
       "NAPPedalCalibZero": 0.25,

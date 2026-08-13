@@ -51,7 +51,7 @@ class TestPreAPIdentity(unittest.TestCase):
 
   def test_pedal_and_radar_snapshots(self):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(
-      pedal_enabled=True, pedal_calib_done=True, pedal_calib_factor=0.035,
+      pedal_enabled=True, pedal_bus=2, pedal_calib_done=True, pedal_calib_factor=0.035,
       pedal_calib_zero=0.25, pedal_calib_min=-3.0, pedal_calib_max=99.6,
     ))
     self.assertTrue(CP.openpilotLongitudinalControl)
@@ -62,14 +62,14 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL)
     self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
 
-    CP, CP_SP = _make_preap(hardware_snapshot_from_values(radar_enabled=True, radar_behind_nosecone=True))
+    CP, CP_SP = _make_preap(hardware_snapshot_from_values(radar_enabled=True, radar_behind_nosecone=True, radar_offset=0.0))
     self.assertFalse(CP.radarUnavailable)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_PRESENT)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_NOSECONE)
 
   def test_invalid_config_grants_no_authority(self):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_calib_done=False))
-    self.assertTrue(CP.openpilotLongitudinalControl)  # pedal present
+    self.assertFalse(CP.openpilotLongitudinalControl)
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE))
 
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled="0", radar_enabled="", radar_behind_nosecone=True))
@@ -119,6 +119,7 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertTrue(CP.radarUnavailable)
     setup_interfaces(CI, CP, CP_SP, params_list=[
       {"NAPPedalEnabled": True, "NAPPedalCalibDone": True, "NAPPedalCalibFactor": 0.035,
+       "NAPPedalCanBus": 2,
        "NAPPedalCalibZero": 0.25, "NAPPedalCalibMin": -3.0, "NAPPedalCalibMax": 99.6,
        "NAPRadarEnabled": True, "NAPRadarOffset": 1.25, "NAPLateralEngagementMode": 1},
     ])
@@ -141,8 +142,7 @@ class TestPreAPIdentity(unittest.TestCase):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=2))
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO))
     self.assertEqual(pedal_bus_from_cp_sp(CP_SP), 2)
-
-    for invalid_bus in (7, "nope"):
+    for invalid_bus in (None, 7, "nope"):
       snapshot = hardware_snapshot_from_values(
         pedal_enabled=True,
         pedal_bus=invalid_bus,
