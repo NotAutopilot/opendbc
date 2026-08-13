@@ -2,6 +2,7 @@ from opendbc.can import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.interfaces import RadarInterfaceBase
 from opendbc.car.tesla.values import DBC
+from opendbc.car.tesla.preap.boot import is_preap_platform
 
 RADAR_START_ADDR = 0x410
 RADAR_MSG_COUNT = 80  # 40 points * 2 messages each
@@ -24,6 +25,13 @@ def get_radar_can_parser(CP):
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
+    if is_preap_platform(CP):
+      # Task 2: no Bosch parse and no radar-gateway TX.
+      self.radar_off_can = True
+      self.rcp = None
+      self.updated_messages = set()
+      self.trigger_msg = None
+      return
     self.updated_messages = set()
     self.trigger_msg = RADAR_START_ADDR + RADAR_MSG_COUNT - 1
 

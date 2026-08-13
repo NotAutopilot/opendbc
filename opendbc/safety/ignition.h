@@ -68,6 +68,20 @@ void ignition_can_hook(const CANPacket_t *msg) {
     }
   }
 
+  // Tesla Pre-AP Model S: trusted GTW_status 0x348 on buses 0 and 1.
+  // GTW_statusCounter is Motorola start-bit 51 / 4 bits = data[6] low nibble.
+  // GTW_driveRailReq is data[0] bit 0. Repeated or broken counters are rejected.
+  if (((msg->bus == 0U) || (msg->bus == 1U)) && (msg->addr == 0x348U) && (GET_LEN(msg) == 8)) {
+    int counter = msg->data[6] & 0xFU;
+
+    static int prev_counter_tesla_preap = -1;
+    if ((counter == ((prev_counter_tesla_preap + 1) % 16)) && (prev_counter_tesla_preap != -1)) {
+      ignition_can = (msg->data[0] & 0x1U) != 0U;
+      ignition_can_cnt = 0U;
+    }
+    prev_counter_tesla_preap = counter;
+  }
+
   // TODO: this is too loose, Teslas have 0x222
   // body v2 exception
   // if (((msg->bus == 0U) || (msg->bus == 2U)) && (msg->addr == 0x222U)) {

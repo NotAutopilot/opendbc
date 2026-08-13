@@ -5,6 +5,7 @@ from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.tesla.teslacan import TeslaCAN
 from opendbc.car.tesla.values import CarControllerParams
+from opendbc.car.tesla.preap.boot import is_preap_platform
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.sunnypilot.car.tesla.coop_steering import CoopSteeringCarController
 
@@ -28,6 +29,9 @@ class CarController(CarControllerBase, CoopSteeringCarController):
     self.VM = VehicleModel(get_safety_CP())
 
   def update(self, CC, CC_SP, CS, now_nanos):
+    if is_preap_platform(self.CP):
+      self.frame += 1
+      return CC.actuators, []
     CoopSteeringCarController.update(self, self.CP_SP)
     actuators = CC.actuators
     can_sends = []

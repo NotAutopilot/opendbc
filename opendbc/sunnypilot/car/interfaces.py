@@ -20,6 +20,7 @@ from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuni
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
+from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values, is_preap_platform
 from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
 
@@ -85,6 +86,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   params_dict = {k: v for param in params_list for k, v in param.items()}
 
   _initialize_custom_longitudinal_tuning(CI, CP, CP_SP, params_dict)
+  _initialize_preap_boot(CP, CP_SP, params_dict)
   _initialize_coop_steering(CP, CP_SP, params_dict)
   _initialize_tesla_mads_screen_button(CP, CP_SP, params_dict)
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
@@ -106,10 +108,34 @@ def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: str
   _ = CI.get_longitudinal_tuning_sp(CP, CP_SP)
 
 
+def _initialize_preap_boot(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
+                           params_dict: dict[str, str]) -> None:
+  if not is_preap_platform(CP):
+    return
+  snapshot = hardware_snapshot_from_values(
+    pedal_enabled=params_dict.get("NAPPedalEnabled"),
+    pedal_bus=params_dict.get("NAPPedalCanBus"),
+    pedal_calib_done=params_dict.get("NAPPedalCalibDone"),
+    pedal_calib_factor=params_dict.get("NAPPedalCalibFactor"),
+    radar_enabled=params_dict.get("NAPRadarEnabled"),
+    radar_behind_nosecone=params_dict.get("NAPRadarBehindNosecone"),
+    engagement_mode=params_dict.get("NAPLateralEngagementMode"),
+    mads_main_cruise_allowed=params_dict.get("MadsMainCruiseAllowed"),
+    mads_unified_engagement_mode=params_dict.get("MadsUnifiedEngagementMode"),
+    mads_steering_mode=params_dict.get("MadsSteeringMode"),
+  )
+  apply_preap_hardware_snapshot(CP, CP_SP, snapshot)
+
+
 def _initialize_coop_steering(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
                               params_dict: dict[str, str]) -> None:
   if CP.brand == 'tesla':
-    coop_steering = int(params_dict.get("TeslaCoopSteering", 0)) == 1
+    # Version 1: teslaCoopSteeringAvailable is the only gate. Pre-AP leaves it false
+    # so a stale TeslaCoopSteering param cannot enable cooperative steering.
+    if getattr(CP_SP, "madsCapabilityContractVersion", 0) >= 1 and not CP_SP.teslaCoopSteeringAvailable:
+      CP_SP.flags &= ~int(TeslaFlagsSP.COOP_STEERING)
+      return
+    coop_steering = int(params_dict.get("TeslaCoopSteering", 0) or 0) == 1
     if coop_steering:
       CP_SP.flags |= TeslaFlagsSP.COOP_STEERING.value
 

@@ -67,6 +67,15 @@ class CAR(Platforms):
     [TeslaCarHW4ModelSXDocs("Tesla Model X (with HW4) 2024")],
     CarSpecs(mass=2495., wheelbase=2.960, steerRatio=12.0),
   )
+  TESLA_MODEL_S_PREAP = TeslaPlatformConfig(
+    [CarDocs("Tesla Model S (Pre-AP) 2012-14", "All", car_parts=CarParts.common([CarHarness.tesla_a]))],
+    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
+    {
+      Bus.chassis: 'tesla_preap',
+      Bus.party: 'tesla_preap',
+      Bus.pt: 'tesla_preap',
+    },
+  )
 
 
 FW_QUERY_CONFIG = FwQueryConfig(
@@ -136,6 +145,21 @@ class TeslaFlags(IntFlag):
   FSD_14 = 2
   MISSING_DAS_SETTINGS = 4
 
+
+class CruiseButtons:
+  """Cruise stalk values from STW_ACTN_RQ.SpdCtrlLvr_Stat."""
+  IDLE = 0
+  CANCEL = 1
+  MAIN = 2
+  SET_ACCEL = 16
+  RES_ACCEL = 16
+  RES_ACCEL_2ND = 4
+  DECEL_SET = 32
+  DECEL_2ND = 8
+
+
+# Shared host/panda constant. Strict: 399 ms second pull engages, 400 ms does not.
+STALK_DOUBLE_PULL_MS = 400
 
 DBC = CAR.create_dbc_map()
 

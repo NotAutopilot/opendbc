@@ -6,6 +6,11 @@ from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, 
 from opendbc.car.tesla.radar_interface import RadarInterface, RADAR_START_ADDR
 
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP, TeslaSafetyFlagsSP
+from opendbc.car.tesla.preap.carcontroller import DisabledCarController
+from opendbc.car.tesla.preap.carstate import PreAPCarState
+from opendbc.car.tesla.preap.interface import get_preap_params, get_preap_params_sp
+from opendbc.car.tesla.preap.boot import is_preap_platform
+from opendbc.car.interfaces import RadarInterfaceBase
 
 
 class CarInterface(CarInterfaceBase):
@@ -13,8 +18,18 @@ class CarInterface(CarInterfaceBase):
   CarController = CarController
   RadarInterface = RadarInterface
 
+  def __init__(self, CP, CP_SP):
+    if is_preap_platform(CP):
+      self.CarState = PreAPCarState
+      self.CarController = DisabledCarController
+      self.RadarInterface = RadarInterfaceBase
+    super().__init__(CP, CP_SP)
+
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
+    if is_preap_platform(candidate):
+      return get_preap_params(ret, fingerprint)
+
     ret.brand = "tesla"
 
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.tesla)]
@@ -53,6 +68,8 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
                      car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
+    if is_preap_platform(candidate):
+      return get_preap_params_sp(ret)
 
     stock_cp.enableBsm = True
 

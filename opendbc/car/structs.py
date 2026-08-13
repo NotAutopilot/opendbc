@@ -65,6 +65,39 @@ class CarParamsSP:
 
   neuralNetworkLateralControl: 'CarParamsSP.NeuralNetworkLateralControl' = field(default_factory=lambda: CarParamsSP.NeuralNetworkLateralControl())
 
+  # Capability contract v1 fields. Pin capnp ordinals @6-@15; do not reuse @0-@5.
+  madsFullSettingsAvailable: bool = auto_field()
+  madsMainCruiseInputKind: 'CarParamsSP.MadsMainCruiseInputKind' = field(
+    default_factory=lambda: CarParamsSP.MadsMainCruiseInputKind.none
+  )
+  madsMainCruiseAllowed: bool = auto_field()
+  madsRequired: bool = auto_field()
+  teslaCoopSteeringAvailable: bool = auto_field()
+  madsUnifiedEngagementMode: bool = auto_field()
+  madsSteeringMode: 'CarParamsSP.MadsSteeringMode' = field(
+    default_factory=lambda: CarParamsSP.MadsSteeringMode.remainActive
+  )
+  madsCapabilityContractVersion: int = auto_field()
+  madsHandsOnPauseAvailable: bool = auto_field()
+  preapLateralEngagementMode: 'CarParamsSP.PreapLateralEngagementMode' = field(
+    default_factory=lambda: CarParamsSP.PreapLateralEngagementMode.independent
+  )
+
+  class MadsMainCruiseInputKind(StrEnum):
+    none = auto()
+    stateful = auto()
+    momentary = auto()
+
+  class MadsSteeringMode(StrEnum):
+    remainActive = auto()
+    pause = auto()
+    disengage = auto()
+
+  class PreapLateralEngagementMode(StrEnum):
+    independent = auto()
+    cruiseCoupled = auto()
+    longitudinalOnly = auto()
+
   @auto_dataclass
   class NeuralNetworkLateralControl:
     model: 'CarParamsSP.NeuralNetworkLateralControl.Model' = field(default_factory=lambda: CarParamsSP.NeuralNetworkLateralControl.Model())
@@ -166,3 +199,22 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+  # Pre-AP intent outbox. Pin capnp ordinals @1-@4; speedLimit remains @0.
+  preapLateralIntent: 'CarStateSP.PreapLateralIntent' = field(
+    default_factory=lambda: CarStateSP.PreapLateralIntent.none
+  )
+  preapLongitudinalIntent: 'CarStateSP.PreapLongitudinalIntent' = field(
+    default_factory=lambda: CarStateSP.PreapLongitudinalIntent.none
+  )
+  preapIntentSequence: int = auto_field()
+  preapIntentEpoch: int = auto_field()
+
+  class PreapLateralIntent(StrEnum):
+    none = auto()
+    mainCruiseRequest = auto()
+    forceDisable = auto()
+
+  class PreapLongitudinalIntent(StrEnum):
+    none = auto()
+    enable = auto()
+    disable = auto()
