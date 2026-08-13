@@ -70,6 +70,25 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
       )
       self.assertFalse(snap.pedal_calib_available, msg=repr(factor))
 
+  def test_calibration_factor_threshold(self):
+    for factor, available in ((1e-9, False), (1e-6, False), (1.000001e-6, True)):
+      snapshot = hardware_snapshot_from_values(
+        pedal_enabled=True,
+        pedal_calib_done=True,
+        pedal_calib_factor=factor,
+        pedal_calib_zero=0.25,
+        pedal_calib_min=-3.0,
+        pedal_calib_max=99.6,
+      )
+      self.assertEqual(snapshot.pedal_calib_available, available, msg=repr(factor))
+
+  def test_radar_offset_is_finite_and_immutable(self):
+    self.assertEqual(hardware_snapshot_from_values(radar_offset=float("nan")).radar_offset, 0.0)
+    snapshot = hardware_snapshot_from_values(radar_enabled=True, radar_offset=1.25)
+    CP, CP_SP = _make_preap(snapshot)
+    self.assertFalse(CP.radarUnavailable)
+    self.assertAlmostEqual(CP_SP.radarOffset, 1.25)
+
   def test_valid_calib_and_radar_bits_on_nooutput(self):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(
       **VALID_CALIB, radar_enabled=True, radar_behind_nosecone=True,
@@ -94,7 +113,10 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
   def test_double_pull_strict_399_400_401(self):
     self.assertEqual(STALK_DOUBLE_PULL_MS, 400)
     self.assertEqual(VALUES_DOUBLE_PULL, STALK_DOUBLE_PULL_MS)
-    engaged = lambda dt: dt < STALK_DOUBLE_PULL_MS
+
+    def engaged(dt):
+      return dt < STALK_DOUBLE_PULL_MS
+
     self.assertTrue(engaged(399))
     self.assertFalse(engaged(400))
     self.assertFalse(engaged(401))

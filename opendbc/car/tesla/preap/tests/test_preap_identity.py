@@ -120,18 +120,20 @@ class TestPreAPIdentity(unittest.TestCase):
     setup_interfaces(CI, CP, CP_SP, params_list=[
       {"NAPPedalEnabled": True, "NAPPedalCalibDone": True, "NAPPedalCalibFactor": 0.035,
        "NAPPedalCalibZero": 0.25, "NAPPedalCalibMin": -3.0, "NAPPedalCalibMax": 99.6,
-       "NAPRadarEnabled": True, "NAPLateralEngagementMode": 1},
+       "NAPRadarEnabled": True, "NAPRadarOffset": 1.25, "NAPLateralEngagementMode": 1},
     ])
     self.assertTrue(CP.openpilotLongitudinalControl)
     self.assertFalse(CP.radarUnavailable)
     self.assertEqual(CP_SP.preapLateralEngagementMode, structs.CarParamsSP.PreapLateralEngagementMode.cruiseCoupled)
+    self.assertAlmostEqual(CP_SP.radarOffset, 1.25)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_PRESENT)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_PRESENT)
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS))
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.COOP_STEERING))
 
-  def test_pedal_bus_zero_and_invalid_default(self):
+  def test_pedal_bus_zero_and_invalid_fail_closed(self):
     from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp
+    from opendbc.car.tesla.preap.constants import PREAP_FLAG_ENABLE_PEDAL
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=0))
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO)
     self.assertEqual(pedal_bus_from_cp_sp(CP_SP), 0)
@@ -140,10 +142,23 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO))
     self.assertEqual(pedal_bus_from_cp_sp(CP_SP), 2)
 
-    snap = hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=7)
-    self.assertEqual(snap.pedal_bus, 2)
-    snap = hardware_snapshot_from_values(pedal_enabled=True, pedal_bus="nope")
-    self.assertEqual(snap.pedal_bus, 2)
+    for invalid_bus in (7, "nope"):
+      snapshot = hardware_snapshot_from_values(
+        pedal_enabled=True,
+        pedal_bus=invalid_bus,
+        pedal_calib_done=True,
+        pedal_calib_factor=0.035,
+        pedal_calib_zero=0.25,
+        pedal_calib_min=-3.0,
+        pedal_calib_max=99.6,
+      )
+      self.assertFalse(snapshot.pedal_present)
+      self.assertFalse(snapshot.pedal_calib_available)
+      CP, CP_SP = _make_preap(snapshot)
+      self.assertFalse(CP.openpilotLongitudinalControl)
+      self.assertFalse(CP_SP.enableGasInterceptor)
+      self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_PRESENT))
+      self.assertFalse(bool(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL))
 
   def test_stale_coop_and_touchscreen_cannot_enable_on_preap(self):
     from opendbc.sunnypilot.car.interfaces import setup_interfaces

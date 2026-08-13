@@ -47,6 +47,7 @@ class PreAPHardwareSnapshot:
   pedal_calib_available: bool = False
   radar_present: bool = False
   radar_behind_nosecone: bool = False
+  radar_offset: float = 0.0
   engagement_mode: int = PREAP_MODE_INDEPENDENT
   mads_main_cruise_allowed: bool = False
   mads_unified_engagement_mode: bool = False
@@ -125,7 +126,7 @@ def _pedal_calib_available(pedal_present: bool, pedal_calib_done, pedal_calib_fa
   max_v = _finite_number(pedal_calib_max)
   if factor is None or zero is None or min_v is None or max_v is None:
     return False
-  if factor <= 1e-12:
+  if factor <= 1e-6:
     return False
   if min_v >= max_v:
     return False
@@ -145,6 +146,7 @@ def hardware_snapshot_from_values(
   pedal_calib_max=None,
   radar_enabled=None,
   radar_behind_nosecone=None,
+  radar_offset=None,
   engagement_mode=None,
   mads_main_cruise_allowed=None,
   mads_unified_engagement_mode=None,
@@ -153,12 +155,15 @@ def hardware_snapshot_from_values(
   """Missing or invalid hardware grants no authority."""
   del mads_main_cruise_allowed, mads_unified_engagement_mode
   pedal_present = _as_bool(pedal_enabled)
+  pedal_bus_present = _value_present(pedal_bus)
   try:
-    bus = int(pedal_bus) if _value_present(pedal_bus) else 2
+    bus = int(pedal_bus) if pedal_bus_present else 2
   except (TypeError, ValueError):
     bus = 2
+    pedal_present = False
   if bus not in (0, 2):
     bus = 2
+    pedal_present = False
 
   pedal_calib_available = _pedal_calib_available(
     pedal_present, pedal_calib_done, pedal_calib_factor, pedal_calib_zero, pedal_calib_min, pedal_calib_max,
@@ -167,6 +172,9 @@ def hardware_snapshot_from_values(
   radar_present = _as_bool(radar_enabled)
   nosecone = _as_bool(radar_behind_nosecone) if radar_present else False
 
+  offset = _finite_number(radar_offset)
+  if offset is None:
+    offset = 0.0
   mode = parse_engagement_mode(engagement_mode)
   main_allowed, uem = compatibility_from_mode(mode)
   return PreAPHardwareSnapshot(
@@ -175,6 +183,7 @@ def hardware_snapshot_from_values(
     pedal_calib_available=pedal_calib_available,
     radar_present=radar_present,
     radar_behind_nosecone=nosecone,
+    radar_offset=offset,
     engagement_mode=mode,
     mads_main_cruise_allowed=main_allowed,
     mads_unified_engagement_mode=uem,
@@ -193,8 +202,7 @@ def apply_preap_identity(ret: structs.CarParams) -> structs.CarParams:
   ret.openpilotLongitudinalControl = False
   ret.pcmCruise = True
   ret.radarUnavailable = True
-  # teslaPreap safety mode is registered in a later task. Stay silent/noOutput so
-  # this task cannot actuate.
+  # Pre-AP remains silent until its dedicated safety mode is registered.
   ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.noOutput)]
   return ret
 
@@ -226,6 +234,7 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
   CP.radarUnavailable = not snapshot.radar_present
   CP_SP.enableGasInterceptor = bool(snapshot.pedal_present)
 
+  CP_SP.radarOffset = snapshot.radar_offset
   # Hardware flags live on CP_SP.flags so they stay out of modern Tesla CP.flags space.
   preap_hw = (TeslaFlagsSP.PREAP_PEDAL_PRESENT | TeslaFlagsSP.PREAP_RADAR_PRESENT |
               TeslaFlagsSP.PREAP_RADAR_NOSECONE | TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE |

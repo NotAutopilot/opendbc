@@ -1,9 +1,10 @@
 import unittest
+from opendbc.can.dbc import DBC
+from opendbc.car.tesla.teslacan import tesla_checksum
 
 from opendbc.safety.tests.common import CANPackerSafety
 from opendbc.safety.tests.libsafety import libsafety_py
 from opendbc.safety.tests.libsafety.libsafety_py import make_CANPacket
-
 
 
 class TestTeslaPreAPIgnition(unittest.TestCase):
@@ -16,6 +17,14 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     return self.packer.make_can_msg_safety(
       "GTW_status", bus, {"GTW_statusCounter": counter, "GTW_driveRailReq": int(drive_rail)},
     )
+
+  def _msg_with_bad_checksum(self, counter, drive_rail, bus=0):
+    addr, dat, bus = self.packer.make_can_msg(
+      "GTW_status", bus, {"GTW_statusCounter": counter, "GTW_driveRailReq": int(drive_rail)},
+    )
+    dat = bytearray(dat)
+    dat[7] ^= 0xFF
+    return make_CANPacket(addr, bus, bytes(dat))
 
   def _tick_stale(self, n=4):
     for _ in range(n):
@@ -59,6 +68,18 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     self.safety.ignition_can_hook(self._msg(5, 1))
     self.assertFalse(self.safety.get_ignition_can())
 
+  def test_bad_checksum_does_not_seed_or_assert(self):
+    self.safety.ignition_can_hook(self._msg_with_bad_checksum(0, 1))
+    self.safety.ignition_can_hook(self._msg(1, 1))
+    self.assertFalse(self.safety.get_ignition_can())
+
+    self.safety.ignition_can_hook(self._msg(2, 1))
+    self.assertTrue(self.safety.get_ignition_can())
+    self.safety.set_ignition_can(False)
+    self.safety.ignition_can_hook(self._msg_with_bad_checksum(3, 1))
+    self.safety.ignition_can_hook(self._msg(4, 1))
+    self.assertFalse(self.safety.get_ignition_can())
+
   def test_malformed_length_rejected(self):
     # Wraparound pair leaves prev=0, the leftover unittest ordering can keep
     # from test_ignition_on_bus0_and_bus1. A later 8-byte counter=1 frame would
@@ -97,6 +118,8 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     self.assertEqual(len(dat), 8)
     self.assertEqual(dat[6] & 0xF, 7)
     self.assertEqual(dat[0] & 0x1, 1)
+    checksum_signal = DBC("tesla_preap").msgs[addr].sigs["GTW_statusChecksum"]
+    self.assertEqual(dat[7], tesla_checksum(addr, checksum_signal, bytearray(dat)))
     addr, dat, bus = self.packer.make_can_msg("GTW_status", 0, {"GTW_statusCounter": 0, "GTW_driveRailReq": 0})
     self.assertEqual(dat[0] & 0x1, 0)
 

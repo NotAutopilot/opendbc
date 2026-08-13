@@ -65,7 +65,7 @@ class CarParamsSP:
 
   neuralNetworkLateralControl: 'CarParamsSP.NeuralNetworkLateralControl' = field(default_factory=lambda: CarParamsSP.NeuralNetworkLateralControl())
 
-  # Capability contract v1 fields. Pin capnp ordinals @6-@15; do not reuse @0-@5.
+  # Capability contract v1 fields. Pin capnp ordinals @6-@16; do not reuse @0-@5.
   madsFullSettingsAvailable: bool = auto_field()
   madsMainCruiseInputKind: 'CarParamsSP.MadsMainCruiseInputKind' = field(
     default_factory=lambda: CarParamsSP.MadsMainCruiseInputKind.none
@@ -82,6 +82,7 @@ class CarParamsSP:
   preapLateralEngagementMode: 'CarParamsSP.PreapLateralEngagementMode' = field(
     default_factory=lambda: CarParamsSP.PreapLateralEngagementMode.independent
   )
+  radarOffset: float = auto_field()
 
   class MadsMainCruiseInputKind(StrEnum):
     none = auto()

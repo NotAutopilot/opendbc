@@ -30,6 +30,7 @@ class PreAPCarState(CarStateBase):
     cp_pt = can_parsers[Bus.pt]
     ret = structs.CarState()
     ret_sp = structs.CarStateSP()
+    ret.blockPcmEnable = True
 
     ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)

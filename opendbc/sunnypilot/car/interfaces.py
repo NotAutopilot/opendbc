@@ -128,6 +128,7 @@ def _initialize_preap_boot(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
     pedal_calib_max=params_dict.get("NAPPedalCalibMax"),
     radar_enabled=params_dict.get("NAPRadarEnabled"),
     radar_behind_nosecone=params_dict.get("NAPRadarBehindNosecone"),
+    radar_offset=params_dict.get("NAPRadarOffset"),
     engagement_mode=params_dict.get("NAPLateralEngagementMode"),
     mads_steering_mode=params_dict.get("MadsSteeringMode"),
   )

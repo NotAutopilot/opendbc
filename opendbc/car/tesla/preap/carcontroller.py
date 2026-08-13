@@ -1,4 +1,4 @@
-"""Task 2 keeps Pre-AP actuation and radar-gateway TX disabled."""
+"""Pre-AP actuation and radar-gateway transmission remain disabled."""
 from opendbc.car.interfaces import CarControllerBase
 
 

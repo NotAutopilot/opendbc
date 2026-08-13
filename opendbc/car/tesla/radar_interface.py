@@ -26,7 +26,7 @@ class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
     if is_preap_platform(CP):
-      # Task 2: no Bosch parse and no radar-gateway TX.
+      # Pre-AP has no Bosch parsing or radar-gateway transmission in this configuration.
       self.radar_off_can = True
       self.rcp = None
       self.updated_messages = set()

@@ -7,7 +7,7 @@ PEDAL_DI_PRESSED = 2
 
 HANDS_ON_DISENGAGE_LEVEL = 2
 
-# Host-side Pre-AP safety-param encoding consumed by panda in a later task.
+# Host-side Pre-AP safety-param encoding reserved for the dedicated panda safety mode.
 # Bits 0-1 are the engagement-mode enum; 3 is invalid and must fail closed.
 PREAP_MODE_MASK = 0x3
 PREAP_MODE_INDEPENDENT = 0
@@ -15,8 +15,8 @@ PREAP_MODE_CRUISE_COUPLED = 1
 PREAP_MODE_LONGITUDINAL_ONLY = 2
 PREAP_MODE_INVALID = 3
 
-# Hardware capability bits snapshotted into CarParams.safetyConfigs[0].safetyParam
-# for later teslaPreap registration. Task 2 does not enable that safety mode.
+# Hardware capability bits are snapshotted into CarParams.safetyConfigs[0].safetyParam
+# while noOutput remains active.
 # Allocation is noncolliding with TeslaSafetyFlags.LONG_CONTROL (bit 0) and FSD_14 (bit 1).
 PREAP_FLAG_ENABLE_PEDAL = 1 << 2
 PREAP_FLAG_RADAR_EMULATION = 1 << 3

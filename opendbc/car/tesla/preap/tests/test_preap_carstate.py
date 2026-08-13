@@ -11,6 +11,12 @@ def _packet(name, values, bus=0):
   addr, dat, bus = CANPacker("tesla_preap").make_can_msg(name, bus, values)
   return [(1, [CanData(addr, dat, bus)])]
 
+def _packet_with_bad_checksum(name, values, bus=0):
+  addr, dat, bus = CANPacker("tesla_preap").make_can_msg(name, bus, values)
+  corrupted = bytearray(dat)
+  corrupted[-1] ^= 0xFF
+  return [(1, [CanData(addr, bytes(corrupted), bus)])]
+
 
 def _make_ci():
   CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
@@ -24,8 +30,18 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     for _ in range(10):
       CS, CS_SP = CI.update([])
       self.assertFalse(CS.seatbeltUnlatched)
+      self.assertTrue(CS.blockPcmEnable)
       self.assertEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.none)
       self.assertEqual(CS_SP.preapIntentSequence, 0)
+
+  def test_bad_checksum_does_not_update_cruise_state(self):
+    CI = _make_ci()
+    CI.update(_packet("DI_state", {"DI_stateCounter": 0, "DI_cruiseState": 0}))
+    CS, _ = CI.update(_packet_with_bad_checksum(
+      "DI_state", {"DI_stateCounter": 1, "DI_cruiseState": 2},
+    ))
+    self.assertFalse(CS.cruiseState.enabled)
+    self.assertTrue(CS.blockPcmEnable)
 
   def test_speed_brake_gear_doors(self):
     CI = _make_ci()

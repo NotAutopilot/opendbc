@@ -9,11 +9,11 @@ bool ignition_can = false;
 uint32_t ignition_can_cnt = 0U;
 
 // Pre-AP 0x348 sequence state is independent per accepted bus and is cleared
-// after the production 2s ignition_can stale gap.
+// by the production ignition CAN stale lease.
 static int prev_counter_tesla_preap[2] = {-1, -1};
 
 void ignition_can_1hz_tick(void) {
-  // Same production timing as panda main: clear ignition after 2s of no CAN.
+  // Keep the production ignition CAN stale lease shared across platforms.
   if (ignition_can_cnt > 2U) {
     ignition_can = false;
     prev_counter_tesla_preap[0] = -1;
@@ -84,8 +84,16 @@ void ignition_can_hook(const CANPacket_t *msg) {
 
   // Tesla Pre-AP Model S: trusted GTW_status 0x348 on buses 0 and 1.
   // GTW_statusCounter is Motorola start-bit 51 / 4 bits = data[6] low nibble.
-  // GTW_driveRailReq is data[0] bit 0. Repeated or broken counters are rejected.
+  // GTW_driveRailReq is data[0] bit 0. Invalid frames leave sequence state untouched.
   if (((msg->bus == 0U) || (msg->bus == 1U)) && (msg->addr == 0x348U) && (GET_LEN(msg) == 8)) {
+    uint8_t checksum = 0x4BU;
+    for (int i = 0; i < 7; i++) {
+      checksum += msg->data[i];
+    }
+    if (msg->data[7] != checksum) {
+      return;
+    }
+
     // Stale-gap counter reset lives in ignition_can_1hz_tick. A per-frame reset
     // while cnt stays >2 would prevent any post-timeout pair from completing.
     const uint8_t bus_idx = msg->bus;
