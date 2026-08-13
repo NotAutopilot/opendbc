@@ -13,6 +13,24 @@ from opendbc.car.tesla.preap.boot import is_preap_platform
 from opendbc.car.interfaces import RadarInterfaceBase
 
 
+def _apply_modern_tesla_v1_capabilities(ret: structs.CarParamsSP) -> structs.CarParamsSP:
+  """Version-1 capability overlay for non-Pre-AP Tesla.
+
+  madsFullSettingsAvailable follows the version-0 HAS_VEHICLE_BUS hardware path here;
+  the TeslaMadsScreenButton refinement is applied later in setup_interfaces.
+  """
+  ret.madsCapabilityContractVersion = 1
+  ret.madsRequired = False
+  ret.teslaCoopSteeringAvailable = True
+  ret.madsMainCruiseInputKind = structs.CarParamsSP.MadsMainCruiseInputKind.none
+  ret.madsFullSettingsAvailable = bool(ret.flags & TeslaFlagsSP.HAS_VEHICLE_BUS)
+  ret.madsHandsOnPauseAvailable = False
+  ret.preapLateralEngagementMode = structs.CarParamsSP.PreapLateralEngagementMode.independent
+  if not ret.madsFullSettingsAvailable:
+    ret.madsSteeringMode = structs.CarParamsSP.MadsSteeringMode.disengage
+  return ret
+
+
 class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
@@ -80,4 +98,4 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= TeslaFlagsSP.HAS_VEHICLE_BUS.value
       ret.safetyParam |= TeslaSafetyFlagsSP.HAS_VEHICLE_BUS
 
-    return ret
+    return _apply_modern_tesla_v1_capabilities(ret)

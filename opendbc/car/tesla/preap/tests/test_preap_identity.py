@@ -77,16 +77,34 @@ class TestPreAPIdentity(unittest.TestCase):
     snap = hardware_snapshot_from_values(engagement_mode=3)
     self.assertEqual(snap.engagement_mode, 0)
 
-  def test_modern_tesla_untouched(self):
+  def test_modern_tesla_v1_overlay_without_vehicle_bus(self):
     CP = CarInterface.get_params(CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
     self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.tesla)
     self.assertNotEqual(CP.carFingerprint, PREAP_PLATFORM)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
+    self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS))
+    self.assertEqual(CP_SP.madsCapabilityContractVersion, 1)
+    self.assertFalse(CP_SP.madsRequired)
+    self.assertTrue(CP_SP.teslaCoopSteeringAvailable)
+    self.assertEqual(CP_SP.madsMainCruiseInputKind, structs.CarParamsSP.MadsMainCruiseInputKind.none)
+    self.assertFalse(CP_SP.madsFullSettingsAvailable)
+    self.assertFalse(CP_SP.madsHandsOnPauseAvailable)
+    self.assertEqual(CP_SP.preapLateralEngagementMode, structs.CarParamsSP.PreapLateralEngagementMode.independent)
+    self.assertEqual(CP_SP.madsSteeringMode, structs.CarParamsSP.MadsSteeringMode.disengage)
+
+  def test_modern_tesla_v1_overlay_with_vehicle_bus(self):
+    CP = CarInterface.get_params(CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
     finger = gen_empty_fingerprint()
     finger[1][0x3DF] = 8
     CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_3, finger, [], False, False, False)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS)
-    self.assertEqual(CP_SP.madsCapabilityContractVersion, 0)
+    self.assertEqual(CP_SP.madsCapabilityContractVersion, 1)
     self.assertFalse(CP_SP.madsRequired)
+    self.assertTrue(CP_SP.teslaCoopSteeringAvailable)
+    self.assertEqual(CP_SP.madsMainCruiseInputKind, structs.CarParamsSP.MadsMainCruiseInputKind.none)
+    self.assertTrue(CP_SP.madsFullSettingsAvailable)
+    self.assertFalse(CP_SP.madsHandsOnPauseAvailable)
+    self.assertEqual(CP_SP.preapLateralEngagementMode, structs.CarParamsSP.PreapLateralEngagementMode.independent)
 
   def test_setup_interfaces_applies_snapshot(self):
     from opendbc.sunnypilot.car.interfaces import setup_interfaces

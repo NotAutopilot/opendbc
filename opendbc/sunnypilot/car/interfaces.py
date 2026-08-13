@@ -142,8 +142,11 @@ def _initialize_coop_steering(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
 
 def _initialize_tesla_mads_screen_button(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
                                          params_dict: dict[str, str]) -> None:
-  if CP.brand == 'tesla' and CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS:
-    selection = int(params_dict.get("TeslaMadsScreenButton", MadsScreenButtonType.OFF))
+  if CP.brand != 'tesla':
+    return
+
+  selection = int(params_dict.get("TeslaMadsScreenButton", MadsScreenButtonType.OFF) or 0)
+  if CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS:
     if selection == MadsScreenButtonType.THREE_FINGER:
       CP_SP.flags |= TeslaFlagsSP.MADS_SCREEN_BUTTON_3_FINGER.value
       CP_SP.safetyParam |= TeslaSafetyFlagsSP.MADS_SCREEN_BUTTON_3_FINGER
@@ -153,6 +156,14 @@ def _initialize_tesla_mads_screen_button(CP: structs.CarParams, CP_SP: structs.C
     elif selection == MadsScreenButtonType.FIVE_FINGER:
       CP_SP.flags |= TeslaFlagsSP.MADS_SCREEN_BUTTON_5_FINGER.value
       CP_SP.safetyParam |= TeslaSafetyFlagsSP.MADS_SCREEN_BUTTON_5_FINGER
+
+  # Version-1 modern Tesla: full settings = HAS_VEHICLE_BUS and a non-OFF screen button.
+  if getattr(CP_SP, "madsCapabilityContractVersion", 0) >= 1 and not is_preap_platform(CP):
+    has_bus = bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS)
+    full = has_bus and selection != MadsScreenButtonType.OFF
+    CP_SP.madsFullSettingsAvailable = full
+    if not full:
+      CP_SP.madsSteeringMode = structs.CarParamsSP.MadsSteeringMode.disengage
 
 
 def _initialize_radar_tracks(CP: structs.CarParams, CP_SP: structs.CarParamsSP,

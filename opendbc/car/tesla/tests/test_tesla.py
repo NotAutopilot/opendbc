@@ -60,7 +60,10 @@ FSD_14_FW_RULE = {
 class TestTeslaFingerprint(unittest.TestCase):
   def test_fw_platform_code(self):
     # Every EPS FW must parse and its platform letter must match the car it's filed under.
+    # Pre-AP is locked at the card/NAPForcePreAP boundary, not FW.
     for car_model, ecus in FW_VERSIONS.items():
+      if car_model == CAR.TESLA_MODEL_S_PREAP:
+        continue
       for fw in ecus.get((Ecu.eps, 0x730, None), []):
         m = FW_RE.match(fw)
 

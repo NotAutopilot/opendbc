@@ -50,6 +50,14 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     self.assertEqual(CS.gearShifter, structs.CarState.GearShifter.drive)
     self.assertFalse(CS.seatbeltUnlatched)
 
+  def test_turn_signal_stalk_state_uses_lever_level(self):
+    for lever, expected in ((0, 0), (1, 1), (2, 2), (3, 0)):
+      with self.subTest(lever=lever):
+        CI = _make_ci()
+        packets = _packet("STW_ACTN_RQ", {"TurnIndLvr_Stat": lever})
+        CS, _CS_SP = CI.update(packets)
+        self.assertEqual(CS.turnSignalStalkState, expected)
+
   def test_apply_sends_no_actuation(self):
     CI = _make_ci()
     CI.update([])

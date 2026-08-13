@@ -89,6 +89,9 @@ class PreAPCarState(CarStateBase):
     )
     ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] == 1
     ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] == 1
+    # Physical lever, not the lamp. SNA (3) is idle.
+    turn_lever = int(cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"])
+    ret.turnSignalStalkState = 0 if turn_lever == 3 else turn_lever
     ret.seatbeltUnlatched = False
     ret.stockAeb = False
     ret.stockLkas = False

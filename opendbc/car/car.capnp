@@ -203,6 +203,7 @@ struct CarState {
   vehicleSensorsInvalid @52 :Bool;  # invalid steering angle readings, etc.
   lowSpeedAlert @56 :Bool;  # lost steering control due to a dynamic min steering speed
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
+  turnSignalStalkState @61 :UInt8;  # physical turn-signal lever: 0=idle, 1=left, 2=right; SNA(3) published as 0
 
   # cruise state
   cruiseState @10 :CruiseState;
