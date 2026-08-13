@@ -50,11 +50,17 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertTrue(CP_SP.madsFullSettingsAvailable)
 
   def test_pedal_and_radar_snapshots(self):
-    CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_calib_done=True, pedal_calib_factor=1.0))
+    CP, CP_SP = _make_preap(hardware_snapshot_from_values(
+      pedal_enabled=True, pedal_calib_done=True, pedal_calib_factor=0.035,
+      pedal_calib_zero=0.25, pedal_calib_min=-3.0, pedal_calib_max=99.6,
+    ))
     self.assertTrue(CP.openpilotLongitudinalControl)
     self.assertFalse(CP.pcmCruise)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_PRESENT)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE)
+    from opendbc.car.tesla.preap.constants import PREAP_FLAG_ENABLE_PEDAL
+    self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL)
+    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
 
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(radar_enabled=True, radar_behind_nosecone=True))
     self.assertFalse(CP.radarUnavailable)
@@ -112,7 +118,8 @@ class TestPreAPIdentity(unittest.TestCase):
     CI = CarInterface(CP, CP_SP)
     self.assertTrue(CP.radarUnavailable)
     setup_interfaces(CI, CP, CP_SP, params_list=[
-      {"NAPPedalEnabled": True, "NAPPedalCalibDone": True, "NAPPedalCalibFactor": 1.0,
+      {"NAPPedalEnabled": True, "NAPPedalCalibDone": True, "NAPPedalCalibFactor": 0.035,
+       "NAPPedalCalibZero": 0.25, "NAPPedalCalibMin": -3.0, "NAPPedalCalibMax": 99.6,
        "NAPRadarEnabled": True, "NAPLateralEngagementMode": 1},
     ])
     self.assertTrue(CP.openpilotLongitudinalControl)
@@ -152,13 +159,6 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS))
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.MADS_SCREEN_BUTTON_4_FINGER))
     self.assertTrue(CP_SP.madsRequired)
-
-  def test_get_car_accepts_skip_fw_query(self):
-    import inspect
-    from opendbc.car.car_helpers import get_car, fingerprint
-    self.assertIn("skip_fw_query", inspect.signature(get_car).parameters)
-    self.assertIn("skip_fw_query", inspect.signature(fingerprint).parameters)
-
 
 if __name__ == "__main__":
   unittest.main()

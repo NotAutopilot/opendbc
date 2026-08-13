@@ -20,7 +20,12 @@ from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuni
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
-from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values, is_preap_platform
+from opendbc.car.tesla.preap.boot import (
+  apply_preap_hardware_snapshot,
+  hardware_snapshot_from_values,
+  is_preap_platform,
+  parse_steering_mode,
+)
 from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
 
@@ -89,6 +94,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_preap_boot(CP, CP_SP, params_dict)
   _initialize_coop_steering(CP, CP_SP, params_dict)
   _initialize_tesla_mads_screen_button(CP, CP_SP, params_dict)
+  _populate_v1_mads_from_boot_params(CP, CP_SP, params_dict)
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
@@ -117,11 +123,12 @@ def _initialize_preap_boot(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
     pedal_bus=params_dict.get("NAPPedalCanBus"),
     pedal_calib_done=params_dict.get("NAPPedalCalibDone"),
     pedal_calib_factor=params_dict.get("NAPPedalCalibFactor"),
+    pedal_calib_zero=params_dict.get("NAPPedalCalibZero"),
+    pedal_calib_min=params_dict.get("NAPPedalCalibMin"),
+    pedal_calib_max=params_dict.get("NAPPedalCalibMax"),
     radar_enabled=params_dict.get("NAPRadarEnabled"),
     radar_behind_nosecone=params_dict.get("NAPRadarBehindNosecone"),
     engagement_mode=params_dict.get("NAPLateralEngagementMode"),
-    mads_main_cruise_allowed=params_dict.get("MadsMainCruiseAllowed"),
-    mads_unified_engagement_mode=params_dict.get("MadsUnifiedEngagementMode"),
     mads_steering_mode=params_dict.get("MadsSteeringMode"),
   )
   apply_preap_hardware_snapshot(CP, CP_SP, snapshot)
@@ -140,12 +147,29 @@ def _initialize_coop_steering(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
       CP_SP.flags |= TeslaFlagsSP.COOP_STEERING.value
 
 
+def _parse_mads_screen_button(value) -> int:
+  # Closed enum. Negative/unknown values are OFF / limited containment.
+  if value in (None, "", b""):
+    return MadsScreenButtonType.OFF
+  try:
+    selection = int(value)
+  except (TypeError, ValueError):
+    return MadsScreenButtonType.OFF
+  if selection in (MadsScreenButtonType.THREE_FINGER, MadsScreenButtonType.FOUR_FINGER, MadsScreenButtonType.FIVE_FINGER):
+    return selection
+  return MadsScreenButtonType.OFF
+
+
+def _as_closed_bool(value) -> bool:
+  return value in (True, 1, "1", b"1")
+
+
 def _initialize_tesla_mads_screen_button(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
                                          params_dict: dict[str, str]) -> None:
   if CP.brand != 'tesla':
     return
 
-  selection = int(params_dict.get("TeslaMadsScreenButton", MadsScreenButtonType.OFF) or 0)
+  selection = _parse_mads_screen_button(params_dict.get("TeslaMadsScreenButton", MadsScreenButtonType.OFF))
   if CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS:
     if selection == MadsScreenButtonType.THREE_FINGER:
       CP_SP.flags |= TeslaFlagsSP.MADS_SCREEN_BUTTON_3_FINGER.value
@@ -157,13 +181,39 @@ def _initialize_tesla_mads_screen_button(CP: structs.CarParams, CP_SP: structs.C
       CP_SP.flags |= TeslaFlagsSP.MADS_SCREEN_BUTTON_5_FINGER.value
       CP_SP.safetyParam |= TeslaSafetyFlagsSP.MADS_SCREEN_BUTTON_5_FINGER
 
-  # Version-1 modern Tesla: full settings = HAS_VEHICLE_BUS and a non-OFF screen button.
+  # Version-1 modern Tesla: full settings require HAS_VEHICLE_BUS and a recognized finger count.
   if getattr(CP_SP, "madsCapabilityContractVersion", 0) >= 1 and not is_preap_platform(CP):
     has_bus = bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS)
-    full = has_bus and selection != MadsScreenButtonType.OFF
+    full = has_bus and selection in (MadsScreenButtonType.THREE_FINGER, MadsScreenButtonType.FOUR_FINGER,
+                                     MadsScreenButtonType.FIVE_FINGER)
     CP_SP.madsFullSettingsAvailable = full
     if not full:
       CP_SP.madsSteeringMode = structs.CarParamsSP.MadsSteeringMode.disengage
+
+
+def _populate_v1_mads_from_boot_params(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
+                                       params_dict: dict[str, str]) -> None:
+  # Populate remaining version-1 MADS fields from the validated boot snapshot.
+  CP_SP.madsCapabilityContractVersion = 1
+  if is_preap_platform(CP):
+    return
+
+  steering = parse_steering_mode(params_dict.get("MadsSteeringMode"))
+  uem = _as_closed_bool(params_dict.get("MadsUnifiedEngagementMode"))
+  if CP.brand in ("tesla", "rivian"):
+    CP_SP.madsMainCruiseAllowed = False
+  else:
+    CP_SP.madsMainCruiseAllowed = _as_closed_bool(params_dict.get("MadsMainCruiseAllowed"))
+  CP_SP.madsUnifiedEngagementMode = uem
+
+  if CP_SP.madsFullSettingsAvailable:
+    CP_SP.madsSteeringMode = (
+      structs.CarParamsSP.MadsSteeringMode.remainActive,
+      structs.CarParamsSP.MadsSteeringMode.pause,
+      structs.CarParamsSP.MadsSteeringMode.disengage,
+    )[steering]
+  else:
+    CP_SP.madsSteeringMode = structs.CarParamsSP.MadsSteeringMode.disengage
 
 
 def _initialize_radar_tracks(CP: structs.CarParams, CP_SP: structs.CarParamsSP,

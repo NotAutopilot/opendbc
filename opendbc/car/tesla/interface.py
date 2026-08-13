@@ -17,12 +17,15 @@ def _apply_modern_tesla_v1_capabilities(ret: structs.CarParamsSP) -> structs.Car
   """Version-1 capability overlay for non-Pre-AP Tesla.
 
   madsFullSettingsAvailable follows the version-0 HAS_VEHICLE_BUS hardware path here;
-  the TeslaMadsScreenButton refinement is applied later in setup_interfaces.
+  the TeslaMadsScreenButton and MadsSteeringMode refinements are applied later
+  from the boot parameter snapshot in setup_interfaces.
   """
   ret.madsCapabilityContractVersion = 1
   ret.madsRequired = False
   ret.teslaCoopSteeringAvailable = True
   ret.madsMainCruiseInputKind = structs.CarParamsSP.MadsMainCruiseInputKind.none
+  ret.madsMainCruiseAllowed = False
+  ret.madsUnifiedEngagementMode = False
   ret.madsFullSettingsAvailable = bool(ret.flags & TeslaFlagsSP.HAS_VEHICLE_BUS)
   ret.madsHandsOnPauseAvailable = False
   ret.preapLateralEngagementMode = structs.CarParamsSP.PreapLateralEngagementMode.independent

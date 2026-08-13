@@ -172,7 +172,8 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     car_params_sp.flags |= int(platform.config.sp_flags)
     car_params_sp.pcmCruiseSpeed = True
 
-    return cls._get_params_sp(car_params, car_params_sp, candidate, fingerprint, car_fw, alpha_long, is_release_sp, docs)
+    ret = cls._get_params_sp(car_params, car_params_sp, candidate, fingerprint, car_fw, alpha_long, is_release_sp, docs)
+    return advertise_mads_capability_contract_v1(car_params, ret)
 
   @staticmethod
   @abstractmethod
@@ -407,6 +408,33 @@ class CarControllerBase(ABC):
   @abstractmethod
   def update(self, CC: structs.CarControl, CC_SP: structs.CarControlSP, CS: CarStateBase, now_nanos: int) -> tuple[structs.CarControl.Actuators, list[CanData]]:
     pass
+
+
+def advertise_mads_capability_contract_v1(car_params: structs.CarParams, ret: structs.CarParamsSP) -> structs.CarParamsSP:
+  """Newly produced CarParamsSP advertises contract version 1.
+
+  Brand-specific overlays (Pre-AP / modern Tesla) already populate typed fields.
+  Other brands get the version-0 capability defaults so consumers do not keep a
+  per-brand duplicate of resolve_mads_capabilities. Version-0 serialized
+  fixtures keep contract version 0 because they never pass through this producer.
+  """
+  if getattr(ret, "madsCapabilityContractVersion", 0):
+    return ret
+  ret.madsCapabilityContractVersion = 1
+  brand = getattr(car_params, "brand", "") or ""
+  if brand in ("tesla", "rivian"):
+    ret.madsMainCruiseInputKind = structs.CarParamsSP.MadsMainCruiseInputKind.none
+    ret.madsMainCruiseAllowed = False
+    ret.teslaCoopSteeringAvailable = brand == "tesla"
+    if brand == "rivian":
+      ret.madsFullSettingsAvailable = False
+      ret.madsSteeringMode = structs.CarParamsSP.MadsSteeringMode.disengage
+  else:
+    ret.madsMainCruiseInputKind = structs.CarParamsSP.MadsMainCruiseInputKind.stateful
+    ret.madsFullSettingsAvailable = True
+  ret.madsRequired = False
+  ret.madsHandsOnPauseAvailable = False
+  return ret
 
 
 INTERFACE_ATTR_FILE = {

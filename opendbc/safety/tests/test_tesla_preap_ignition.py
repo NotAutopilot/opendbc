@@ -2,11 +2,21 @@ import unittest
 
 from opendbc.safety.tests.common import CANPackerSafety
 from opendbc.safety.tests.libsafety import libsafety_py
+from opendbc.safety.tests.libsafety.libsafety_py import make_CANPacket
+
+# Production 1Hz ignition stale-gap seam. Declare before the shared library is loaded.
+try:
+  libsafety_py.ffi.cdef("void ignition_can_1hz_tick(void);")
+except Exception:
+  pass
 
 
 class TestTeslaPreAPIgnition(unittest.TestCase):
   def setUp(self):
     self.safety = libsafety_py.libsafety
+    self.safety.init_tests()
+    for _ in range(4):
+      self.safety.ignition_can_1hz_tick()
     self.safety.init_tests()
     self.packer = CANPackerSafety("tesla_preap")
 
@@ -14,6 +24,10 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     return self.packer.make_can_msg_safety(
       "GTW_status", bus, {"GTW_statusCounter": counter, "GTW_driveRailReq": int(drive_rail)},
     )
+
+  def _tick_stale(self, n=4):
+    for _ in range(n):
+      self.safety.ignition_can_1hz_tick()
 
   def test_ignition_on_bus0_and_bus1(self):
     for bus in (0, 1):
@@ -52,6 +66,30 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     self.safety.ignition_can_hook(self._msg(0, 1))
     self.safety.ignition_can_hook(self._msg(5, 1))
     self.assertFalse(self.safety.get_ignition_can())
+
+  def test_malformed_length_rejected(self):
+    self.safety.ignition_can_hook(make_CANPacket(0x348, 0, bytes([1, 0, 0, 0])))
+    self.safety.ignition_can_hook(make_CANPacket(0x348, 0, bytes([1, 0, 0, 0, 0, 0, 1, 0])))
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_cross_bus_interleave_cannot_assert(self):
+    self.safety.ignition_can_hook(self._msg(0, 1, bus=0))
+    self.safety.ignition_can_hook(self._msg(1, 1, bus=1))
+    self.assertFalse(self.safety.get_ignition_can())
+    self.safety.ignition_can_hook(self._msg(2, 1, bus=0))
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_stale_gap_requires_fresh_same_bus_sequence(self):
+    self.safety.ignition_can_hook(self._msg(0, 1, bus=0))
+    self.safety.ignition_can_hook(self._msg(1, 1, bus=0))
+    self.assertTrue(self.safety.get_ignition_can())
+    self._tick_stale()
+    self.assertFalse(self.safety.get_ignition_can())
+    # One adjacent post-timeout frame on the same bus cannot revive ignition.
+    self.safety.ignition_can_hook(self._msg(2, 1, bus=0))
+    self.assertFalse(self.safety.get_ignition_can())
+    self.safety.ignition_can_hook(self._msg(3, 1, bus=0))
+    self.assertTrue(self.safety.get_ignition_can())
 
   def test_packer_matches_ignition_contract(self):
     addr, dat, bus = self.packer.make_can_msg("GTW_status", 0, {"GTW_statusCounter": 7, "GTW_driveRailReq": 1})

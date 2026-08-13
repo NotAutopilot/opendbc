@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from opendbc.car import get_safety_config, structs
 from opendbc.car.tesla.preap.constants import (
@@ -18,6 +19,11 @@ from opendbc.car.tesla.preap.constants import (
 )
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 
+
+# Unsaved default pair from the retained Param schema. A done-flag with both
+# values still at default is not a completed calibration.
+_DEFAULT_PEDAL_CALIB_FACTOR = 1.0
+_DEFAULT_PEDAL_CALIB_ZERO = 0.0
 
 PREAP_PLATFORM = "TESLA_MODEL_S_PREAP"
 
@@ -78,19 +84,54 @@ def parse_steering_mode(value) -> int:
 
 
 def _as_bool(value) -> bool:
-  if value in (None, "", b"", False, 0, "0", b"0"):
-    return False
-  if value in (True, 1, "1", b"1"):
-    return True
-  return bool(value)
+  """Closed-set boolean. Unknown values are false."""
+  return value in (True, 1, "1", b"1")
 
 
-def _finite_positive(value) -> bool:
+def _value_present(value) -> bool:
+  return value not in (None, "", b"")
+
+
+def _finite_number(value) -> float | None:
+  if not _value_present(value):
+    return None
   try:
     number = float(value)
   except (TypeError, ValueError):
+    return None
+  if not math.isfinite(number):
+    return None
+  return number
+
+
+def compatibility_from_mode(mode: int) -> tuple[bool, bool]:
+  """Derive retired Main/UEM compatibility fields from canonical engagement mode."""
+  if mode == PREAP_MODE_CRUISE_COUPLED:
+    return False, True
+  if mode == PREAP_MODE_LONGITUDINAL_ONLY:
+    return False, False
+  return True, False
+
+
+def _pedal_calib_available(pedal_present: bool, pedal_calib_done, pedal_calib_factor,
+                           pedal_calib_zero, pedal_calib_min, pedal_calib_max) -> bool:
+  if not (pedal_present and _as_bool(pedal_calib_done)):
     return False
-  return number == number and abs(number) > 1e-12
+  if not all(_value_present(v) for v in (pedal_calib_factor, pedal_calib_zero, pedal_calib_min, pedal_calib_max)):
+    return False
+  factor = _finite_number(pedal_calib_factor)
+  zero = _finite_number(pedal_calib_zero)
+  min_v = _finite_number(pedal_calib_min)
+  max_v = _finite_number(pedal_calib_max)
+  if factor is None or zero is None or min_v is None or max_v is None:
+    return False
+  if factor <= 1e-12:
+    return False
+  if min_v >= max_v:
+    return False
+  if factor == _DEFAULT_PEDAL_CALIB_FACTOR and zero == _DEFAULT_PEDAL_CALIB_ZERO:
+    return False
+  return True
 
 
 def hardware_snapshot_from_values(
@@ -99,6 +140,9 @@ def hardware_snapshot_from_values(
   pedal_bus=None,
   pedal_calib_done=None,
   pedal_calib_factor=None,
+  pedal_calib_zero=None,
+  pedal_calib_min=None,
+  pedal_calib_max=None,
   radar_enabled=None,
   radar_behind_nosecone=None,
   engagement_mode=None,
@@ -107,23 +151,24 @@ def hardware_snapshot_from_values(
   mads_steering_mode=None,
 ) -> PreAPHardwareSnapshot:
   """Missing or invalid hardware grants no authority."""
+  del mads_main_cruise_allowed, mads_unified_engagement_mode
   pedal_present = _as_bool(pedal_enabled)
   try:
-    bus = int(pedal_bus) if pedal_bus not in (None, "") else 2
+    bus = int(pedal_bus) if _value_present(pedal_bus) else 2
   except (TypeError, ValueError):
     bus = 2
   if bus not in (0, 2):
     bus = 2
 
-  calib_done = _as_bool(pedal_calib_done)
-  pedal_calib_available = bool(pedal_present and calib_done and _finite_positive(pedal_calib_factor if pedal_calib_factor is not None else 1.0))
+  pedal_calib_available = _pedal_calib_available(
+    pedal_present, pedal_calib_done, pedal_calib_factor, pedal_calib_zero, pedal_calib_min, pedal_calib_max,
+  )
 
   radar_present = _as_bool(radar_enabled)
-  nosecone = _as_bool(radar_behind_nosecone)
-  if not radar_present:
-    nosecone = False
+  nosecone = _as_bool(radar_behind_nosecone) if radar_present else False
 
   mode = parse_engagement_mode(engagement_mode)
+  main_allowed, uem = compatibility_from_mode(mode)
   return PreAPHardwareSnapshot(
     pedal_present=pedal_present,
     pedal_bus=bus,
@@ -131,8 +176,8 @@ def hardware_snapshot_from_values(
     radar_present=radar_present,
     radar_behind_nosecone=nosecone,
     engagement_mode=mode,
-    mads_main_cruise_allowed=_as_bool(mads_main_cruise_allowed),
-    mads_unified_engagement_mode=_as_bool(mads_unified_engagement_mode),
+    mads_main_cruise_allowed=main_allowed,
+    mads_unified_engagement_mode=uem,
     mads_steering_mode=parse_steering_mode(mads_steering_mode),
   )
 
@@ -198,22 +243,29 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
     CP_SP.flags |= TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO
 
   host_safety = 0
-  if snapshot.pedal_present:
+  if snapshot.pedal_present and snapshot.pedal_calib_available:
     host_safety |= PREAP_FLAG_ENABLE_PEDAL
   if snapshot.radar_present:
     host_safety |= PREAP_FLAG_RADAR_EMULATION
   if snapshot.radar_behind_nosecone:
     host_safety |= PREAP_FLAG_RADAR_BEHIND_NOSECONE
-  # Preserve noOutput; stash hardware bits on CP_SP.safetyParam alongside mode.
+  # Preserve noOutput. Serialize frozen hardware bits on the existing safety config.
+  if CP.safetyConfigs:
+    safety_param = int(CP.safetyConfigs[0].safetyParam)
+    safety_param &= ~(PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_BEHIND_NOSECONE)
+    safety_param |= host_safety
+    CP.safetyConfigs[0].safetyParam = safety_param
+
   mode = snapshot.engagement_mode if snapshot.engagement_mode != PREAP_MODE_INVALID else PREAP_MODE_INDEPENDENT
+  main_allowed, uem = compatibility_from_mode(mode)
   # Bits 0-1 are the Pre-AP mode enum. Never set HAS_VEHICLE_BUS (bit 0) on Pre-AP.
   CP_SP.safetyParam &= ~PREAP_MODE_MASK
   CP_SP.safetyParam |= mode & PREAP_MODE_MASK
-  if snapshot.mads_main_cruise_allowed:
+  if main_allowed:
     CP_SP.safetyParam |= SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED
   else:
     CP_SP.safetyParam &= ~SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED
-  if snapshot.mads_unified_engagement_mode:
+  if uem:
     CP_SP.safetyParam |= SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE
   else:
     CP_SP.safetyParam &= ~SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE
@@ -223,11 +275,9 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
     structs.CarParamsSP.PreapLateralEngagementMode.cruiseCoupled,
     structs.CarParamsSP.PreapLateralEngagementMode.longitudinalOnly,
   )[mode]
-  CP_SP.madsMainCruiseAllowed = bool(snapshot.mads_main_cruise_allowed)
-  CP_SP.madsUnifiedEngagementMode = bool(snapshot.mads_unified_engagement_mode)
+  CP_SP.madsMainCruiseAllowed = main_allowed
+  CP_SP.madsUnifiedEngagementMode = uem
   CP_SP.madsSteeringMode = STEERING_MODE_BY_VALUE[snapshot.mads_steering_mode]
-  # Keep unused host_safety bits available for Task 3 without enabling TX now.
-  _ = host_safety
 
 
 def pedal_bus_from_cp_sp(CP_SP: structs.CarParamsSP) -> int:

@@ -17,6 +17,7 @@ PREAP_MODE_INVALID = 3
 
 # Hardware capability bits snapshotted into CarParams.safetyConfigs[0].safetyParam
 # for later teslaPreap registration. Task 2 does not enable that safety mode.
+# Allocation is noncolliding with TeslaSafetyFlags.LONG_CONTROL (bit 0) and FSD_14 (bit 1).
 PREAP_FLAG_ENABLE_PEDAL = 1 << 2
 PREAP_FLAG_RADAR_EMULATION = 1 << 3
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 1 << 4

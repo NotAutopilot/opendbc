@@ -55,9 +55,6 @@ FW_VERSIONS = {
       b'TeM3_SP_XP002p2_0.0.0 (36),XPR003.10.0',
     ],
   },
-  CAR.TESLA_MODEL_S_PREAP: {
-    # Pre-AP is locked at the card/NAPForcePreAP boundary; no FW versions required.
-  },
 }
 
 FW_VERSIONS = merge_fw_versions(FW_VERSIONS, FW_VERSIONS_EXT)
