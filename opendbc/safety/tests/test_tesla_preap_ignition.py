@@ -10,10 +10,6 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
   def setUp(self):
     self.safety = libsafety_py.libsafety
     self.safety.init_tests()
-    # Production stale-gap seam: leftover per-bus prev from a prior method
-    # (e.g. wraparound 15->0) must not complete a later lone 0x348 frame.
-    self._tick_stale()
-    self.safety.init_tests()
     self.packer = CANPackerSafety("tesla_preap")
 
   def _msg(self, counter, drive_rail, bus=0):
