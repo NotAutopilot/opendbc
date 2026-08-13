@@ -24,12 +24,12 @@ class TestPreAPContainment(unittest.TestCase):
       "NAPPedalCalibMax": 99.6,
     }])
     self.assertTrue(CP.openpilotLongitudinalControl)
-    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
 
-  def test_tesla_preap_safety_model_is_not_registered(self):
-    self.assertFalse(hasattr(structs.CarParams.SafetyModel, "teslaPreap"))
+  def test_tesla_preap_safety_model_is_registered(self):
+    self.assertTrue(hasattr(structs.CarParams.SafetyModel, "teslaPreap"))
     CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
-    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
 
   def test_modern_tesla_controller_still_sends(self):
     CP = CarInterface.get_params(CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
@@ -43,7 +43,7 @@ class TestPreAPContainment(unittest.TestCase):
     pCI.update([])
     _act, pmsgs = pCI.apply(structs.CarControl(), structs.CarControlSP(), now_nanos=0)
     self.assertEqual(pmsgs, [])
-    self.assertEqual(pCP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    self.assertEqual(pCP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
 
   def test_preap_radar_interface_does_not_tx(self):
     CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)

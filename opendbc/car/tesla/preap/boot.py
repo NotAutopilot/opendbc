@@ -205,8 +205,8 @@ def apply_preap_identity(ret: structs.CarParams) -> structs.CarParams:
   ret.openpilotLongitudinalControl = False
   ret.pcmCruise = True
   ret.radarUnavailable = True
-  # Pre-AP remains silent until its dedicated safety mode is registered.
-  ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.noOutput)]
+  # Dedicated safety mode starts with no hardware authority and no TX tuples.
+  ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.teslaPreap)]
   return ret
 
 
@@ -261,7 +261,7 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
     host_safety |= PREAP_FLAG_RADAR_EMULATION
   if snapshot.radar_behind_nosecone:
     host_safety |= PREAP_FLAG_RADAR_BEHIND_NOSECONE
-  # Preserve noOutput. Serialize frozen hardware bits on the existing safety config.
+  # Serialize frozen hardware bits on the dedicated safety config.
   if CP.safetyConfigs:
     safety_param = int(CP.safetyConfigs[0].safetyParam)
     safety_param &= ~(PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_BEHIND_NOSECONE)

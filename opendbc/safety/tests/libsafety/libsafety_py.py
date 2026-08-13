@@ -145,6 +145,9 @@ void set_heartbeat_engaged_mads(bool c);
 void mads_heartbeat_engaged_check(void);
 void set_steering_disengage(bool c);
 int get_gas_interceptor_prev(void);
+bool get_steering_control_inhibited(void);
+uint8_t get_stock_cc_reengage_counter(void);
+bool get_stock_cc_reengage_confirmed(void);
 """)
 
 class LibSafety:

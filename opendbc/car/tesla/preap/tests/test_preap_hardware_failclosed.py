@@ -102,15 +102,15 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
       self.assertFalse(CP.radarUnavailable)
       self.assertAlmostEqual(CP_SP.radarOffset, valid_offset)
 
-  def test_valid_calib_and_radar_bits_on_nooutput(self):
+  def test_valid_calib_and_radar_bits_on_preap_safety(self):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(
       **VALID_CALIB, radar_enabled=True, radar_behind_nosecone=True, radar_offset=0.0,
     ))
-    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL)
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_RADAR_EMULATION)
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_RADAR_BEHIND_NOSECONE)
-    self.assertFalse(hasattr(structs.CarParams.SafetyModel, "teslaPreap"))
+    self.assertTrue(hasattr(structs.CarParams.SafetyModel, "teslaPreap"))
 
   def test_mode_derives_main_uem_not_legacy_params(self):
     snap = hardware_snapshot_from_values(engagement_mode=0, mads_main_cruise_allowed=False, mads_unified_engagement_mode=True)

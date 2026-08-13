@@ -34,6 +34,7 @@
 #define SAFETY_PSA 31U
 #define SAFETY_RIVIAN 33U
 #define SAFETY_VOLKSWAGEN_MEB 34U
+#define SAFETY_TESLA_PREAP 35U
 
 #define GET_BIT(msg, b) ((bool)!!(((msg)->data[((b) / 8U)] >> ((b) % 8U)) & 0x1U))
 #define GET_FLAG(value, mask) (((value) & (mask)) == (mask))
@@ -217,14 +218,18 @@ typedef bool (*get_quality_flag_valid_t)(const CANPacket_t *msg);
 
 typedef safety_config (*safety_hook_init)(uint16_t param);
 typedef void (*rx_hook)(const CANPacket_t *msg);
+typedef void (*invalid_rx_hook)(const CANPacket_t *msg);
 typedef bool (*tx_hook)(const CANPacket_t *msg);  // returns true if the message is allowed
 typedef bool (*fwd_hook)(int bus_num, int addr);      // returns true if the message should be blocked from forwarding
+typedef void (*safety_tick_hook)(bool rx_checks_invalid);
 
 typedef struct {
   safety_hook_init init;
   rx_hook rx;
+  invalid_rx_hook invalid_rx;
   tx_hook tx;
   fwd_hook fwd;
+  safety_tick_hook tick;
   get_checksum_t get_checksum;
   compute_checksum_t compute_checksum;
   get_counter_t get_counter;
@@ -338,6 +343,9 @@ typedef struct {
 extern uint16_t current_safety_mode;
 extern uint16_t current_safety_param;
 extern uint16_t current_safety_param_sp;
+extern bool steering_control_inhibited;
+extern uint8_t stock_cc_reengage_counter;
+extern bool stock_cc_reengage_confirmed;
 extern safety_config current_safety_config;
 
 int safety_fwd_hook(int bus_num, int addr);
@@ -361,6 +369,7 @@ extern const safety_hooks nissan_hooks;
 extern const safety_hooks subaru_hooks;
 extern const safety_hooks subaru_preglobal_hooks;
 extern const safety_hooks tesla_hooks;
+extern const safety_hooks tesla_preap_hooks;
 extern const safety_hooks toyota_hooks;
 extern const safety_hooks volkswagen_mlb_hooks;
 extern const safety_hooks volkswagen_mqb_hooks;

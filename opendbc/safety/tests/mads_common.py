@@ -650,3 +650,30 @@ class MadsSafetyTestBase(unittest.TestCase):
     self.assertFalse(self.safety.get_enable_mads())
     self.assertFalse(self.safety.get_disengage_lateral_on_brake())
     self.assertFalse(self.safety.get_pause_lateral_on_brake())
+
+class MomentaryMadsSafetyTestBase:
+  """Shared contract for platforms whose MAIN input is a trusted momentary request."""
+
+  @abc.abstractmethod
+  def _prime_momentary_mads(self):
+    raise NotImplementedError
+
+  @abc.abstractmethod
+  def _main_input_msg(self, pressed):
+    raise NotImplementedError
+
+  def test_momentary_release_does_not_exit(self):
+    self._prime_momentary_mads()
+    self._rx(self._main_input_msg(False))
+    self._rx(self._main_input_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._rx(self._main_input_msg(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_momentary_startup_high_requires_trusted_low(self):
+    self._prime_momentary_mads()
+    self._rx(self._main_input_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._rx(self._main_input_msg(False))
+    self._rx(self._main_input_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())

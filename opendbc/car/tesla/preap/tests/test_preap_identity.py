@@ -40,7 +40,7 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertFalse(CP.openpilotLongitudinalControl)
     self.assertTrue(CP.pcmCruise)
     self.assertTrue(CP.radarUnavailable)
-    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
     self.assertEqual(CP_SP.madsCapabilityContractVersion, 1)
     self.assertTrue(CP_SP.madsRequired)
     self.assertFalse(CP_SP.teslaCoopSteeringAvailable)
@@ -60,7 +60,7 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE)
     from opendbc.car.tesla.preap.constants import PREAP_FLAG_ENABLE_PEDAL
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL)
-    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
 
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(radar_enabled=True, radar_behind_nosecone=True, radar_offset=0.0))
     self.assertFalse(CP.radarUnavailable)

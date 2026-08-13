@@ -15,8 +15,7 @@ PREAP_MODE_CRUISE_COUPLED = 1
 PREAP_MODE_LONGITUDINAL_ONLY = 2
 PREAP_MODE_INVALID = 3
 
-# Hardware capability bits are snapshotted into CarParams.safetyConfigs[0].safetyParam
-# while noOutput remains active.
+# Hardware capability bits are snapshotted into the dedicated Pre-AP safety config.
 # Allocation is noncolliding with TeslaSafetyFlags.LONG_CONTROL (bit 0) and FSD_14 (bit 1).
 PREAP_FLAG_ENABLE_PEDAL = 1 << 2
 PREAP_FLAG_RADAR_EMULATION = 1 << 3

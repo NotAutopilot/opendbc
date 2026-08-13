@@ -11,6 +11,7 @@
 #include "opendbc/safety/modes/honda.h"
 #include "opendbc/safety/modes/toyota.h"
 #include "opendbc/safety/modes/tesla.h"
+#include "opendbc/safety/modes/tesla_preap.h"
 #include "opendbc/safety/modes/gm.h"
 #include "opendbc/safety/modes/ford.h"
 #include "opendbc/safety/modes/hyundai.h"
@@ -94,6 +95,9 @@ uint32_t safety_mode_cnt = 0U;
 uint16_t current_safety_mode = SAFETY_SILENT;
 uint16_t current_safety_param = 0;
 uint16_t current_safety_param_sp = 0;
+bool steering_control_inhibited = false;
+uint8_t stock_cc_reengage_counter = 0U;
+bool stock_cc_reengage_confirmed = false;
 static const safety_hooks *current_hooks = &nooutput_hooks;
 safety_config current_safety_config;
 
@@ -199,6 +203,9 @@ bool safety_rx_hook(const CANPacket_t *msg) {
   bool whitelisted = get_addr_check_index(msg, current_safety_config.rx_checks, current_safety_config.rx_checks_len) != -1;
   if (valid && whitelisted) {
     current_hooks->rx(msg);
+  }
+  if (!valid && whitelisted && (current_hooks->invalid_rx != NULL)) {
+    current_hooks->invalid_rx(msg);
   }
 
   // Handles gas, brake, and regen paddle
@@ -346,6 +353,9 @@ void safety_tick(const safety_config *cfg) {
   }
 
   safety_rx_checks_invalid = rx_checks_invalid;
+  if (current_hooks->tick != NULL) {
+    current_hooks->tick(rx_checks_invalid);
+  }
 }
 
 static void relay_malfunction_set(void) {
@@ -418,6 +428,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
     {SAFETY_FORD, &ford_hooks},
     {SAFETY_RIVIAN, &rivian_hooks},
     {SAFETY_TESLA, &tesla_hooks},
+    {SAFETY_TESLA_PREAP, &tesla_preap_hooks},
     {SAFETY_HYUNDAI_CANFD, &hyundai_canfd_hooks},
 #ifdef ALLOW_DEBUG
     {SAFETY_CHRYSLER_CUSW, &chrysler_cusw_hooks},
@@ -474,6 +485,9 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   controls_allowed = false;
   relay_malfunction_reset();
   safety_rx_checks_invalid = false;
+  steering_control_inhibited = false;
+  stock_cc_reengage_counter = 0U;
+  stock_cc_reengage_confirmed = false;
 
   current_safety_config.rx_checks = NULL;
   current_safety_config.rx_checks_len = 0;

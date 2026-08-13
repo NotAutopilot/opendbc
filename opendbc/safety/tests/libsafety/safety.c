@@ -320,6 +320,18 @@ void set_steering_disengage(bool c){
 int get_gas_interceptor_prev(void){
   return gas_interceptor_prev;
 }
+bool get_steering_control_inhibited(void) {
+  return steering_control_inhibited;
+}
+
+uint8_t get_stock_cc_reengage_counter(void) {
+  return stock_cc_reengage_counter;
+}
+
+bool get_stock_cc_reengage_confirmed(void) {
+  return stock_cc_reengage_confirmed;
+}
+
 
 void init_tests(void){
   safety_mode_cnt = 2U;  // avoid ignoring relay_malfunction logic
