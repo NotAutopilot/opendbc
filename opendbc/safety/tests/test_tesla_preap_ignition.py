@@ -34,9 +34,11 @@ class TestTeslaPreAPIgnition(unittest.TestCase):
     self.assertFalse(self.safety.get_ignition_can())
 
   def test_wrong_bus_rejected(self):
-    self.safety.ignition_can_hook(self._msg(0, 1, bus=2))
-    self.safety.ignition_can_hook(self._msg(1, 1, bus=2))
-    self.assertFalse(self.safety.get_ignition_can())
+    for bus in (2, 3):
+      self.safety.init_tests()
+      self.safety.ignition_can_hook(self._msg(0, 1, bus=bus))
+      self.safety.ignition_can_hook(self._msg(1, 1, bus=bus))
+      self.assertFalse(self.safety.get_ignition_can(), msg=f"bus {bus}")
 
   def test_repeated_counter_rejected(self):
     self.safety.ignition_can_hook(self._msg(0, 1))

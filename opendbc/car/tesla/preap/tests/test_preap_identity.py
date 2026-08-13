@@ -123,6 +123,36 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS))
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.COOP_STEERING))
 
+  def test_pedal_bus_zero_and_invalid_default(self):
+    from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp
+    CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=0))
+    self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO)
+    self.assertEqual(pedal_bus_from_cp_sp(CP_SP), 0)
+
+    CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=2))
+    self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO))
+    self.assertEqual(pedal_bus_from_cp_sp(CP_SP), 2)
+
+    snap = hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=7)
+    self.assertEqual(snap.pedal_bus, 2)
+    snap = hardware_snapshot_from_values(pedal_enabled=True, pedal_bus="nope")
+    self.assertEqual(snap.pedal_bus, 2)
+
+  def test_stale_coop_and_touchscreen_cannot_enable_on_preap(self):
+    from opendbc.sunnypilot.car.interfaces import setup_interfaces
+    CP, CP_SP = _make_preap()
+    CI = CarInterface(CP, CP_SP)
+    setup_interfaces(CI, CP, CP_SP, params_list=[{
+      "TeslaCoopSteering": 1,
+      "TeslaMadsScreenButton": 2,
+      "NAPLateralEngagementMode": 0,
+    }])
+    self.assertFalse(CP_SP.teslaCoopSteeringAvailable)
+    self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.COOP_STEERING))
+    self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS))
+    self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.MADS_SCREEN_BUTTON_4_FINGER))
+    self.assertTrue(CP_SP.madsRequired)
+
   def test_get_car_accepts_skip_fw_query(self):
     import inspect
     from opendbc.car.car_helpers import get_car, fingerprint
