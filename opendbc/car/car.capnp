@@ -204,6 +204,7 @@ struct CarState {
   lowSpeedAlert @56 :Bool;  # lost steering control due to a dynamic min steering speed
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
   turnSignalStalkState @61 :UInt8;  # physical turn-signal lever: 0=idle, 1=left, 2=right; SNA(3) published as 0
+  handsOnLevel @62 :UInt8;         # steering-wheel hands-on classification on cars that report a discrete level
 
   # cruise state
   cruiseState @10 :CruiseState;

@@ -6,7 +6,7 @@ from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, 
 from opendbc.car.tesla.radar_interface import RadarInterface, RADAR_START_ADDR
 
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP, TeslaSafetyFlagsSP
-from opendbc.car.tesla.preap.carcontroller import DisabledCarController
+from opendbc.car.tesla.preap.carcontroller import PreAPCarController
 from opendbc.car.tesla.preap.carstate import PreAPCarState
 from opendbc.car.tesla.preap.interface import get_preap_params, get_preap_params_sp
 from opendbc.car.tesla.preap.boot import is_preap_platform
@@ -42,7 +42,7 @@ class CarInterface(CarInterfaceBase):
   def __init__(self, CP, CP_SP):
     if is_preap_platform(CP):
       self.CarState = PreAPCarState
-      self.CarController = DisabledCarController
+      self.CarController = PreAPCarController
       self.RadarInterface = RadarInterfaceBase
     super().__init__(CP, CP_SP)
 

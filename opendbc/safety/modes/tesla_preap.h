@@ -45,7 +45,6 @@ static uint32_t preap_first_pull_ts = 0U;
 static bool preap_brake_paused_lateral = false;
 static bool preap_stock_cc_reengage_authorized = false;
 static bool preap_stock_cc_reengage_sent = false;
-static bool preap_stock_cc_cancel_authorized = false;
 static uint32_t preap_stock_cc_deadline_ts = 0U;
 static bool preap_hands_on_clear_timing = false;
 static uint32_t preap_hands_on_clear_ts = 0U;
@@ -54,7 +53,8 @@ static uint8_t preap_stalk_counter_last = 0U;
 
 
 static bool tesla_preap_source_fresh(bool seen, uint32_t timestamp, uint32_t now) {
-  return seen && (safety_get_ts_elapsed(now, timestamp) <= PREAP_REQUIRED_SOURCE_MAX_AGE_US);
+  const uint32_t elapsed = safety_get_ts_elapsed(now, timestamp);
+  return seen && (elapsed <= PREAP_REQUIRED_SOURCE_MAX_AGE_US);
 }
 
 static void tesla_preap_clear_pull_state(void) {
@@ -63,7 +63,6 @@ static void tesla_preap_clear_pull_state(void) {
   preap_first_pull_ts = 0U;
   preap_stock_cc_reengage_authorized = false;
   preap_stock_cc_reengage_sent = false;
-  preap_stock_cc_cancel_authorized = false;
   preap_stock_cc_deadline_ts = 0U;
 }
 
@@ -85,17 +84,19 @@ static void tesla_preap_exit(DisengageReason reason) {
 }
 
 static bool tesla_preap_required_sources_valid(uint32_t now) {
-  const bool sources_fresh = tesla_preap_source_fresh(preap_gear_seen, preap_gear_ts, now) &&
-                             tesla_preap_source_fresh(preap_doors_seen, preap_doors_ts, now) &&
-                             tesla_preap_source_fresh(preap_epas_seen, preap_epas_ts, now) &&
-                             tesla_preap_source_fresh(preap_di_brake_seen, preap_di_brake_ts, now) &&
-                             tesla_preap_source_fresh(preap_brake_message_seen, preap_brake_message_ts, now);
+  const bool gear_fresh = tesla_preap_source_fresh(preap_gear_seen, preap_gear_ts, now);
+  const bool doors_fresh = tesla_preap_source_fresh(preap_doors_seen, preap_doors_ts, now);
+  const bool epas_fresh = tesla_preap_source_fresh(preap_epas_seen, preap_epas_ts, now);
+  const bool di_brake_fresh = tesla_preap_source_fresh(preap_di_brake_seen, preap_di_brake_ts, now);
+  const bool brake_message_fresh = tesla_preap_source_fresh(preap_brake_message_seen, preap_brake_message_ts, now);
+  const bool sources_fresh = gear_fresh && doors_fresh && epas_fresh && di_brake_fresh && brake_message_fresh;
   return (preap_mode != PREAP_MODE_INVALID) && sources_fresh && preap_gear_drive && preap_doors_closed &&
          preap_epas_healthy;
 }
 
 static bool tesla_preap_required_sources_ready(uint32_t now) {
-  return tesla_preap_required_sources_valid(now) && !preap_di_brake_pressed && !preap_brake_message_pressed;
+  const bool sources_valid = tesla_preap_required_sources_valid(now);
+  return sources_valid && !preap_di_brake_pressed && !preap_brake_message_pressed;
 }
 
 static void tesla_preap_request_lateral(void) {
@@ -191,9 +192,6 @@ static void tesla_preap_process_first_pull(uint32_t now) {
   if (controls_allowed) {
     controls_allowed = false;
     tesla_preap_clear_stock_cc_confirmation();
-    if (!preap_enable_pedal) {
-      preap_stock_cc_cancel_authorized = true;
-    }
     if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
       mads_exit_controls(MADS_DISENGAGE_REASON_BUTTON);
     }
@@ -207,8 +205,9 @@ static void tesla_preap_process_first_pull(uint32_t now) {
 
 static void tesla_preap_process_second_pull(uint32_t now) {
   preap_pull_pending = false;
-  const bool engagement_ready = tesla_preap_required_sources_ready(now) && !gas_pressed && preap_gas_seen &&
-                                tesla_preap_source_fresh(preap_gas_seen, preap_gas_ts, now);
+  const bool sources_ready = tesla_preap_required_sources_ready(now);
+  const bool gas_fresh = tesla_preap_source_fresh(preap_gas_seen, preap_gas_ts, now);
+  const bool engagement_ready = sources_ready && !gas_pressed && preap_gas_seen && gas_fresh;
   if (engagement_ready) {
     if (preap_enable_pedal) {
       controls_allowed = true;
@@ -252,7 +251,8 @@ static void tesla_preap_apply_brake_policy(bool brake_rising, bool brake_release
     }
   }
 
-  if (brake_released && preap_brake_paused_lateral && tesla_preap_required_sources_ready(microsecond_timer_get())) {
+  const bool sources_ready = tesla_preap_required_sources_ready(microsecond_timer_get());
+  if (brake_released && preap_brake_paused_lateral && sources_ready) {
     preap_brake_paused_lateral = false;
     tesla_preap_request_lateral();
   }
@@ -270,153 +270,157 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
       gas_pressed = !preap_gas_seen || (pedal_raw > PREAP_PEDAL_GAS_THRESHOLD);
     }
     if (!is_pedal_sensor && (msg->bus == 0U)) {
-  if (msg->addr == 0x370U) {
-    const int angle_meas_new = (((msg->data[4] & 0x3FU) << 8) | msg->data[5]) - 8192U;
-    const uint8_t hands_on_level = msg->data[4] >> 6;
-    const uint8_t eac_status = msg->data[6] >> 5;
-    const uint8_t eac_error_code = msg->data[2] >> 4;
-    const bool epas_fault = (eac_status == 0U) && (eac_error_code >= 6U) && (eac_error_code <= 9U);
+      if (msg->addr == 0x370U) {
+        const int angle_meas_new = (((msg->data[4] & 0x3FU) << 8) | msg->data[5]) - 8192U;
+        const uint8_t hands_on_level = msg->data[4] >> 6;
+        const uint8_t eac_status = msg->data[6] >> 5;
+        const uint8_t eac_error_code = msg->data[2] >> 4;
+        const bool epas_fault = (eac_status == 0U) && (eac_error_code >= 6U) && (eac_error_code <= 9U);
+        const uint32_t hands_on_elapsed = safety_get_ts_elapsed(now, preap_hands_on_clear_ts);
 
-    update_sample(&angle_meas, angle_meas_new);
-    preap_epas_seen = true;
-    preap_epas_healthy = !epas_fault;
-    preap_epas_ts = now;
+        update_sample(&angle_meas, angle_meas_new);
+        preap_epas_seen = true;
+        preap_epas_healthy = !epas_fault;
+        preap_epas_ts = now;
 
-    if (epas_fault) {
-      steering_control_inhibited = false;
-      preap_hands_on_clear_timing = false;
-      tesla_preap_exit(MADS_DISENGAGE_REASON_STEERING_DISENGAGE);
-    } else if (hands_on_level >= 2U) {
-      steering_control_inhibited = true;
-      preap_hands_on_clear_timing = false;
-    } else if (steering_control_inhibited) {
-      if (!preap_hands_on_clear_timing) {
-        preap_hands_on_clear_timing = true;
-        preap_hands_on_clear_ts = now;
-      } else if (safety_get_ts_elapsed(now, preap_hands_on_clear_ts) >= PREAP_HANDS_ON_RESUME_US) {
-        steering_control_inhibited = false;
-        preap_hands_on_clear_timing = false;
-      } else {
-      }
-    } else {
-      preap_hands_on_clear_timing = false;
-    }
-  }
-
-  if (msg->addr == 0x155U) {
-    const float speed = (((msg->data[5] << 8) | msg->data[6]) * 0.01F) * KPH_TO_MS;
-    UPDATE_VEHICLE_SPEED(speed);
-    vehicle_moving = speed > (0.5F * KPH_TO_MS);
-  }
-
-  if (msg->addr == 0x108U) {
-    preap_gas_seen = true;
-    preap_gas_ts = now;
-    if (!preap_enable_pedal) {
-      gas_pressed = msg->data[6] != 0U;
-    }
-  }
-
-  if (msg->addr == 0x20AU) {
-    const bool brake_was_pressed = preap_brake_message_pressed || preap_di_brake_pressed;
-    const uint8_t brake_status = (msg->data[0] >> 2) & 0x3U;
-    preap_brake_message_seen = (brake_status == 1U) || (brake_status == 2U);
-    preap_brake_message_pressed = brake_status == 2U;
-    preap_brake_message_ts = now;
-    const bool brake_now = preap_brake_message_pressed || preap_di_brake_pressed;
-    brake_pressed = brake_now;
-    tesla_preap_apply_brake_policy(!brake_was_pressed && brake_now, brake_was_pressed && !brake_now);
-    if (!preap_brake_message_seen) {
-      tesla_preap_exit(MADS_DISENGAGE_REASON_BRAKE);
-    }
-  }
-
-  if (msg->addr == 0x118U) {
-    const bool brake_was_pressed = preap_brake_message_pressed || preap_di_brake_pressed;
-    const uint8_t gear = (msg->data[1] >> 4) & 0x7U;
-    const uint8_t brake_state = (msg->data[4] >> 4) & 0x3U;
-    preap_gear_seen = true;
-    preap_gear_drive = gear == 4U;
-    preap_gear_ts = now;
-    preap_di_brake_seen = brake_state <= 1U;
-    preap_di_brake_pressed = ((msg->data[1] & 0x80U) != 0U) || (brake_state == 1U);
-    preap_di_brake_ts = now;
-    const bool brake_now = preap_brake_message_pressed || preap_di_brake_pressed;
-    brake_pressed = brake_now;
-    tesla_preap_apply_brake_policy(!brake_was_pressed && brake_now, brake_was_pressed && !brake_now);
-    if (!preap_gear_drive || !preap_di_brake_seen) {
-      tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-    }
-  }
-
-  if (msg->addr == 0x318U) {
-    const uint8_t door_fl = (msg->data[1] >> 4) & 0x3U;
-    const uint8_t door_fr = (msg->data[1] >> 6) & 0x3U;
-    const uint8_t door_rl = (msg->data[2] >> 6) & 0x3U;
-    const uint8_t door_rr = (msg->data[3] >> 5) & 0x3U;
-    const uint8_t front_trunk = (msg->data[6] >> 2) & 0x3U;
-    const uint8_t boot_state = (msg->data[5] >> 6) & 0x3U;
-    preap_doors_seen = true;
-    preap_doors_closed = (door_fl == 0U) && (door_fr == 0U) && (door_rl == 0U) && (door_rr == 0U) &&
-                         (front_trunk == 0U) && (boot_state == 0U);
-    preap_doors_ts = now;
-    if (!preap_doors_closed) {
-      tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-    }
-  }
-
-  if (msg->addr == 0x368U) {
-    const uint8_t cruise_state = (msg->data[1] >> 4) & 0x7U;
-    const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) || (cruise_state == 4U);
-    if (!preap_enable_pedal && preap_stock_cc_reengage_sent) {
-      if ((safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts) < PREAP_STOCK_CC_CONFIRM_US) && cruise_engaged &&
-          tesla_preap_required_sources_ready(now)) {
-        controls_allowed = true;
-        stock_cc_reengage_confirmed = true;
-        preap_stock_cc_reengage_sent = false;
-        if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-          tesla_preap_request_lateral();
+        if (epas_fault) {
+          steering_control_inhibited = false;
+          preap_hands_on_clear_timing = false;
+          tesla_preap_exit(MADS_DISENGAGE_REASON_STEERING_DISENGAGE);
+        } else if (hands_on_level >= 2U) {
+          steering_control_inhibited = true;
+          preap_hands_on_clear_timing = false;
+        } else if (steering_control_inhibited) {
+          if (!preap_hands_on_clear_timing) {
+            preap_hands_on_clear_timing = true;
+            preap_hands_on_clear_ts = now;
+          } else if (hands_on_elapsed >= PREAP_HANDS_ON_RESUME_US) {
+            steering_control_inhibited = false;
+            preap_hands_on_clear_timing = false;
+          } else {
+          }
+        } else {
+          preap_hands_on_clear_timing = false;
         }
-      } else if (safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts) >= PREAP_STOCK_CC_CONFIRM_US) {
+      }
+
+      if (msg->addr == 0x155U) {
+        const float speed = (((msg->data[5] << 8) | msg->data[6]) * 0.01F) * KPH_TO_MS;
+        UPDATE_VEHICLE_SPEED(speed);
+        vehicle_moving = speed > (0.5F * KPH_TO_MS);
+      }
+
+      if (msg->addr == 0x108U) {
+        preap_gas_seen = true;
+        preap_gas_ts = now;
+        if (!preap_enable_pedal) {
+          gas_pressed = msg->data[6] != 0U;
+        }
+      }
+
+      if (msg->addr == 0x20AU) {
+        const bool brake_was_pressed = preap_brake_message_pressed || preap_di_brake_pressed;
+        const uint8_t brake_status = (msg->data[0] >> 2) & 0x3U;
+        preap_brake_message_seen = (brake_status == 1U) || (brake_status == 2U);
+        preap_brake_message_pressed = brake_status == 2U;
+        preap_brake_message_ts = now;
+        const bool brake_now = preap_brake_message_pressed || preap_di_brake_pressed;
+        brake_pressed = brake_now;
+        tesla_preap_apply_brake_policy(!brake_was_pressed && brake_now, brake_was_pressed && !brake_now);
+        if (!preap_brake_message_seen) {
+          tesla_preap_exit(MADS_DISENGAGE_REASON_BRAKE);
+        }
+      }
+
+      if (msg->addr == 0x118U) {
+        const bool brake_was_pressed = preap_brake_message_pressed || preap_di_brake_pressed;
+        const uint8_t gear = (msg->data[1] >> 4) & 0x7U;
+        const uint8_t brake_state = (msg->data[4] >> 4) & 0x3U;
+        preap_gear_seen = true;
+        preap_gear_drive = gear == 4U;
+        preap_gear_ts = now;
+        preap_di_brake_seen = brake_state <= 1U;
+        preap_di_brake_pressed = ((msg->data[1] & 0x80U) != 0U) || (brake_state == 1U);
+        preap_di_brake_ts = now;
+        const bool brake_now = preap_brake_message_pressed || preap_di_brake_pressed;
+        brake_pressed = brake_now;
+        tesla_preap_apply_brake_policy(!brake_was_pressed && brake_now, brake_was_pressed && !brake_now);
+        if (!preap_gear_drive || !preap_di_brake_seen) {
+          tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+        }
+      }
+
+      if (msg->addr == 0x318U) {
+        const uint8_t door_fl = (msg->data[1] >> 4) & 0x3U;
+        const uint8_t door_fr = (msg->data[1] >> 6) & 0x3U;
+        const uint8_t door_rl = (msg->data[2] >> 6) & 0x3U;
+        const uint8_t door_rr = (msg->data[3] >> 5) & 0x3U;
+        const uint8_t front_trunk = (msg->data[6] >> 2) & 0x3U;
+        const uint8_t boot_state = (msg->data[5] >> 6) & 0x3U;
+        preap_doors_seen = true;
+        preap_doors_closed = (door_fl == 0U) && (door_fr == 0U) && (door_rl == 0U) && (door_rr == 0U) &&
+                             (front_trunk == 0U) && (boot_state == 0U);
+        preap_doors_ts = now;
+        if (!preap_doors_closed) {
+          tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+        }
+      }
+
+      if (msg->addr == 0x368U) {
+        const uint8_t cruise_state = (msg->data[1] >> 4) & 0x7U;
+        const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) || (cruise_state == 4U);
+        const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
+        const bool sources_ready = tesla_preap_required_sources_ready(now);
+        if (!preap_enable_pedal && preap_stock_cc_reengage_sent) {
+          if ((confirmation_elapsed < PREAP_STOCK_CC_CONFIRM_US) && cruise_engaged && sources_ready) {
+            controls_allowed = true;
+            stock_cc_reengage_confirmed = true;
+            preap_stock_cc_reengage_sent = false;
+            if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
+              tesla_preap_request_lateral();
+            }
+          } else if (confirmation_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
+            tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+          } else {
+          }
+        }
+      }
+
+      if (msg->addr == 0x45U) {
+        const uint8_t lever = msg->data[0] & 0x3FU;
+        const uint8_t counter = tesla_preap_get_counter(msg);
+        const bool counter_consecutive = !preap_stalk_counter_seen || (counter == ((preap_stalk_counter_last + 1U) & 0xFU));
+        const bool sources_ready = tesla_preap_required_sources_ready(now);
+        preap_stalk_counter_seen = true;
+        preap_stalk_counter_last = counter;
+
+        if (lever == 1U) {
+          tesla_preap_exit(MADS_DISENGAGE_REASON_BUTTON);
+        } else if (!counter_consecutive) {
+          preap_stalk_armed = false;
+          preap_pull_pending = false;
+        } else if (lever == 0U) {
+          if (sources_ready) {
+            preap_stalk_armed = true;
+          }
+        } else if (lever == 2U) {
+          if (preap_stalk_armed && sources_ready) {
+            preap_stalk_armed = false;
+            tesla_preap_process_main_pull(now);
+          }
+        } else {
+          // Unknown stalk positions cannot carry engagement authority.
+          preap_stalk_armed = false;
+          preap_pull_pending = false;
+        }
+      }
+
+      const bool sources_valid = tesla_preap_required_sources_valid(now);
+      if (!sources_valid &&
+          (controls_allowed || controls_allowed_lateral || preap_pull_pending || preap_stock_cc_reengage_sent)) {
+        preap_hands_on_clear_timing = false;
         tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-      } else {
       }
-    }
-  }
-
-  if (msg->addr == 0x45U) {
-    const uint8_t lever = msg->data[0] & 0x3FU;
-    const uint8_t counter = tesla_preap_get_counter(msg);
-    const bool counter_consecutive = !preap_stalk_counter_seen || (counter == ((preap_stalk_counter_last + 1U) & 0xFU));
-    preap_stalk_counter_seen = true;
-    preap_stalk_counter_last = counter;
-
-    if (lever == 1U) {
-      tesla_preap_exit(MADS_DISENGAGE_REASON_BUTTON);
-    } else if (!counter_consecutive) {
-      preap_stalk_armed = false;
-      preap_pull_pending = false;
-    } else if (lever == 0U) {
-      if (tesla_preap_required_sources_ready(now)) {
-        preap_stalk_armed = true;
-      }
-    } else if (lever == 2U) {
-      if (preap_stalk_armed && tesla_preap_required_sources_ready(now)) {
-        preap_stalk_armed = false;
-        tesla_preap_process_main_pull(now);
-      }
-    } else {
-      // Unknown stalk positions cannot carry engagement authority.
-      preap_stalk_armed = false;
-      preap_pull_pending = false;
-    }
-  }
-
-  if (!tesla_preap_required_sources_valid(now) &&
-      (controls_allowed || controls_allowed_lateral || preap_pull_pending || preap_stock_cc_reengage_sent)) {
-    preap_hands_on_clear_timing = false;
-    tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-  }
     }
   }
 }
@@ -429,12 +433,14 @@ static void tesla_preap_invalid_rx_hook(const CANPacket_t *msg) {
 
 static void tesla_preap_tick(bool rx_checks_invalid) {
   const uint32_t now = microsecond_timer_get();
-  if (rx_checks_invalid || !tesla_preap_required_sources_valid(now)) {
+  const bool sources_valid = tesla_preap_required_sources_valid(now);
+  const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
+  if (rx_checks_invalid || !sources_valid) {
     preap_hands_on_clear_timing = false;
     tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
   }
   if ((preap_stock_cc_reengage_authorized || preap_stock_cc_reengage_sent) &&
-      (safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts) >= PREAP_STOCK_CC_CONFIRM_US)) {
+      (confirmation_elapsed >= PREAP_STOCK_CC_CONFIRM_US)) {
     tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
   }
 }

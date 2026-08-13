@@ -94,8 +94,8 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     self.assertFalse(CI.CS.real_brake_pressed)
     self.assertFalse(CS.brakePressed)
 
-  def test_hands_on_level_two_disengages(self):
-    for hands_on_level, should_disengage in ((1, False), (2, True), (3, True)):
+  def test_hands_on_level_does_not_set_steering_disengage(self):
+    for hands_on_level in (0, 1, 2, 3):
       with self.subTest(hands_on_level=hands_on_level):
         CI = _make_ci()
         packets = _packet("EPAS_sysStatus", {
@@ -104,7 +104,8 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
           "EPAS_eacErrorCode": 0,
         })
         CS, _ = CI.update(packets)
-        self.assertEqual(CS.steeringDisengage, should_disengage)
+        self.assertFalse(CS.steeringDisengage)
+        self.assertEqual(CS.handsOnLevel, hands_on_level)
         self.assertEqual(CI.CS.hands_on_level, hands_on_level)
 
   def test_epas_reject_disengages_without_hands_on(self):
