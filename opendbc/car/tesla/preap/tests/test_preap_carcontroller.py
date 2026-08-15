@@ -86,6 +86,12 @@ class TestPreAPCarController(unittest.TestCase):
         self.assertNotIn(BODY_ADDR, addrs)
       for addr, dat, bus in msgs:
         self.assertEqual(bus, CANBUS.party)
+        if addr == STEERING_ADDR:
+          self.assertEqual(len(dat), 4)
+        elif addr == EPAS_ADDR:
+          self.assertEqual(len(dat), 3)
+        elif addr == BODY_ADDR:
+          self.assertEqual(len(dat), 8)
         seen[addr].append((frame, dat))
 
     for i, (_frame, dat) in enumerate(seen[STEERING_ADDR]):
@@ -107,6 +113,19 @@ class TestPreAPCarController(unittest.TestCase):
       tesla_can.create_body_controls_message(1, 0, CANBUS.party, 3),
       (BODY_ADDR, b"\x00\x01\x01\x00\x00\x00\x30\x1e", CANBUS.party),
     )
+
+  def test_pedal_mode_still_emits_lateral_tuples_on_party_bus(self):
+    CI = _make_ci(pedal=True)
+    CI.update([])
+    CC, CC_SP = _permitted_controls()
+    _act, msgs = CI.apply(CC, CC_SP, now_nanos=0)
+    by_addr = {msg[0]: msg for msg in msgs}
+    self.assertEqual(by_addr[STEERING_ADDR][2], CANBUS.party)
+    self.assertEqual(len(by_addr[STEERING_ADDR][1]), 4)
+    self.assertEqual(by_addr[EPAS_ADDR][2], CANBUS.party)
+    self.assertEqual(len(by_addr[EPAS_ADDR][1]), 3)
+    self.assertEqual(by_addr[BODY_ADDR][2], CANBUS.party)
+    self.assertEqual(len(by_addr[BODY_ADDR][1]), 8)
 
   def test_set_long_active_is_fed_from_controller(self):
     CI = _make_ci()
@@ -135,6 +154,19 @@ class TestPreAPCarController(unittest.TestCase):
     CC.longActive = True
     CI.apply(CC, CC_SP, now_nanos=0)
     self.assertTrue(CI.CS.intent.long_active)
+
+  def test_invalid_mode_never_requests_longitudinal_authority(self):
+    for pedal in (False, True):
+      with self.subTest(pedal=pedal):
+        CI = _make_ci(pedal=pedal, engagement_mode=3)
+        CI.update([])
+        CC, CC_SP = _permitted_controls()
+        CC.enabled = True
+        CC.longActive = True
+        _act, msgs = CI.apply(CC, CC_SP, now_nanos=0)
+        self.assertFalse(CI.CS.intent.long_active)
+        self.assertNotIn(0x45, [msg[0] for msg in msgs])
+        self.assertNotIn(0x551, [msg[0] for msg in msgs])
 
 
 if __name__ == "__main__":

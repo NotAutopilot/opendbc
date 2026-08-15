@@ -5,6 +5,7 @@ from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.values import CANBUS, CAR, CruiseButtons
+from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 
 
 STW_ADDR = 0x45
@@ -102,14 +103,44 @@ class TestPreAPNoPedalIsolation(unittest.TestCase):
     _assert_no_pedal_vdas_or_main(self, seen)
     self.assertFalse(any(addr == STW_ADDR for addr, _dat, _bus in seen))
 
-  def test_builder_authority_never_emits_pedal_vdas_or_main(self):
-    self.assertFalse(hasattr(TeslaCANPreAP, "create_pedal_command"))
+  def test_no_pedal_never_constructs_vdas_or_long_controller(self):
+    CP, CP_SP, CI = _preap()
+    self.assertFalse(CI.CC._pedal_pipeline)
+    self.assertIsNone(CI.CC.long_controller)
+    from opendbc.car.tesla.preap.boot import pedal_pipeline_enabled
+    self.assertFalse(pedal_pipeline_enabled(CP, CP_SP))
+
+  def test_other_brand_pipeline_unreachable(self):
+    from opendbc.car.tesla.preap.boot import pedal_pipeline_enabled
+    CP = structs.CarParams()
+    CP.brand = "honda"
+    CP.carFingerprint = "HONDA_CIVIC"
+    CP.openpilotLongitudinalControl = True
+    CP.pcmCruise = False
+    CP_SP = structs.CarParamsSP()
+    CP_SP.enableGasInterceptor = True
+    self.assertFalse(pedal_pipeline_enabled(CP, CP_SP))
+
+  def test_modern_tesla_cannot_activate_preap_pedal_pipeline_from_overlapping_flags(self):
+    from opendbc.car.tesla.preap.boot import pedal_pipeline_enabled
+    CP = structs.CarParams()
+    CP.brand = "tesla"
+    CP.carFingerprint = CAR.TESLA_MODEL_Y
+    CP.openpilotLongitudinalControl = True
+    CP.pcmCruise = False
+    CP_SP = structs.CarParamsSP()
+    CP_SP.enableGasInterceptor = True
+    CP_SP.flags = int(TeslaFlagsSP.PREAP_PEDAL_PRESENT | TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE)
+    self.assertFalse(pedal_pipeline_enabled(CP, CP_SP))
+
+  def test_builder_authority_never_emits_vdas_or_main(self):
+    self.assertTrue(hasattr(TeslaCANPreAP, "create_pedal_command"))
     self.assertFalse(hasattr(TeslaCANPreAP, "create_das_control"))
     for snapshot in (None, _pedal_snapshot()):
       _CP, _CP_SP, CI = _preap(snapshot)
       can = CI.CC.tesla_can
       live = {"MC_STW_ACTN_RQ": 4, "WprSw6Posn": 2, "DTR_Dist_Rq": 255}
-      for lever in (MAIN, CruiseButtons.IDLE, CruiseButtons.RES_ACCEL, CruiseButtons.DECEL_SET):
+      for lever in (MAIN, CruiseButtons.IDLE, CruiseButtons.DECEL_SET):
         self.assertIsNone(can.create_action_request(lever, CANBUS.party, 4, live))
       for lever in (CANCEL, SET_ACCEL):
         msg = can.create_action_request(lever, CANBUS.party, 4, live)

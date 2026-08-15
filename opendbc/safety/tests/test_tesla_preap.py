@@ -13,6 +13,8 @@ PREAP_MODE_INVALID = 3
 PREAP_FLAG_ENABLE_PEDAL = 1 << 2
 PREAP_FLAG_RADAR_EMULATION = 1 << 3
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 1 << 4
+PREAP_FLAG_PEDAL_BUS_ZERO = 1 << 5
+PREAP_FLAG_PEDAL_CALIBRATION = 1 << 6
 
 
 def _byte_sum(address, data, checksum_index):
@@ -179,6 +181,16 @@ class TeslaPreAPSafetyBase(common.SafetyTestBase):
     self._first_pull(0)
     self._second_pull(delta_us)
 
+  def _stale_pedal_tick(self):
+    self._engage_pedal()
+    self.safety.set_timer(500_001)
+    self.safety.safety_tick_current_safety_config()
+
+  def _unhealthy_pedal_tick(self):
+    self._engage_pedal()
+    self.assertTrue(self._rx(self._pedal_sensor(state=1)))
+    self.safety.safety_tick_current_safety_config()
+
   def _prime_momentary_mads(self):
     self._prime_required_rx()
 
@@ -194,23 +206,90 @@ class TeslaPreAPSafetyBase(common.SafetyTestBase):
       data[5] ^= 1
     return self._packet(0x551, data, bus)
 
-  def _steering_command(self, enabled=True, checksum=True):
-    data = bytearray((0x40, 0x00, 0x40 if enabled else 0, 0))
+  def _steering_command(self, enabled=True, checksum=True, control_type=None, bus=0, counter=0, haptic=False):
+    if control_type is None:
+      control_type = 1 if enabled else 0
+    data = bytearray(4)
+    data[0] = 0xC0 if haptic else 0x40
+    data[1] = 0x00
+    data[2] = ((control_type & 0x3) << 6) | (counter & 0xF)
     data = _byte_sum(0x488, data, 3)
     if not checksum:
       data[3] ^= 1
-    return self._packet(0x488, data)
+    return self._packet(0x488, data, bus)
 
-  def _body_command(self, checksum=True):
+  def _epas_command(self, mode=1, counter=0, checksum=True, bus=0):
+    data = bytearray(3)
+    data[0] = mode & 0x07
+    data[1] = counter & 0x0F
+    data = _byte_sum(0x214, data, 2)
+    if not checksum:
+      data[2] ^= 1
+    return self._packet(0x214, data, bus)
+
+  def _body_command(self, checksum=True, bus=0, turn=1):
     data = bytearray(8)
-    data[1] = 1
+    data[1] = turn & 0x03
     data = _byte_sum(0x3E9, data, 7)
     if not checksum:
       data[7] ^= 1
-    return self._packet(0x3E9, data)
+    return self._packet(0x3E9, data, bus)
 
 
 class TestTeslaPreAPIndependent(TeslaPreAPSafetyBase, MomentaryMadsSafetyTestBase):
+  def test_pedal_gas_threshold_and_safe_release_tx(self):
+    self._prime_required_rx()
+    for raw, pressed in ((649, False), (650, False), (651, True)):
+      self._rx(self._pedal_sensor(raw))
+      self.assertEqual(pressed, self.safety.get_gas_pressed_prev())
+
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=0, raw2=0, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=500, raw2=500, counter=1)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=False, raw1=501, raw2=0, counter=2)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=2)))
+
+  def test_pedal_enable_requires_longitudinal_and_blocks_on_brake(self):
+    self._prime_required_rx()
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self._engage_pedal()
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, bus=0, counter=1)))
+    self._rx(self._brake(True))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=1)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, counter=1)))
+
+  def test_pedal_enable_blocked_on_gas_press(self):
+    self._engage_pedal()
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self._rx(self._pedal_sensor(800))
+    self.assertTrue(self.safety.get_gas_pressed_prev())
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=1)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, counter=1)))
+
+  def test_pedal_command_protocol_and_feedback_lease(self):
+    self._engage_pedal()
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0, checksum=False)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0, raw1=0xFFFF)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=1)))
+    self.safety.set_timer(500_001)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=2)))
+
+  def test_unhealthy_pedal_clears_long_and_retains_lateral(self):
+    self._unhealthy_pedal_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+
+  def test_stale_pedal_clears_long_and_retains_lateral(self):
+    self._stale_pedal_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+
   def test_double_pull_boundaries_and_release(self):
     for delta, expected_long in ((0, False), (399000, True), (400000, False), (401000, False)):
       with self.subTest(delta=delta):
@@ -355,6 +434,10 @@ class TestTeslaPreAPIndependent(TeslaPreAPSafetyBase, MomentaryMadsSafetyTestBas
     self.assertTrue(self.safety.get_controls_allowed_lateral())
     self.assertTrue(self.safety.get_steering_control_inhibited())
     self.assertFalse(self._tx(self._steering_command()))
+    self.assertFalse(self._tx(self._epas_command(mode=1)))
+    self.assertFalse(self._tx(self._body_command()))
+    self.assertTrue(self._tx(self._steering_command(enabled=False)))
+    self.assertTrue(self._tx(self._epas_command(mode=0)))
 
     self.safety.set_timer(600000)
     self._rx(self._epas(hands=0))
@@ -381,28 +464,101 @@ class TestTeslaPreAPIndependent(TeslaPreAPSafetyBase, MomentaryMadsSafetyTestBas
         self._rx(self._brake(False))
         self.assertEqual(expected_after_release, self.safety.get_controls_allowed_lateral())
 
-  def test_pedal_gas_threshold_and_tx_remains_disabled(self):
-    self._prime_required_rx()
-    for raw, pressed in ((649, False), (650, False), (651, True)):
-      self._rx(self._pedal_sensor(raw))
-      self.assertEqual(pressed, self.safety.get_gas_pressed_prev())
-
-    self.assertFalse(self._tx(self._pedal_command(enabled=False, raw1=500, raw2=500)))
-    self.assertFalse(self._tx(self._pedal_command(enabled=True)))
-
   def test_all_deferred_tx_tuples_are_blocked(self):
     self._engage_pedal()
     messages = (
-      self._steering_command(),
       self._packet(0x2B9, bytes(8)),
       self._packet(0x214, bytes(8)),
       self._stalk(16),
-      self._body_command(),
-      self._pedal_command(enabled=True),
     )
     for msg in messages:
       with self.subTest(address=hex(msg[0].addr)):
         self.assertFalse(self._tx(msg))
+
+  def test_lateral_tx_blocked_without_permission(self):
+    self._prime_required_rx()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._epas_command(mode=1)))
+    self.assertFalse(self._tx(self._body_command()))
+    self.assertTrue(self._tx(self._steering_command(enabled=False)))
+    self.assertTrue(self._tx(self._epas_command(mode=0)))
+
+  def test_steering_epas_body_allowed_when_lateral_permitted(self):
+    self._engage_pedal()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self.safety.get_steering_control_inhibited())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+    self.assertTrue(self._tx(self._epas_command(mode=1)))
+    self.assertTrue(self._tx(self._body_command()))
+
+  def test_frozen_builder_bytes_tx_when_lateral_permitted(self):
+    self._engage_pedal()
+    self.assertTrue(self._tx(self._packet(0x488, b"\x3f\x82\x45\x92")))
+    self.assertTrue(self._tx(self._packet(0x214, b"\x01\x05\x1c")))
+    self.assertTrue(self._tx(self._packet(0x3E9, b"\x00\x01\x01\x00\x00\x00\x30\x1e")))
+
+  def test_steering_epas_body_protocol_rejects(self):
+    self._engage_pedal()
+    self.assertFalse(self._tx(self._steering_command(checksum=False)))
+    self.assertFalse(self._tx(self._steering_command(bus=1)))
+    self.assertFalse(self._tx(self._steering_command(bus=2)))
+    fd_steer = self._steering_command()
+    fd_steer[0].fd = True
+    self.assertFalse(self._tx(fd_steer))
+    self.assertFalse(self._tx(self._packet(0x488, bytes(8))))
+    for control_type in (2, 3):
+      with self.subTest(control_type=control_type):
+        self.assertFalse(self._tx(self._steering_command(control_type=control_type)))
+    self.assertFalse(self._tx(self._epas_command(checksum=False)))
+    self.assertFalse(self._tx(self._epas_command(bus=1)))
+    fd_epas = self._epas_command()
+    fd_epas[0].fd = True
+    self.assertFalse(self._tx(fd_epas))
+    for mode in range(2, 8):
+      with self.subTest(epas_mode=mode):
+        self.assertFalse(self._tx(self._epas_command(mode=mode)))
+    self.assertFalse(self._tx(self._body_command(checksum=False)))
+    self.assertFalse(self._tx(self._body_command(bus=1)))
+    fd_body = self._body_command()
+    fd_body[0].fd = True
+    self.assertFalse(self._tx(fd_body))
+    self.assertFalse(self._tx(self._packet(0x3E9, bytes(4))))
+
+  def test_steering_haptic_request_rejected_regardless_control_type_or_permission(self):
+    self._prime_required_rx()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=False, haptic=True)))
+    self.assertTrue(self._tx(self._steering_command(enabled=False, haptic=False)))
+    self._engage_pedal()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True, haptic=True)))
+    self.assertFalse(self._tx(self._steering_command(enabled=False, haptic=True)))
+    self.assertTrue(self._tx(self._steering_command(enabled=True, haptic=False)))
+
+
+class TestTeslaPreAPPedalBusZero(TeslaPreAPSafetyBase):
+  PARAM = PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_PEDAL_BUS_ZERO
+
+  def _pedal_sensor(self, raw=450, *, state=0, counter=None, bus=0, checksum=True):
+    return super()._pedal_sensor(raw, state=state, counter=counter, bus=bus, checksum=checksum)
+
+  def _pedal_command(self, *, enabled, raw1=0, raw2=0, counter=0, bus=0, checksum=True):
+    return super()._pedal_command(enabled=enabled, raw1=raw1, raw2=raw2, counter=counter, bus=bus, checksum=checksum)
+
+  def test_pedal_bus_is_exclusive(self):
+    self._engage_pedal()
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=1, bus=2)))
+
+  def test_lateral_tuples_stay_on_bus_zero_with_pedal(self):
+    self._engage_pedal()
+    self.assertTrue(self._tx(self._steering_command(bus=0)))
+    self.assertTrue(self._tx(self._epas_command(bus=0)))
+    self.assertTrue(self._tx(self._body_command(bus=0)))
+    self.assertFalse(self._tx(self._steering_command(bus=2)))
+    self.assertFalse(self._tx(self._epas_command(bus=2)))
+    self.assertFalse(self._tx(self._body_command(bus=2)))
 
 
 class TestTeslaPreAPCruiseCoupled(TeslaPreAPSafetyBase):
@@ -426,6 +582,27 @@ class TestTeslaPreAPCruiseCoupled(TeslaPreAPSafetyBase):
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
+  def test_unhealthy_pedal_exits_both_in_cruise_coupled(self):
+    self._unhealthy_pedal_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+
+  def test_stale_pedal_exits_both_in_cruise_coupled(self):
+    self._stale_pedal_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+
+  def test_idle_pedal_timeout_retains_coupled_lateral(self):
+    self._engage_pedal()
+    self.safety.set_controls_allowed(False)
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._rx(self._pedal_sensor(state=1)))
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
 
 class TestTeslaPreAPLongitudinalOnly(TeslaPreAPSafetyBase):
   MODE = PREAP_MODE_LONGITUDINAL_ONLY
@@ -433,6 +610,24 @@ class TestTeslaPreAPLongitudinalOnly(TeslaPreAPSafetyBase):
   def test_double_pull_never_grants_lateral(self):
     self._engage_pedal()
     self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_enabled_lateral_tx_blocked_in_longitudinal_only(self):
+    self._engage_pedal()
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._epas_command(mode=1)))
+    self.assertFalse(self._tx(self._body_command()))
+    self.assertTrue(self._tx(self._steering_command(enabled=False)))
+    self.assertTrue(self._tx(self._epas_command(mode=0)))
+
+  def test_unhealthy_pedal_clears_long_only(self):
+    self._unhealthy_pedal_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_stale_pedal_clears_long_only(self):
+    self._stale_pedal_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
 
@@ -447,8 +642,76 @@ class TestTeslaPreAPInvalidMode(TeslaPreAPSafetyBase):
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
 
+class TestTeslaPreAPPedalCalibration(TeslaPreAPSafetyBase):
+  MODE = PREAP_MODE_INVALID
+  PARAM = PREAP_FLAG_PEDAL_CALIBRATION
+
+  def _prime_calibration_rx(self, *, gear=3, brake=True):
+    self.assertTrue(self._rx(self._epas()))
+    self.assertTrue(self._rx(self._di_torque1()))
+    self.assertTrue(self._rx(self._di_torque2(gear=gear, brake=brake, brake_state=1 if brake else 0)))
+    self.assertTrue(self._rx(self._brake(brake)))
+    self.assertTrue(self._rx(self._di_state()))
+    self.assertTrue(self._rx(self._esp()))
+    self.assertTrue(self._rx(self._doors()))
+
+  def test_enable_requires_fresh_brake_and_neutral(self):
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self._prime_calibration_rx(gear=4, brake=True)
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self._prime_calibration_rx(gear=3, brake=False)
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self._prime_calibration_rx(gear=3, brake=True)
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+
+  def test_enable_revoked_when_brake_released(self):
+    self._prime_calibration_rx(gear=3, brake=True)
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self._rx(self._di_torque2(gear=3, brake=False, brake_state=0))
+    self._rx(self._brake(False))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=1)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=0, raw2=0, counter=1)))
+
+  def test_enable_revoked_when_not_neutral(self):
+    self._prime_calibration_rx(gear=3, brake=True)
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self._rx(self._di_torque2(gear=4, brake=True, brake_state=1))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=1)))
+
+  def test_safe_release_stays_bounded(self):
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=0, raw2=0, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=500, raw2=500, counter=1)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=False, raw1=501, raw2=0, counter=2)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=False, raw1=0, raw2=0, counter=2, checksum=False)))
+
+  def test_never_grants_lateral_or_longitudinal(self):
+    self._prime_calibration_rx(gear=3, brake=False)
+    self._first_pull(0)
+    self._second_pull(399000)
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+    self.assertFalse(self._tx(self._steering_command()))
+    self.assertFalse(self._tx(self._epas_command()))
+    self.assertFalse(self._tx(self._body_command()))
+    self.assertFalse(self._tx(self._stalk(1)))
+    self.assertFalse(self._tx(self._stalk(16)))
+
+  def test_protocol_and_bus_constraints(self):
+    self._prime_calibration_rx(gear=3, brake=True)
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0, bus=0)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0, checksum=False)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=1)))
+
+
 class TestTeslaPreAPNoPedal(TeslaPreAPSafetyBase):
   PARAM = 0
+
+  def test_host_551_unreachable_without_pedal_flag(self):
+    self.assertFalse(self._tx(self._pedal_command(enabled=False)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225)))
 
   def test_di_gas_and_stock_cc_handshake_remain_fail_closed(self):
     self._prime_required_rx()
@@ -484,7 +747,6 @@ class TestTeslaPreAPRadarTxDisabled(TeslaPreAPSafetyBase):
     self.safety.set_current_safety_param_sp(self.MODE)
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, 0)
     self.assertFalse(self._tx(self._packet(0x219, bytes(8), 1)))
-
 
 
 class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
@@ -643,10 +905,8 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     self._rx(self._di_state(cruise=2))
     self.assertTrue(self.safety.get_controls_allowed())
     blocked = (
-      self._steering_command(),
       self._packet(0x2B9, bytes(8)),
       self._packet(0x214, bytes(8)),
-      self._body_command(),
       self._pedal_command(enabled=True),
       self._stw_msg(2, 8),
     )
@@ -667,7 +927,6 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     self._rx(self._di_state(cruise=2))
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
-
 
   def test_cancel_auth_budget_120ms_positive_offset_and_wrap(self):
     for elapsed, allowed in ((100000, True), (119999, True), (120000, True), (120001, False)):
@@ -778,6 +1037,13 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
     return live
 
+  def test_lateral_tx_allowed_after_stock_cc_confirm(self):
+    self._confirm_stock_cc()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+    self.assertTrue(self._tx(self._epas_command(mode=1)))
+    self.assertTrue(self._tx(self._body_command()))
+
   def test_confirmed_di_fall_independent_retains_lateral(self):
     self._confirm_stock_cc()
     self.assertTrue(self.safety.get_controls_allowed_lateral())
@@ -856,8 +1122,6 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     fd_false = self._authorized(1, live, 2)
     self.assertFalse(bool(fd_false[0].fd))
     self.assertTrue(self._tx(fd_false))
-
-
 
   def test_nonconsecutive_counter_clears_set_auth_before_tx(self):
     live, set_counter = self._handshake_to_set_auth()
@@ -944,15 +1208,20 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
 class TestTeslaPreAPNoPedalCoupledStockCc(TestTeslaPreAPNoPedalStockCc):
   MODE = PREAP_MODE_CRUISE_COUPLED
 
-
   def test_confirm_requests_lateral_in_coupled_mode(self):
     live, set_counter = self._handshake_to_set_auth()
     self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._epas_command(mode=1)))
+    self.assertFalse(self._tx(self._body_command()))
     self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
     self.safety.set_timer(450000)
     self._rx(self._di_state(cruise=2))
     self.assertTrue(self.safety.get_controls_allowed())
     self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+    self.assertTrue(self._tx(self._epas_command(mode=1)))
+    self.assertTrue(self._tx(self._body_command()))
 
   def test_confirmed_di_fall_independent_retains_lateral(self):
     self._confirm_stock_cc()
@@ -972,6 +1241,13 @@ class TestTeslaPreAPNoPedalCoupledStockCc(TestTeslaPreAPNoPedalStockCc):
 class TestTeslaPreAPNoPedalLongOnlyStockCc(TestTeslaPreAPNoPedalStockCc):
   MODE = PREAP_MODE_LONGITUDINAL_ONLY
 
+  def test_lateral_tx_allowed_after_stock_cc_confirm(self):
+    self._confirm_stock_cc()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._epas_command(mode=1)))
+    self.assertFalse(self._tx(self._body_command()))
+
   def test_confirm_does_not_grant_lateral(self):
     live, set_counter = self._handshake_to_set_auth()
     self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
@@ -979,6 +1255,9 @@ class TestTeslaPreAPNoPedalLongOnlyStockCc(TestTeslaPreAPNoPedalStockCc):
     self._rx(self._di_state(cruise=2))
     self.assertTrue(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._epas_command(mode=1)))
+    self.assertFalse(self._tx(self._body_command()))
 
   def test_confirmed_di_fall_independent_retains_lateral(self):
     self._confirm_stock_cc()

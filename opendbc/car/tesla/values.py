@@ -5,7 +5,7 @@ from opendbc.car.lateral import AngleSteeringLimitsVM
 from opendbc.car.structs import CarParams, CarState
 from opendbc.car.docs_definitions import CarDocs, CarFootnote, CarHarness, CarParts, Column, SupportType
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
-from opendbc.car.tesla.preap.constants import STALK_DOUBLE_PULL_MS
+from opendbc.car.tesla.preap.constants import STALK_DOUBLE_PULL_MS as STALK_DOUBLE_PULL_MS
 
 Ecu = CarParams.Ecu
 

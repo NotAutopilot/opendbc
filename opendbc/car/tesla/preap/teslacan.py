@@ -1,4 +1,8 @@
 """Pre-AP steering/EPAS/body builders plus verified STW 0x45 cancel/set packing."""
+import struct
+from ctypes import create_string_buffer
+
+from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PEDAL_D, PEDAL_M1, PEDAL_M2
 from opendbc.car.tesla.values import CANBUS, CruiseButtons
 
 STEERING_ADDR = 0x488
@@ -42,6 +46,31 @@ def stw_crc8(data: bytes | bytearray) -> int:
 class TeslaCANPreAP:
   def __init__(self, packer):
     self.packer = packer
+    self.pedal_idx = 0
+    self.pedal_can_bus = 2
+
+  def create_pedal_command(self, accel_command, enable=1, pedal_can_bus=None):
+    """Build GAS_COMMAND (0x551) using raw struct packing for firmware byte-compatibility."""
+    if pedal_can_bus is None:
+      pedal_can_bus = self.pedal_can_bus
+
+    idx = self.pedal_idx
+    self.pedal_idx = (self.pedal_idx + 1) % 16
+
+    if enable == 1:
+      int_cmd1 = max(0, min(65534, int((accel_command - PEDAL_D) / PEDAL_M1)))
+      int_cmd2 = max(0, min(65534, int((accel_command - PEDAL_D) / PEDAL_M2)))
+    else:
+      int_cmd1 = 0
+      int_cmd2 = 0
+
+    msg = create_string_buffer(6)
+    struct.pack_into("BBBBB", msg, 0,
+                     (int_cmd1 >> 8) & 0xFF, int_cmd1 & 0xFF,
+                     (int_cmd2 >> 8) & 0xFF, int_cmd2 & 0xFF,
+                     ((enable << 7) + idx) & 0xFF)
+    struct.pack_into("B", msg, 5, tesla_byte_sum_checksum(GAS_COMMAND_ID, bytes(msg.raw[:5])))
+    return (GAS_COMMAND_ID, bytes(msg.raw[:6]), pedal_can_bus)
 
   def create_steering_control(self, counter, angle, enabled):
     values = {

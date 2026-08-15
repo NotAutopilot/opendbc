@@ -2,7 +2,6 @@ import unittest
 
 from opendbc.car import structs
 from opendbc.car.tesla.preap.constants import (
-  STALK_DOUBLE_PULL_MS,
   STOCK_CC_CANCEL_DELAY_FRAMES,
   STOCK_CC_TX_PERIOD_FRAMES,
 )
@@ -433,7 +432,6 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertFalse(sp.preapStockCcEnablePending)
     self.assertFalse(sp.preapStockCcHostDiConfirmed)
 
-
   def test_confirmed_panda_authority_is_continuously_required(self):
     h = self._confirm()
     h.panda(1, True, True)
@@ -497,8 +495,6 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertFalse(sp.preapStockCcHostDiConfirmed)
     h.t.update_stalk(IDLE, (counter + 4) & 0xF, 510)
     self.assertEqual(h.t.state, State.idle)
-
-
 
   def test_confirmed_di_fall_fails_closed(self):
     h = self._confirm()

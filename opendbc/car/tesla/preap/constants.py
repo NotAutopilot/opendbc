@@ -30,7 +30,99 @@ PREAP_MODE_INVALID = 3
 PREAP_FLAG_ENABLE_PEDAL = 1 << 2
 PREAP_FLAG_RADAR_EMULATION = 1 << 3
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 1 << 4
+PREAP_FLAG_PEDAL_BUS_ZERO = 1 << 5
+PREAP_FLAG_PEDAL_CALIBRATION = 1 << 6
 
 # Dedicated CarParamsSP.safetyParam bits (current_safety_param_sp transport).
 SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED = 1 << 4
 SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE = 1 << 5
+
+# Pedal DI (Driver Intent) before calibration.
+PEDAL_DI_MIN = -5
+PEDAL_DI_ZERO = 0
+PEDAL_TIMEOUT_MS = 500
+# Host-only CS_SP.pedalFeedbackState sentinel; firmware STATE is 0 or 1.
+PEDAL_FEEDBACK_TIMEOUT_STATE = 0xFF
+
+ACCEL_MAX = 2.5  # m/s^2
+REGEN_MAX = -1.5  # m/s^2
+
+PEDAL_BP = [0., 5., 12., 20., 30., 40.]
+PEDAL_MAX_VALUES = [50., 58., 66., 74., 82., 90.]
+
+# Comma Pedal 0x551 scaling. Physical 0 maps to raw 450.
+PEDAL_M1 = 0.050796813
+PEDAL_M2 = 0.101593626
+PEDAL_D = -22.85856576
+GAS_COMMAND_ID = 0x551
+GAS_SENSOR_ID = 0x552
+
+# Asymmetric DI slew at 50 Hz.
+PEDAL_RAMP_RATE_UP = 5.0
+PEDAL_RAMP_RATE_DOWN = 2.5
+
+# Zero-torque learning.
+ACCEL_DEADBAND = 0.15  # m/s²
+TORQUE_LEVEL_ACC = 0.0
+TORQUE_LEVEL_DECEL = -30.0
+ZERO_TORQUE_MIN_SPEED_MS = 10.0 * 0.44704  # 10 mph
+ZERO_TORQUE_SETTLE_UPDATES = 25
+ZERO_TORQUE_ADAPT_RATE = 0.1
+
+# Pre-AP accel envelopes by personality. Breakpoints are speed in m/s.
+ACCEL_PREAP_BP = [0.0, 1.3, 7.5, 15.0, 25.0, 30.0, 40.0]
+ACCEL_PREAP_PROFILES = {
+  0: [0.3, 0.8, 1.1, 1.0, 0.85, 0.7, 0.6],
+  1: [0.3, 0.7, 1.0, 0.9, 0.8, 0.6, 0.5],
+  2: [0.3, 0.6, 0.9, 0.8, 0.7, 0.5, 0.45],
+}
+
+# Generic LongControl passes the planner target through; VirtualDAS owns feedback.
+PEDAL_LONG_K_BP = [0.0, 3.0, 6.0, 35.0]
+PEDAL_LONG_KP_V = [0.0, 0.0, 0.0, 0.0]
+PEDAL_LONG_KI_V = [0.0, 0.0, 0.0, 0.0]
+
+VDAS_INNER_K_BP = [0.0, 5.0, 35.0]
+VDAS_INNER_KP_V = [0.0, 0.0, 0.0]
+VDAS_INNER_KI_V = [0.3, 0.2, 0.15]
+VDAS_FUTURE_T_BP = [2.0, 5.0]
+VDAS_FUTURE_T_V = [0.30, 0.55]
+VDAS_AEGO_FILTER_RC = 0.25
+VDAS_ACCEL_JERK_MAX = 1.0
+VDAS_DECEL_JERK_MAX = 2.5
+VDAS_ACCEL_SNAP_MAX = 4.0
+VDAS_ZERO_TORQUE_TRANSITION_WIDTH = 0.25
+VDAS_EGO_JERK_MAX = 5.0
+
+ENGAGE_GRACE_FRAMES = 50
+ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9
+
+REGEN_DECEL_PROMPT_DWELL_UPDATES = 40
+REGEN_DECEL_PROMPT_MIN_SPEED = 2.0
+REGEN_DECEL_PROMPT_CLEAR_SPEED = 1.0
+REGEN_DECEL_SHORTFALL_TRIGGER = 0.35
+REGEN_DECEL_SHORTFALL_CLEAR = 0.15
+REGEN_COMMAND_TRIGGER_DI = -2.0
+REGEN_COMMAND_CLEAR_DI = -1.0
+REGEN_DECEL_REQUEST_TRIGGER = -0.5
+REGEN_DECEL_REQUEST_CLEAR = -0.2
+
+PREAP_FOLLOW_DISTANCE_RANGE = range(1, 8)
+PREAP_T_FOLLOW = (0.7, 0.9, 1.1, 1.3, 1.5, 1.7, 1.9)
+
+FF_SPEED_BP = [0.0, 5.0, 12.0, 20.0, 30.0, 40.0]
+FF_ACCEL_BP = [-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+FF_DEFAULT_TABLE = [
+    [-5.00, -3.33, -1.67,  0.00, 10.00, 20.00, 30.00, 40.00, 50.00],
+    [-5.00, -3.33, -1.67,  0.00,  7.54, 15.08, 22.62, 30.16, 37.70],
+    [-5.00, -3.33, -1.67,  0.00,  8.58, 17.16, 25.74, 34.32, 42.90],
+    [-5.00, -3.33, -1.67,  0.00,  9.62, 19.24, 28.86, 38.48, 48.10],
+    [-5.00, -3.33, -1.67,  0.00, 10.66, 21.32, 31.98, 42.64, 53.30],
+    [-5.00, -3.33, -1.67,  0.00, 11.70, 23.40, 35.10, 46.80, 58.50],
+]
+
+
+def get_preap_accel_limits(current_speed, personality=1):
+  import numpy as np
+  profile = ACCEL_PREAP_PROFILES.get(int(personality), ACCEL_PREAP_PROFILES[1])
+  return REGEN_MAX, float(np.interp(current_speed, ACCEL_PREAP_BP, profile))

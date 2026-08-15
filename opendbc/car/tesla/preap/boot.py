@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from weakref import ref
 import math
 
 from opendbc.car import get_safety_config, structs
 from opendbc.car.tesla.preap.constants import (
+  PEDAL_DI_ZERO,
+  PEDAL_LONG_K_BP,
+  PEDAL_LONG_KI_V,
+  PEDAL_LONG_KP_V,
+  PREAP_FLAG_PEDAL_BUS_ZERO,
   PREAP_FLAG_ENABLE_PEDAL,
   PREAP_FLAG_RADAR_BEHIND_NOSECONE,
   PREAP_FLAG_RADAR_EMULATION,
@@ -41,10 +47,34 @@ STEERING_MODE_BY_VALUE = {
 
 
 @dataclass(frozen=True)
+class PedalCalib:
+  available: bool = False
+  factor: float = 1.0
+  zero: float = 0.0  # coast position used by DI↔voltage transforms
+
+  def di_to_pedal(self, val: float) -> float:
+    factor = self.factor if self.factor != 0 else 1.0
+    return self.zero + (val - PEDAL_DI_ZERO) / factor
+
+  def pedal_to_di(self, val: float) -> float:
+    return PEDAL_DI_ZERO + (val - self.zero) * self.factor
+
+
+_PEDAL_CALIB: dict[int, tuple[ref, PedalCalib]] = {}
+
+
+def _set_pedal_calib(CP_SP: structs.CarParamsSP, calib: PedalCalib) -> None:
+  key = id(CP_SP)
+  _PEDAL_CALIB[key] = (ref(CP_SP, lambda _: _PEDAL_CALIB.pop(key, None)), calib)
+
+
+@dataclass(frozen=True)
 class PreAPHardwareSnapshot:
   pedal_present: bool = False
   pedal_bus: int = 2
   pedal_calib_available: bool = False
+  pedal_calib_factor: float = 1.0
+  pedal_calib_zero: float = 0.0
   radar_present: bool = False
   radar_behind_nosecone: bool = False
   radar_offset: float = 0.0
@@ -61,17 +91,17 @@ def is_preap_platform(candidate: str | structs.CarParams) -> bool:
 
 
 def parse_engagement_mode(value) -> int:
-  if value is None or value == "":
+  if value is None or value == "" or value == b"":
     return PREAP_MODE_INDEPENDENT
   if isinstance(value, str) and value in MODE_BY_NAME:
     return MODE_BY_NAME[value]
   try:
     mode = int(value)
   except (TypeError, ValueError):
-    return PREAP_MODE_INDEPENDENT
+    return PREAP_MODE_INVALID
   if mode in (PREAP_MODE_INDEPENDENT, PREAP_MODE_CRUISE_COUPLED, PREAP_MODE_LONGITUDINAL_ONLY):
     return mode
-  return PREAP_MODE_INDEPENDENT
+  return PREAP_MODE_INVALID
 
 
 def parse_steering_mode(value) -> int:
@@ -107,11 +137,13 @@ def _finite_number(value) -> float | None:
 
 def compatibility_from_mode(mode: int) -> tuple[bool, bool]:
   """Derive retired Main/UEM compatibility fields from canonical engagement mode."""
+  if mode == PREAP_MODE_INDEPENDENT:
+    return True, False
   if mode == PREAP_MODE_CRUISE_COUPLED:
     return False, True
   if mode == PREAP_MODE_LONGITUDINAL_ONLY:
     return False, False
-  return True, False
+  return False, False
 
 
 def _pedal_calib_available(pedal_present: bool, pedal_calib_done, pedal_calib_factor,
@@ -180,10 +212,19 @@ def hardware_snapshot_from_values(
     nosecone = False
   mode = parse_engagement_mode(engagement_mode)
   main_allowed, uem = compatibility_from_mode(mode)
+  factor = _finite_number(pedal_calib_factor)
+  zero = _finite_number(pedal_calib_zero)
+  if factor is None:
+    factor = _DEFAULT_PEDAL_CALIB_FACTOR
+  if zero is None:
+    zero = _DEFAULT_PEDAL_CALIB_ZERO
+  coast_zero = zero - (1.0 / factor if factor else 1.0) if pedal_calib_available else zero
   return PreAPHardwareSnapshot(
     pedal_present=pedal_present,
     pedal_bus=bus,
     pedal_calib_available=pedal_calib_available,
+    pedal_calib_factor=factor,
+    pedal_calib_zero=coast_zero,
     radar_present=radar_present,
     radar_behind_nosecone=nosecone,
     radar_offset=offset,
@@ -232,10 +273,11 @@ def apply_preap_capabilities(ret: structs.CarParamsSP) -> structs.CarParamsSP:
 def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
                                   snapshot: PreAPHardwareSnapshot) -> None:
   """Freeze hardware and selected boot-time modes. Cannot change while onroad."""
-  CP.openpilotLongitudinalControl = bool(snapshot.pedal_present)
-  CP.pcmCruise = not snapshot.pedal_present
+  pedal_capable = bool(snapshot.pedal_present and snapshot.pedal_calib_available)
+  CP.openpilotLongitudinalControl = pedal_capable
+  CP.pcmCruise = not pedal_capable
   CP.radarUnavailable = not snapshot.radar_present
-  CP_SP.enableGasInterceptor = bool(snapshot.pedal_present)
+  CP_SP.enableGasInterceptor = pedal_capable
 
   CP_SP.radarOffset = snapshot.radar_offset
   # Hardware flags live on CP_SP.flags so they stay out of modern Tesla CP.flags space.
@@ -255,8 +297,10 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
     CP_SP.flags |= TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO
 
   host_safety = 0
-  if snapshot.pedal_present and snapshot.pedal_calib_available:
+  if pedal_capable:
     host_safety |= PREAP_FLAG_ENABLE_PEDAL
+    if snapshot.pedal_bus == 0:
+      host_safety |= PREAP_FLAG_PEDAL_BUS_ZERO
   if snapshot.radar_present:
     host_safety |= PREAP_FLAG_RADAR_EMULATION
   if snapshot.radar_behind_nosecone:
@@ -264,13 +308,16 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
   # Serialize frozen hardware bits on the dedicated safety config.
   if CP.safetyConfigs:
     safety_param = int(CP.safetyConfigs[0].safetyParam)
-    safety_param &= ~(PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_BEHIND_NOSECONE)
+    safety_param &= ~(PREAP_FLAG_ENABLE_PEDAL | PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_BEHIND_NOSECONE |
+                      PREAP_FLAG_PEDAL_BUS_ZERO)
     safety_param |= host_safety
     CP.safetyConfigs[0].safetyParam = safety_param
 
-  mode = snapshot.engagement_mode if snapshot.engagement_mode != PREAP_MODE_INVALID else PREAP_MODE_INDEPENDENT
+  mode = snapshot.engagement_mode
+  if mode not in (PREAP_MODE_INDEPENDENT, PREAP_MODE_CRUISE_COUPLED, PREAP_MODE_LONGITUDINAL_ONLY):
+    mode = PREAP_MODE_INVALID
   main_allowed, uem = compatibility_from_mode(mode)
-  # Bits 0-1 are the Pre-AP mode enum. Never set HAS_VEHICLE_BUS (bit 0) on Pre-AP.
+  # Bits 0-1 are the Pre-AP mode enum, including INVALID=3. Never coerce invalid to independent.
   CP_SP.safetyParam &= ~PREAP_MODE_MASK
   CP_SP.safetyParam |= mode & PREAP_MODE_MASK
   if main_allowed:
@@ -282,15 +329,59 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
   else:
     CP_SP.safetyParam &= ~SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE
 
-  CP_SP.preapLateralEngagementMode = (
-    structs.CarParamsSP.PreapLateralEngagementMode.independent,
-    structs.CarParamsSP.PreapLateralEngagementMode.cruiseCoupled,
-    structs.CarParamsSP.PreapLateralEngagementMode.longitudinalOnly,
-  )[mode]
+  if mode != PREAP_MODE_INVALID:
+    CP_SP.preapLateralEngagementMode = (
+      structs.CarParamsSP.PreapLateralEngagementMode.independent,
+      structs.CarParamsSP.PreapLateralEngagementMode.cruiseCoupled,
+      structs.CarParamsSP.PreapLateralEngagementMode.longitudinalOnly,
+    )[mode]
   CP_SP.madsMainCruiseAllowed = main_allowed
   CP_SP.madsUnifiedEngagementMode = uem
   CP_SP.madsSteeringMode = STEERING_MODE_BY_VALUE[snapshot.mads_steering_mode]
 
+  if snapshot.pedal_present and snapshot.pedal_calib_available:
+    CP.longitudinalTuning.kpBP = list(PEDAL_LONG_K_BP)
+    CP.longitudinalTuning.kpV = list(PEDAL_LONG_KP_V)
+    CP.longitudinalTuning.kiBP = list(PEDAL_LONG_K_BP)
+    CP.longitudinalTuning.kiV = list(PEDAL_LONG_KI_V)
+    try:
+      CP.longitudinalTuning.kf = 1.0
+    except AttributeError:
+      pass
+    CP.longitudinalActuatorDelay = 0.4
+    _set_pedal_calib(CP_SP, PedalCalib(True, snapshot.pedal_calib_factor, snapshot.pedal_calib_zero))
+  else:
+    _set_pedal_calib(CP_SP, PedalCalib())
+
 
 def pedal_bus_from_cp_sp(CP_SP: structs.CarParamsSP) -> int:
   return 0 if CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_BUS_ZERO else 2
+
+
+def pedal_calib_from_cp_sp(CP_SP: structs.CarParamsSP) -> PedalCalib:
+  entry = _PEDAL_CALIB.get(id(CP_SP))
+  return entry[1] if entry is not None and entry[0]() is CP_SP else PedalCalib()
+
+
+def pedal_pipeline_enabled(CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> bool:
+  """Immutable boot capability: pedal present, calibrated, and OP-long selected."""
+  return bool(
+    CP.carFingerprint == PREAP_PLATFORM
+    and CP.openpilotLongitudinalControl
+    and not CP.pcmCruise
+    and CP_SP.enableGasInterceptor
+    and (CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_PRESENT)
+    and (CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE)
+  )
+
+
+def preap_radar_present(CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> bool:
+  """True only on TESLA_MODEL_S_PREAP with PREAP_RADAR_PRESENT set.
+
+  TeslaFlagsSP.PREAP_RADAR_PRESENT is bit 64, the same value as HyundaiFlagsSP.NON_SCC.
+  Brand-shared CP_SP.flags therefore require exact Pre-AP platform identity.
+  """
+  return bool(
+    is_preap_platform(CP)
+    and int(getattr(CP_SP, "flags", 0) or 0) & int(TeslaFlagsSP.PREAP_RADAR_PRESENT)
+  )

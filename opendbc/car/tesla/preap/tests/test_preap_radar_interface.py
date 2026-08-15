@@ -50,7 +50,7 @@ class FakeRadarParser:
     return self.updated_addresses
 
 
-def _point_a(*, tracked=True, d_rel=40.0, v_rel=-2.0, y_rel=0.5, index=0, prob=90.0):
+def _point_a(*, tracked=True, d_rel=40.0, v_rel=-2.0, y_rel=0.5, index=0, prob=90.0, meas=1):
   return {
     "Index": index,
     "Tracked": tracked,
@@ -58,6 +58,7 @@ def _point_a(*, tracked=True, d_rel=40.0, v_rel=-2.0, y_rel=0.5, index=0, prob=9
     "LatDist": y_rel,
     "LongSpeed": v_rel,
     "ProbExist": prob,
+    "Meas": meas,
   }
 
 
@@ -87,9 +88,9 @@ def _make_bosch_interface(*, radar_offset=0.0):
 
 
 def _run_cycle(radar, *, tracked=True, d_rel=40.0, v_rel=-2.0, y_rel=0.5, slot_updated=True,
-               status=True, alert=True, index=0, index2=0, prob=90.0):
+               status=True, alert=True, index=0, index2=0, prob=90.0, meas=1):
   radar.rcp.vl["RadarPoint0_A"] = _point_a(tracked=tracked, d_rel=d_rel, v_rel=v_rel, y_rel=y_rel,
-                                           index=index, prob=prob)
+                                           index=index, prob=prob, meas=meas)
   radar.rcp.vl["RadarPoint0_B"] = _point_b(index2=index2)
   radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
   if status:
@@ -113,6 +114,7 @@ class TestBoschSlotLifecycle:
     assert second.points[0].dRel == 40.5
     assert second.points[0].yRel == 0.5
     assert second.points[0].vRel == approx(-2.2)
+    assert second.points[0].deprecated.measured
 
   def test_one_missing_frame_keeps_identity(self):
     radar = _make_bosch_interface()
@@ -125,6 +127,7 @@ class TestBoschSlotLifecycle:
     assert coasted.points[0].dRel == first.points[0].dRel
     assert coasted.points[0].yRel == first.points[0].yRel
     assert coasted.points[0].vRel == first.points[0].vRel
+    assert not coasted.points[0].deprecated.measured
 
   def test_two_invalid_frames_coast_then_third_expires(self):
     radar = _make_bosch_interface()
@@ -139,11 +142,13 @@ class TestBoschSlotLifecycle:
     assert first_coast.points[0].dRel == first.points[0].dRel
     assert first_coast.points[0].yRel == first.points[0].yRel
     assert first_coast.points[0].vRel == first.points[0].vRel
+    assert not first_coast.points[0].deprecated.measured
     assert len(second_coast.points) == 1
     assert second_coast.points[0].trackId == first.points[0].trackId
     assert second_coast.points[0].dRel == first.points[0].dRel
     assert second_coast.points[0].yRel == first.points[0].yRel
     assert second_coast.points[0].vRel == first.points[0].vRel
+    assert not second_coast.points[0].deprecated.measured
     assert len(expired.points) == 0
 
   def test_plausible_return_preserves_identity(self):
@@ -158,6 +163,7 @@ class TestBoschSlotLifecycle:
     assert returned.points[0].dRel == 39.5
     assert returned.points[0].yRel == 0.5
     assert returned.points[0].vRel == -2.5
+    assert returned.points[0].deprecated.measured
 
   def test_absence_after_expiration_allocates_new_id(self):
     radar = _make_bosch_interface()
@@ -184,6 +190,7 @@ class TestBoschSlotLifecycle:
     assert mismatched.points[0].dRel == first.points[0].dRel
     assert mismatched.points[0].yRel == first.points[0].yRel
     assert mismatched.points[0].vRel == first.points[0].vRel
+    assert not mismatched.points[0].deprecated.measured
 
   def test_range_and_probability_gates_reject_observation(self):
     assert list(_run_cycle(_make_bosch_interface(), d_rel=250.5).points) == []
@@ -194,6 +201,18 @@ class TestBoschSlotLifecycle:
     assert valid.points[0].dRel == 250.0
     assert valid.points[0].yRel == 0.5
     assert valid.points[0].vRel == -2.0
+    assert valid.points[0].deprecated.measured
+
+  def test_can_estimate_flag_is_unmeasured_and_keeps_identity(self):
+    radar = _make_bosch_interface()
+    first = _run_cycle(radar)
+    estimated = _run_cycle(radar, d_rel=40.5, v_rel=-2.2, meas=0)
+
+    assert len(estimated.points) == 1
+    assert estimated.points[0].trackId == first.points[0].trackId
+    assert estimated.points[0].dRel == 40.5
+    assert estimated.points[0].vRel == approx(-2.2)
+    assert not estimated.points[0].deprecated.measured
 
 
 class TestBoschDiscontinuityAndOffset:
@@ -324,7 +343,6 @@ class TestBoschHealth:
     assert len(recovered.points) == 1
 
 
-
 def _make_real_bosch_interface(*, radar_offset=0.0):
   CP, CP_SP = _params(radar_offset=radar_offset, radar_enabled=True)
   radar = PreAPRadarInterface(CP, CP_SP)
@@ -372,6 +390,7 @@ def _packed_bosch_frames(*, tracked=True, d_rel=40.0, v_rel=-2.0, y_rel=0.5, ind
       "LatDist": y_rel if slot_tracked else 0.0,
       "LongSpeed": v_rel if slot_tracked else 0.0,
       "ProbExist": prob if slot_tracked else 0.0,
+      "Meas": 1 if slot_tracked else 0,
     }))
     frames.append(_pack_bosch(f"RadarPoint{slot}_B", {
       "Index2": index2 if slot == 0 else 0,

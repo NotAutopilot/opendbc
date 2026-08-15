@@ -6,10 +6,12 @@ import time
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
+from dataclasses import dataclass
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp
-from opendbc.car.tesla.preap.constants import PEDAL_DI_PRESSED
+from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp, pedal_calib_from_cp_sp, pedal_pipeline_enabled
+from opendbc.car.tesla.preap.constants import PEDAL_DI_PRESSED, PEDAL_FEEDBACK_TIMEOUT_STATE, PREAP_MODE_INVALID, PREAP_MODE_MASK
 from opendbc.car.tesla.preap.intent import PreAPIntentTranslator
+from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
 from opendbc.car.tesla.preap.stock_cc import StockCcState, StockCcTransaction
 from opendbc.car.tesla.preap.teslacan import STW_DEFAULTS
 from opendbc.car.tesla.values import CANBUS, DBC, GEAR_MAP, STEER_THRESHOLD
@@ -18,6 +20,21 @@ from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
 REQUIRED_SOURCE_KEYS = ("DI_torque2", "GTW_carState", "EPAS_sysStatus", "BrakeMessage")
 REQUIRED_SOURCE_MAX_AGE_NS = 1_000_000_000
+
+
+@dataclass
+class PreAPCarStateSP(structs.CarStateSP):
+  pedalMaxRegen: bool = False
+  pedalLongActive: bool = False
+  pedalAuthorityRequested: bool = False
+  pedalAuthorityState: int = 0
+  pedalAuthorityAction: int = 0
+  pedalCommandCounter: int = 0
+  pedalFeedbackState: int = 0
+  pedalFeedbackCounter: int = 0
+  pedalCommandDi: float = 0.0
+  pedalAuthorityFailed: bool = False
+  vdasLimitedAccel: float = 0.0
 
 
 def required_sources_fresh(seen_ns: dict[str, int | None], now_ns: int,
@@ -39,7 +56,10 @@ class PreAPCarState(CarStateBase):
     self.real_brake_pressed = False
     self.di_cruise_state = "OFF"
     self.speed_units = "MPH"
-    self.intent = PreAPIntentTranslator(CP_SP.preapLateralEngagementMode)
+    mode = CP_SP.preapLateralEngagementMode
+    if (int(CP_SP.safetyParam) & PREAP_MODE_MASK) == PREAP_MODE_INVALID:
+      mode = None
+    self.intent = PreAPIntentTranslator(mode)
     self.stock_cc = StockCcTransaction(active=not bool(CP.openpilotLongitudinalControl))
     self.intent.stock_cc_active = self.stock_cc.active
     self.stock_cc_now_ms = 0
@@ -54,13 +74,31 @@ class PreAPCarState(CarStateBase):
     self._clock_ns = time.monotonic_ns
     self._required_source_parser_ts = {key: 0 for key in REQUIRED_SOURCE_KEYS}
     self._required_source_seen_ns: dict[str, int | None] = {key: None for key in REQUIRED_SOURCE_KEYS}
+    self.long_active = False
+    self.pedal_pipeline = pedal_pipeline_enabled(CP, CP_SP)
+    self.pedal_calib = pedal_calib_from_cp_sp(CP_SP)
+    self.pedal = PedalFeedback(self.pedal_calib.pedal_to_di if self.pedal_pipeline else None)
+    self.pedal_interceptor_value = 0.0
+    self.pedal_timeout = True
+    self.pedal_command_counter = 0
+    self.pedal_first_enabled_mono_time = 0
+    self.pedal_authority_requested = False
+    self.pedal_authority_active = False
+    self.pedal_authority_state = 0
+    self.pedal_authority_action = 0
+    self.pedal_authority_failed = False
+    self.pedal_command_di = 0.0
+    self.pedal_brake_required = False
+    self.vdas_limited_accel = 0.0
 
   def set_long_active(self, long_active: bool) -> None:
     """Controller feeds prior-cycle logical standard-long active state. Never infer from DI cruiseState.enabled."""
+    self.long_active = bool(long_active)
     self.intent.set_long_active(long_active)
 
   def _sync_stock_cc_intent(self, ret_sp=None) -> None:
-    self.intent.update_terminal_failure(self.stock_cc.state == StockCcState.cancelledOrFailed)
+    stock_cc_failed = self.stock_cc.state == StockCcState.cancelledOrFailed
+    self.intent.update_terminal_failure(stock_cc_failed or bool(self.pedal_authority_failed))
     if self.stock_cc.enable_pending:
       self.intent.publish_confirmed_coupled_enable()
     target = ret_sp if ret_sp is not None else self._last_ret_sp
@@ -86,7 +124,7 @@ class PreAPCarState(CarStateBase):
     cp_chassis = can_parsers[Bus.chassis]
     cp_pt = can_parsers[Bus.pt]
     ret = structs.CarState()
-    ret_sp = structs.CarStateSP()
+    ret_sp = PreAPCarStateSP()
     ret.blockPcmEnable = True
 
     ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
@@ -168,10 +206,20 @@ class PreAPCarState(CarStateBase):
     ret.stockLkas = False
 
     if self.CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_PRESENT:
-      gas_sensor = can_parsers[Bus.ap_party].vl.get("GAS_SENSOR", {})
-      interceptor_gas = gas_sensor.get("INTERCEPTOR_GAS")
-      if interceptor_gas is not None:
-        ret.gasPressed = interceptor_gas > PEDAL_DI_PRESSED
+      pedal_parser = can_parsers[Bus.ap_party]
+      gas_sensor = pedal_parser.vl.get("GAS_SENSOR", {})
+      observed = bool(pedal_parser.vl_all["GAS_SENSOR"]["IDX"])
+      curr_time_ms = int(self._clock_ns()) // 1_000_000
+      self.pedal.update(gas_sensor, curr_time_ms, observed=observed)
+      self.pedal.update_torque(cp_pt.vl.get("DI_torque1", {}))
+      self.pedal_interceptor_value = self.pedal.interceptor_value
+      self.pedal_timeout = self.pedal.timeout
+      if self.pedal_pipeline:
+        ret.gasPressed = self.pedal.gas_pressed
+      else:
+        interceptor_gas = gas_sensor.get("INTERCEPTOR_GAS")
+        if interceptor_gas is not None:
+          ret.gasPressed = interceptor_gas > PEDAL_DI_PRESSED
 
     now_ns = int(self._clock_ns())
     now_ms = (now_ns // 1_000_000) & 0xFFFFFFFF
@@ -224,6 +272,21 @@ class PreAPCarState(CarStateBase):
     # Epoch is stamped by card on the process incarnation.
     ret_sp.preapIntentEpoch = 0
     self.stock_cc.publish(ret_sp)
+    if self.CP_SP.flags & TeslaFlagsSP.PREAP_PEDAL_PRESENT:
+      ret_sp.pedalFeedbackCounter = int(self.pedal.idx) & 0xFF
+      ret_sp.pedalFeedbackState = (
+        PEDAL_FEEDBACK_TIMEOUT_STATE if self.pedal.timeout else int(self.pedal.interceptor_state) & 0xFF
+      )
+    if self.pedal_pipeline:
+      ret_sp.pedalMaxRegen = bool(self.pedal_brake_required)
+      ret_sp.pedalLongActive = bool(self.pedal_authority_active)
+      ret_sp.pedalAuthorityRequested = bool(self.pedal_authority_requested)
+      ret_sp.pedalAuthorityState = int(self.pedal_authority_state) & 0xFF
+      ret_sp.pedalAuthorityAction = int(self.pedal_authority_action) & 0xFF
+      ret_sp.pedalCommandCounter = int(self.pedal_command_counter) & 0xFF
+      ret_sp.pedalCommandDi = float(self.pedal_command_di)
+      ret_sp.pedalAuthorityFailed = bool(self.pedal_authority_failed)
+      ret_sp.vdasLimitedAccel = float(self.vdas_limited_accel)
     self._last_ret_sp = ret_sp
     return ret, ret_sp
 

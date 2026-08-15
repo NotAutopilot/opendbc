@@ -1,6 +1,7 @@
 import unittest
 
 from opendbc.car import gen_empty_fingerprint, structs
+from opendbc.car.tesla.preap.constants import PREAP_FLAG_ENABLE_PEDAL
 from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.radar_interface import RadarInterface
 from opendbc.car.tesla.values import CAR
@@ -25,6 +26,22 @@ class TestPreAPContainment(unittest.TestCase):
     }])
     self.assertTrue(CP.openpilotLongitudinalControl)
     self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
+
+  def test_invalid_pedal_calibration_disables_longitudinal_capability(self):
+    CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+    CI = CarInterface(CP, CP_SP)
+    setup_interfaces(CI, CP, CP_SP, params_list=[{
+      "NAPPedalEnabled": True,
+      "NAPPedalCanBus": 0,
+      "NAPPedalCalibDone": True,
+      "NAPPedalCalibFactor": 0.0,
+      "NAPPedalCalibZero": 0.25,
+    }])
+    self.assertFalse(CP.openpilotLongitudinalControl)
+    self.assertTrue(CP.pcmCruise)
+    self.assertFalse(CP_SP.enableGasInterceptor)
+    self.assertEqual(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL, 0)
 
   def test_tesla_preap_safety_model_is_registered(self):
     self.assertTrue(hasattr(structs.CarParams.SafetyModel, "teslaPreap"))

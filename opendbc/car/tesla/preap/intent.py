@@ -159,6 +159,8 @@ class PreAPIntentTranslator:
     self._process_main_pull(now_ms & _UINT32_MASK)
 
   def _process_main_pull(self, now_ms: int) -> None:
+    if self.mode is None:
+      return
     elapsed = None if self._first_pull_ms is None else (now_ms - self._first_pull_ms) & _UINT32_MASK
     if elapsed is not None and 0 < elapsed < STALK_DOUBLE_PULL_MS:
       self._first_pull_ms = None

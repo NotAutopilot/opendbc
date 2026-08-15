@@ -158,7 +158,11 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
     CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
     apply_preap_hardware_snapshot(
-      CP, CP_SP, hardware_snapshot_from_values(pedal_enabled=True, pedal_bus=2, radar_enabled=True, radar_offset=0.0),
+      CP, CP_SP, hardware_snapshot_from_values(
+        pedal_enabled=True, pedal_bus=2, pedal_calib_done=True, pedal_calib_factor=0.035,
+        pedal_calib_zero=0.25, pedal_calib_min=-3.0, pedal_calib_max=99.6,
+        radar_enabled=True, radar_offset=0.0,
+      ),
     )
     CI = CarInterface(CP, CP_SP)
     self.assertTrue(CP.openpilotLongitudinalControl)
@@ -405,6 +409,48 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     self.assertNotEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.forceDisable)
 
 
+  def test_pedal_failed_force_disables_only_when_coupled(self):
+    cases = (
+      ("independent", structs.CarStateSP.PreapLateralIntent.none),
+      ("cruiseCoupled", structs.CarStateSP.PreapLateralIntent.forceDisable),
+      ("longitudinalOnly", structs.CarStateSP.PreapLateralIntent.none),
+    )
+    for mode, lateral in cases:
+      with self.subTest(mode=mode):
+        CI = _make_ci(mode)
+        self._prime_drive(CI)
+        CI.CS.pedal_authority_failed = True
+        _cs, CS_SP = CI.update([])
+        self.assertTrue(CI.CS.pedal_authority_failed)
+        self.assertEqual(CS_SP.preapLongitudinalIntent, structs.CarStateSP.PreapLongitudinalIntent.disable)
+        self.assertEqual(CS_SP.preapLateralIntent, lateral)
+        if mode != "cruiseCoupled":
+          self.assertNotEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.forceDisable)
+        _cs, CS_SP = CI.update([])
+        self.assertEqual(CS_SP.preapLongitudinalIntent, structs.CarStateSP.PreapLongitudinalIntent.disable)
+        self.assertEqual(CS_SP.preapLateralIntent, lateral)
+
+  def test_invalid_mode_host_intent_grants_neither_authority(self):
+    from opendbc.car.tesla.preap.constants import PREAP_MODE_INVALID, PREAP_MODE_MASK
+    for value in ("nope", 3, 99):
+      with self.subTest(value=repr(value)):
+        CI = _make_ci(value)
+        self.assertEqual(CI.CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INVALID)
+        self.assertIsNone(CI.CS.intent.mode)
+        frozen = [0]
+        CI.CS._clock_ns = lambda frozen=frozen: frozen[0]
+        self._prime_drive(CI, ts=1_000_000)
+        CI.update(_stw(IDLE, 0, 2_000_000))
+        _cs, CS_SP = CI.update(_stw(MAIN, 1, 2_000_001))
+        self.assertEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.none)
+        self.assertEqual(CS_SP.preapLongitudinalIntent, structs.CarStateSP.PreapLongitudinalIntent.none)
+        self.assertEqual(CS_SP.preapIntentSequence, 0)
+        frozen[0] = 399_000_000
+        CI.update(_stw(IDLE, 2, 3_000_000))
+        _cs, CS_SP = CI.update(_stw(MAIN, 3, 3_000_001))
+        self.assertNotEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.mainCruiseRequest)
+        self.assertNotEqual(CS_SP.preapLongitudinalIntent, structs.CarStateSP.PreapLongitudinalIntent.enable)
+
 STW_ADDR = 0x45
 IDLE = CruiseButtons.IDLE
 MAIN = CruiseButtons.MAIN
@@ -473,7 +519,7 @@ class TestPreAPCarStateDirectAdjustmentCoupled(unittest.TestCase):
         CI = _make_ci("cruiseCoupled")
         self.assertTrue(CI.CS.stock_cc.active)
         frozen = [0]
-        CI.CS._clock_ns = lambda: frozen[0]
+        CI.CS._clock_ns = lambda frozen=frozen: frozen[0]
         self._prime(CI, ts=1_000_000)
         CI.apply(structs.CarControl(), structs.CarControlSP(), now_nanos=0)
         self.assertFalse(CI.CS.intent.long_active)

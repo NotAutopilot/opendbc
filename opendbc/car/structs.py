@@ -216,6 +216,18 @@ class CarStateSP:
   preapStockCcBoundCounter: int = auto_field()
   preapStockCcHostDiConfirmed: bool = auto_field()
   preapStockCcEnablePending: bool = auto_field()
+  # Pre-AP pedal authority and VDAS diagnostics. Pin capnp ordinals @9-@19.
+  pedalMaxRegen: bool = auto_field()
+  pedalLongActive: bool = auto_field()
+  pedalAuthorityRequested: bool = auto_field()
+  pedalAuthorityState: int = auto_field()
+  pedalAuthorityAction: int = auto_field()
+  pedalCommandCounter: int = auto_field()
+  pedalFeedbackState: int = auto_field()
+  pedalFeedbackCounter: int = auto_field()
+  pedalCommandDi: float = auto_field()
+  pedalAuthorityFailed: bool = auto_field()
+  vdasLimitedAccel: float = auto_field()
 
   class PreapLateralIntent(StrEnum):
     none = auto()

@@ -28,6 +28,7 @@ class BoschTrackObservation:
   d_rel: float
   y_rel: float
   v_rel: float
+  measured: bool
 
 
 @dataclass
@@ -53,6 +54,7 @@ class BoschTrackLifecycle:
     if observation is None:
       if track is None:
         return
+      track.point.deprecated.measured = False
       track.missed_cycles += 1
       if track.missed_cycles > BOSCH_TRACK_MAX_MISSED_CYCLES:
         del self._slots[slot]
@@ -69,6 +71,7 @@ class BoschTrackLifecycle:
     track.point.dRel = observation.d_rel
     track.point.yRel = observation.y_rel
     track.point.vRel = observation.v_rel
+    track.point.deprecated.measured = observation.measured
 
   @staticmethod
   def _is_discontinuous(point, observation):
@@ -167,4 +170,5 @@ class RadarInterface(RadarInterfaceBase):
       d_rel=msg_a["LongDist"],
       y_rel=msg_a["LatDist"] + self.radar_offset,
       v_rel=msg_a["LongSpeed"],
+      measured=bool(msg_a["Meas"]),
     )

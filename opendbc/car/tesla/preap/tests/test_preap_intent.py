@@ -234,6 +234,11 @@ class TestPreAPIntentTranslator(unittest.TestCase):
     tr.update_stalk(IDLE, 0, 0)
     tr.update_stalk(MAIN, 1, 10)
     self._assert_record(tr, Lateral.none, Longitudinal.none, 0)
+    tr.update_stalk(IDLE, 2, 20)
+    tr.update_stalk(MAIN, 3, 10 + 399)
+    self._assert_record(tr, Lateral.none, Longitudinal.none, 0)
+    self.assertNotEqual(tr.record.lateral, Lateral.mainCruiseRequest)
+    self.assertNotEqual(tr.record.longitudinal, Longitudinal.enable)
 
   def test_passthrough_levers_disarm_edge_but_preserve_origin(self):
     for lever in PASSTHROUGH_LEVERS:

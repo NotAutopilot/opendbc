@@ -282,7 +282,6 @@ class TestTeslaPreAPRadarGateway:
     dests = {addr for addr, _bus, _dlc, _data, _fd in _captured(self.safety)}
     assert OPTIONAL_DESTS <= dests
 
-
   def _decode_bosch(self, msg_name, addr, payload, bus=1):
     parser = CANParser("tesla_radar_bosch_generated", [(msg_name, 0)], bus)
     parser.update([(0, [CanData(addr, payload, bus)])])

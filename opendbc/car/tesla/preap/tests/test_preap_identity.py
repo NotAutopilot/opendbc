@@ -6,8 +6,17 @@ from opendbc.car.tesla.preap.boot import (
   PREAP_PLATFORM,
   hardware_snapshot_from_values,
   apply_preap_hardware_snapshot,
+  parse_engagement_mode,
+  preap_radar_present,
 )
-from opendbc.car.tesla.preap.constants import STALK_DOUBLE_PULL_MS
+from opendbc.car.tesla.preap.constants import (
+  PREAP_MODE_INDEPENDENT,
+  PREAP_MODE_INVALID,
+  PREAP_MODE_MASK,
+  SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED,
+  SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE,
+  STALK_DOUBLE_PULL_MS,
+)
 from opendbc.car.tesla.values import CAR, DBC, STALK_DOUBLE_PULL_MS as VALUES_DOUBLE_PULL
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 
@@ -77,11 +86,32 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertTrue(CP.radarUnavailable)
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_NOSECONE))
 
-  def test_malformed_mode_defaults_independent(self):
-    snap = hardware_snapshot_from_values(engagement_mode="nope")
-    self.assertEqual(snap.engagement_mode, 0)
-    snap = hardware_snapshot_from_values(engagement_mode=3)
-    self.assertEqual(snap.engagement_mode, 0)
+  def test_malformed_mode_is_invalid_while_absent_defaults_independent(self):
+    self.assertEqual(parse_engagement_mode(None), PREAP_MODE_INDEPENDENT)
+    self.assertEqual(parse_engagement_mode(""), PREAP_MODE_INDEPENDENT)
+    self.assertEqual(parse_engagement_mode(b""), PREAP_MODE_INDEPENDENT)
+    self.assertEqual(hardware_snapshot_from_values().engagement_mode, PREAP_MODE_INDEPENDENT)
+    CP, CP_SP = _make_preap(hardware_snapshot_from_values())
+    self.assertEqual(CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INDEPENDENT)
+    self.assertTrue(bool(CP_SP.safetyParam & SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED))
+
+    for value in ("nope", 3, 99, -1, "4"):
+      with self.subTest(value=repr(value)):
+        self.assertEqual(parse_engagement_mode(value), PREAP_MODE_INVALID)
+        snapshot = hardware_snapshot_from_values(engagement_mode=value)
+        self.assertEqual(snapshot.engagement_mode, PREAP_MODE_INVALID)
+        CP, CP_SP = _make_preap(snapshot)
+        self.assertEqual(CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INVALID)
+        self.assertFalse(bool(CP_SP.safetyParam & SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED))
+        self.assertFalse(bool(CP_SP.safetyParam & SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE))
+
+    from opendbc.sunnypilot.car.interfaces import setup_interfaces
+    CP, CP_SP = _make_preap()
+    CI = CarInterface(CP, CP_SP)
+    setup_interfaces(CI, CP, CP_SP, params_list=[{"NAPLateralEngagementMode": "nope"}])
+    self.assertEqual(CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INVALID)
+    CI = CarInterface(CP, CP_SP)
+    self.assertIsNone(CI.CS.intent.mode)
 
   def test_modern_tesla_v1_overlay_without_vehicle_bus(self):
     CP = CarInterface.get_params(CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
@@ -175,5 +205,19 @@ class TestPreAPIdentity(unittest.TestCase):
     self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.MADS_SCREEN_BUTTON_4_FINGER))
     self.assertTrue(CP_SP.madsRequired)
 
+  def test_preap_radar_present_rejects_overlapping_non_preap_flags(self):
+    from types import SimpleNamespace
+    from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
+
+    overlapping = int(HyundaiFlagsSP.NON_SCC)
+    self.assertEqual(overlapping, int(TeslaFlagsSP.PREAP_RADAR_PRESENT))
+    flags = SimpleNamespace(flags=overlapping)
+    self.assertTrue(preap_radar_present(SimpleNamespace(carFingerprint=PREAP_PLATFORM), flags))
+    self.assertFalse(preap_radar_present(SimpleNamespace(carFingerprint="TESLA_MODEL_Y"), flags))
+    self.assertFalse(preap_radar_present(SimpleNamespace(carFingerprint="HYUNDAI_KONA_NON_SCC"), flags))
+    self.assertFalse(preap_radar_present(SimpleNamespace(carFingerprint=PREAP_PLATFORM), SimpleNamespace(flags=0)))
+
+
 if __name__ == "__main__":
   unittest.main()
+
