@@ -156,17 +156,34 @@ class TestPreAPCarController(unittest.TestCase):
     self.assertTrue(CI.CS.intent.long_active)
 
   def test_invalid_mode_never_requests_longitudinal_authority(self):
-    for pedal in (False, True):
-      with self.subTest(pedal=pedal):
-        CI = _make_ci(pedal=pedal, engagement_mode=3)
+    from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PREAP_MODE_INVALID, PREAP_MODE_MASK
+
+    absent = _make_ci(pedal=True)
+    self.assertNotEqual(absent.CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INVALID)
+    self.assertIsNotNone(absent.CC.long_controller)
+
+    for pedal, mode in ((False, 3), (True, 3), (True, "nope"), (True, 99)):
+      with self.subTest(pedal=pedal, mode=repr(mode)):
+        CI = _make_ci(pedal=pedal, engagement_mode=mode)
+        self.assertEqual(CI.CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INVALID)
+        self.assertIsNone(CI.CC.long_controller)
         CI.update([])
+        CI.CS.long_active = True
+        CI.CS.pedal_timeout = False
         CC, CC_SP = _permitted_controls()
         CC.enabled = True
         CC.longActive = True
-        _act, msgs = CI.apply(CC, CC_SP, now_nanos=0)
+        addrs = set()
+        for frame in range(20):
+          _act, msgs = CI.apply(CC, CC_SP, now_nanos=frame)
+          addrs.update(msg[0] for msg in msgs)
         self.assertFalse(CI.CS.intent.long_active)
-        self.assertNotIn(0x45, [msg[0] for msg in msgs])
-        self.assertNotIn(0x551, [msg[0] for msg in msgs])
+        self.assertFalse(CI.CS.long_active)
+        self.assertFalse(CI.CS.pedal_authority_requested)
+        self.assertFalse(CI.CS.pedal_authority_active)
+        self.assertFalse(CI.CS.pedal_brake_required)
+        self.assertNotIn(STW_ADDR, addrs)
+        self.assertNotIn(GAS_COMMAND_ID, addrs)
 
 
 if __name__ == "__main__":

@@ -354,7 +354,8 @@ class PreAPCarController(CarControllerBase):
       int(CP_SP.safetyParam) & PREAP_MODE_MASK
     ) != PREAP_MODE_INVALID
     self.long_controller = None
-    if self._pedal_pipeline:
+    # Invalid mode bits grant neither pedal nor stock-CC authority.
+    if self._pedal_pipeline and self._engagement_mode_valid:
       self.tesla_can.pedal_can_bus = pedal_bus_from_cp_sp(CP_SP)
       self.long_controller = PreAPLongController(
         pedal_bus=self.tesla_can.pedal_can_bus,
@@ -407,7 +408,7 @@ class PreAPCarController(CarControllerBase):
           now_ms = int(getattr(CS, "stock_cc_now_ms", 0)) & 0xFFFFFFFF
           stock_cc.note_tx(lever, counter, now_ms)
 
-    if self.long_controller is not None:
+    if self.long_controller is not None and self._engagement_mode_valid:
       can_sends.extend(self.long_controller.update(CC, CS, self.frame, self.tesla_can, now_nanos=now_nanos))
 
     new_actuators = actuators.as_builder() if hasattr(actuators, "as_builder") else actuators
