@@ -13,7 +13,7 @@ from opendbc.car.tesla.preap.carcontroller import (
   PreAPLongController,
   RegenDecelMonitor,
 )
-from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PEDAL_D, PEDAL_DI_ZERO, PEDAL_M1, PEDAL_MAX_VALUES, PEDAL_RAMP_RATE_UP
+from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PEDAL_D, PEDAL_DI_ZERO, PEDAL_M1, PEDAL_MAX_VALUES, PEDAL_RAMP_RATE_UP, PEDAL_TIMEOUT_MS
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.preap.virtual_das import PedalZeroTorque
@@ -175,8 +175,38 @@ def test_active_pedal_timeout_forces_safe_release(controller_env):
   cs.pedal_timeout = True
   released = controller.update(cc, cs, frame=2, tesla_can=tesla_can)
   assert len(released) == 1
-  assert not _decode_pedal_command(released[0]).enabled
+  decoded = _decode_pedal_command(released[0])
+  assert not decoded.enabled
+  assert decoded.raw_command == 0
   assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
+
+
+def test_active_configured_pedal_timeout_inhibits_enabled_gas_command(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+
+  enabled = controller.update(cc, cs, frame=0, tesla_can=tesla_can)
+  assert len(enabled) == 1
+  assert _decode_pedal_command(enabled[0]).enabled
+  assert controller.pedal_authority.state == PedalAuthorityState.ACTIVE
+  assert not cs.pedal.timeout
+
+  cs.pedal.update(
+    {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 1},
+    PEDAL_TIMEOUT_MS + 1,
+    observed=False,
+  )
+  assert not cs.pedal_timeout
+  assert cs.pedal.timeout
+  assert not cs.pedal.available
+
+  released = controller.update(cc, cs, frame=2, tesla_can=tesla_can)
+  assert len(released) == 1
+  decoded = _decode_pedal_command(released[0])
+  assert not decoded.enabled
+  assert decoded.raw_command == 0
+  assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
+  assert controller.regen_decel_monitor.active is False
 
 
 def test_pedal_authority_reachable_states_obey_transition_invariants():

@@ -598,10 +598,23 @@ class TestTeslaPreAPCruiseCoupled(TeslaPreAPSafetyBase):
     self._engage_pedal()
     self.safety.set_controls_allowed(False)
     self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.set_timer(500_001)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, counter=0)))
+
+  def test_idle_unhealthy_pedal_retains_coupled_lateral(self):
+    self._engage_pedal()
+    self.safety.set_controls_allowed(False)
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
     self.assertTrue(self._rx(self._pedal_sensor(state=1)))
     self.safety.safety_tick_current_safety_config()
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
 
 
 class TestTeslaPreAPLongitudinalOnly(TeslaPreAPSafetyBase):

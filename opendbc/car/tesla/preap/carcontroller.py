@@ -219,11 +219,16 @@ class PreAPLongController:
 
     if frame % 2 == 0:
       brake_pressed = getattr(CS, "real_brake_pressed", False)
+      # A timed-out pedal cannot retain authority or emit enabled commands.
+      pedal_responding = not bool(
+        getattr(CS, "pedal_timeout", False) or
+        getattr(getattr(CS, "pedal", None), "timeout", False)
+      )
       authority_requested = (
         long_active
         and not brake_pressed
         and not CS.out.gasPressed
-        and not bool(getattr(CS, "pedal_timeout", False))
+        and pedal_responding
       )
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
       in_engage_grace = False
@@ -266,60 +271,67 @@ class PreAPLongController:
         self.regen_decel_monitor.reset()
 
       elif pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
-        try:
-          engage_elapsed_frames = frame - self.preap_long_engage_frame
-          in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
-          accel_request = float(actuators.accel)
-          accel_effort_limits = None
-          pedal_ramp_rate_up = (
-            ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
-            if self.preap_long_handoff_slew_active
-            else PEDAL_RAMP_RATE_UP
-          )
-          if in_engage_grace:
-            grace_progress = engage_elapsed_frames / ENGAGE_GRACE_FRAMES
-            accel_cap = grace_progress * self.engage_a_max
-            accel_request = max(0.0, min(accel_request, accel_cap))
-            accel_effort_limits = (0.0, accel_cap)
-            pedal_ramp_rate_up = ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
-
-          self.prev_pedal_di = self.vdas.update(
-            accel_request, CS.out.vEgo, self.prev_pedal_di,
-            a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
-            orientation_ned=list(getattr(CC, "orientationNED", []) or []),
-            accel_effort_limits=accel_effort_limits,
-            pedal_ramp_rate_up=pedal_ramp_rate_up)
-          handoff_slew_complete = (
-            self.preap_long_handoff_slew_active
-            and not in_engage_grace
-            and not self.vdas.pedal_ramp_limited_up
-          )
-          if handoff_slew_complete:
-            self.preap_long_handoff_slew_active = False
-          pedal_cmd = calib.di_to_pedal(self.prev_pedal_di)
-          command = tesla_can.create_pedal_command(pedal_cmd, enable=1, pedal_can_bus=self.pedal_bus)
-          self._append_pedal_command(can_sends, CS, command)
-          if pedal_action == PedalCommandAction.ACQUIRE and CS.pedal_first_enabled_mono_time == 0:
-            CS.pedal_first_enabled_mono_time = now_nanos
-          self.regen_decel_monitor.update(
-            pedal_control_active=True,
-            in_engage_grace=in_engage_grace,
-            pedal_di=self.prev_pedal_di,
-            limited_accel=self.vdas.jerk_limiter.a_limited,
-            actual_accel=CS.out.aEgo,
-            v_ego=CS.out.vEgo,
-          )
-
-        except Exception:
-          carlog.exception("Pre-AP pedal command failed; sending disabled")
-          self.pedal_authority.command_failed()
-          CS.pedal_authority_failed = True
+        if not pedal_responding:
           self._append_pedal_command(
             can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
           self.prev_pedal_di = 0.0
           self.preap_long_handoff_slew_active = False
           self.regen_decel_monitor.reset()
-          pedal_action = PedalCommandAction.FAILURE
+        else:
+          try:
+            engage_elapsed_frames = frame - self.preap_long_engage_frame
+            in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
+            accel_request = float(actuators.accel)
+            accel_effort_limits = None
+            pedal_ramp_rate_up = (
+              ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
+              if self.preap_long_handoff_slew_active
+              else PEDAL_RAMP_RATE_UP
+            )
+            if in_engage_grace:
+              grace_progress = engage_elapsed_frames / ENGAGE_GRACE_FRAMES
+              accel_cap = grace_progress * self.engage_a_max
+              accel_request = max(0.0, min(accel_request, accel_cap))
+              accel_effort_limits = (0.0, accel_cap)
+              pedal_ramp_rate_up = ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
+
+            self.prev_pedal_di = self.vdas.update(
+              accel_request, CS.out.vEgo, self.prev_pedal_di,
+              a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
+              orientation_ned=list(getattr(CC, "orientationNED", []) or []),
+              accel_effort_limits=accel_effort_limits,
+              pedal_ramp_rate_up=pedal_ramp_rate_up)
+            handoff_slew_complete = (
+              self.preap_long_handoff_slew_active
+              and not in_engage_grace
+              and not self.vdas.pedal_ramp_limited_up
+            )
+            if handoff_slew_complete:
+              self.preap_long_handoff_slew_active = False
+            pedal_cmd = calib.di_to_pedal(self.prev_pedal_di)
+            command = tesla_can.create_pedal_command(pedal_cmd, enable=1, pedal_can_bus=self.pedal_bus)
+            self._append_pedal_command(can_sends, CS, command)
+            if pedal_action == PedalCommandAction.ACQUIRE and CS.pedal_first_enabled_mono_time == 0:
+              CS.pedal_first_enabled_mono_time = now_nanos
+            self.regen_decel_monitor.update(
+              pedal_control_active=True,
+              in_engage_grace=in_engage_grace,
+              pedal_di=self.prev_pedal_di,
+              limited_accel=self.vdas.jerk_limiter.a_limited,
+              actual_accel=CS.out.aEgo,
+              v_ego=CS.out.vEgo,
+            )
+
+          except Exception:
+            carlog.exception("Pre-AP pedal command failed; sending disabled")
+            self.pedal_authority.command_failed()
+            CS.pedal_authority_failed = True
+            self._append_pedal_command(
+              can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
+            self.prev_pedal_di = 0.0
+            self.preap_long_handoff_slew_active = False
+            self.regen_decel_monitor.reset()
+            pedal_action = PedalCommandAction.FAILURE
 
       elif pedal_action == PedalCommandAction.FAILURE:
         carlog.error("Pre-AP pedal authority acquisition failed")
