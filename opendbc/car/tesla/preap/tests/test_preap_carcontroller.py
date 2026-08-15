@@ -3,6 +3,7 @@ import unittest
 from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values
+from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PREAP_MODE_INVALID, PREAP_MODE_MASK
 from opendbc.car.tesla.preap.teslacan import BODY_ADDR, EPAS_ADDR, STEERING_ADDR, tesla_byte_sum_checksum
 from opendbc.car.tesla.values import CANBUS, CAR
 
@@ -156,8 +157,6 @@ class TestPreAPCarController(unittest.TestCase):
     self.assertTrue(CI.CS.intent.long_active)
 
   def test_invalid_mode_never_requests_longitudinal_authority(self):
-    from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PREAP_MODE_INVALID, PREAP_MODE_MASK
-
     absent = _make_ci(pedal=True)
     self.assertNotEqual(absent.CP_SP.safetyParam & PREAP_MODE_MASK, PREAP_MODE_INVALID)
     self.assertIsNotNone(absent.CC.long_controller)
