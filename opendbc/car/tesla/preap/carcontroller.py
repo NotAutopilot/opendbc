@@ -1,4 +1,4 @@
-"""Pre-AP steering/EPAS/body controller. No STW, StockCC, pedal, VDAS, or radar TX."""
+"""Pre-AP steering/EPAS/body controller plus no-pedal stock-CC 0x45 TX."""
 from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.interfaces import CarControllerBase
@@ -19,9 +19,13 @@ class PreAPCarController(CarControllerBase):
 
   def update(self, CC, CC_SP, CS, now_nanos):
     del now_nanos
-    # Prior-cycle longActive is the only long-active fact the translator may use.
+    # No-pedal stock cruise: prior-cycle CC.enabled is logical standard-long active.
+    # Pedal/openpilot-long: prior-cycle CC.longActive remains the only long-active fact.
     if hasattr(CS, "set_long_active"):
-      CS.set_long_active(bool(CC.longActive))
+      if not self.CP.openpilotLongitudinalControl:
+        CS.set_long_active(bool(CC.enabled))
+      else:
+        CS.set_long_active(bool(CC.longActive))
 
     actuators = CC.actuators
     can_sends = []
@@ -46,6 +50,17 @@ class PreAPCarController(CarControllerBase):
       turn = int(bool(CC.rightBlinker)) * 2 + int(bool(CC.leftBlinker))
       cntr = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_body_controls_message(turn, 0, CANBUS.party, cntr))
+
+    stock_cc = getattr(CS, "stock_cc", None)
+    if stock_cc is not None:
+      lever = stock_cc.poll_tx(self.frame)
+      if lever is not None and stock_cc.live_stw is not None:
+        counter = stock_cc.tx_counter()
+        msg = self.tesla_can.create_action_request(lever, CANBUS.party, counter, stock_cc.live_stw)
+        if msg is not None:
+          can_sends.append(msg)
+          now_ms = int(getattr(CS, "stock_cc_now_ms", 0)) & 0xFFFFFFFF
+          stock_cc.note_tx(lever, counter, now_ms)
 
     new_actuators = actuators.as_builder() if hasattr(actuators, "as_builder") else actuators
     if hasattr(new_actuators, "steeringAngleDeg"):

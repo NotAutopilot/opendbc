@@ -3,14 +3,14 @@ from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, DBC, FSD_14_FW, Ecu
-from opendbc.car.tesla.radar_interface import RadarInterface, RADAR_START_ADDR
+from opendbc.car.tesla.radar_interface import RadarInterface as ContinentalRadarInterface, RADAR_START_ADDR
 
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP, TeslaSafetyFlagsSP
 from opendbc.car.tesla.preap.carcontroller import PreAPCarController
 from opendbc.car.tesla.preap.carstate import PreAPCarState
 from opendbc.car.tesla.preap.interface import get_preap_params, get_preap_params_sp
 from opendbc.car.tesla.preap.boot import is_preap_platform
-from opendbc.car.interfaces import RadarInterfaceBase
+from opendbc.car.tesla.preap.radar_interface import RadarInterface as PreAPRadarInterface
 
 
 def _apply_modern_tesla_v1_capabilities(ret: structs.CarParamsSP) -> structs.CarParamsSP:
@@ -34,16 +34,22 @@ def _apply_modern_tesla_v1_capabilities(ret: structs.CarParamsSP) -> structs.Car
   return ret
 
 
+def RadarInterface(CP, CP_SP):
+  if is_preap_platform(CP):
+    return PreAPRadarInterface(CP, CP_SP)
+  return ContinentalRadarInterface(CP, CP_SP)
+
+
 class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
-  RadarInterface = RadarInterface
+  RadarInterface = staticmethod(RadarInterface)
 
   def __init__(self, CP, CP_SP):
     if is_preap_platform(CP):
       self.CarState = PreAPCarState
       self.CarController = PreAPCarController
-      self.RadarInterface = RadarInterfaceBase
+      self.RadarInterface = PreAPRadarInterface
     super().__init__(CP, CP_SP)
 
   @staticmethod

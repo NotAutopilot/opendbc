@@ -1,14 +1,42 @@
-"""Frozen NAP Pre-AP steering/EPAS/body builders. No STW, pedal, VDAS, or radar TX."""
-from opendbc.car.tesla.values import CANBUS
+"""Pre-AP steering/EPAS/body builders plus verified STW 0x45 cancel/set packing."""
+from opendbc.car.tesla.values import CANBUS, CruiseButtons
 
 STEERING_ADDR = 0x488
 EPAS_ADDR = 0x214
 BODY_ADDR = 0x3E9
+STW_ADDR = 0x45
+
+# Live stalk fields copied into generated 0x45. VSL is forced to 1. MAIN is never packed.
+# SpdCtrlLvrStat_Inv is omitted: rewriting SpdCtrlLvr_Stat makes a copied inverse inconsistent.
+STW_DEFAULTS = {
+  "VSL_Enbl_Rq": 1, "DTR_Dist_Rq": 255, "TurnIndLvr_Stat": 0,
+  "HiBmLvr_Stat": 0, "WprWashSw_Psd": 0, "WprWash_R_Sw_Posn_V2": 0,
+  "WprSw6Posn": 0,
+  "StW_Lvr_Stat": 0, "StW_Cond_Flt": 0, "StW_Cond_Psd": 0,
+  "HrnSw_Psd": 0, "StW_Sw00_Psd": 0, "StW_Sw01_Psd": 0,
+  "StW_Sw02_Psd": 0, "StW_Sw03_Psd": 0, "StW_Sw04_Psd": 0,
+  "StW_Sw05_Psd": 0, "StW_Sw06_Psd": 0,
+  "StW_Sw07_Psd": 0, "StW_Sw08_Psd": 0, "StW_Sw09_Psd": 0,
+  "StW_Sw10_Psd": 0, "StW_Sw11_Psd": 0, "StW_Sw12_Psd": 0,
+  "StW_Sw13_Psd": 0, "StW_Sw14_Psd": 0, "StW_Sw15_Psd": 0,
+}
+
+_STOCK_CC_LEVERS = (CruiseButtons.CANCEL, CruiseButtons.SET_ACCEL)
 
 
 def tesla_byte_sum_checksum(msg_id: int, dat: bytes | bytearray) -> int:
   """Address bytes plus payload bytes, truncated to 8 bits."""
   return ((msg_id & 0xFF) + ((msg_id >> 8) & 0xFF) + sum(dat)) & 0xFF
+
+
+def stw_crc8(data: bytes | bytearray) -> int:
+  """CRC-8 poly 0x1D, xor-out 0xFF over bytes 0..6. Matches live STW and production vectors."""
+  crc = 0xFF
+  for value in bytes(data)[:7]:
+    crc ^= value
+    for _ in range(8):
+      crc = ((crc << 1) ^ 0x1D) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+  return crc ^ 0xFF
 
 
 class TeslaCANPreAP:
@@ -52,3 +80,22 @@ class TeslaCANPreAP:
     data = self.packer.make_can_msg("DAS_bodyControls", bus, values)[1]
     values["DAS_bodyControlsChecksum"] = tesla_byte_sum_checksum(BODY_ADDR, data[:7])
     return self.packer.make_can_msg("DAS_bodyControls", bus, values)
+
+  def pack_stw_action(self, lever: int, counter: int, msg_stw: dict | None = None):
+    """Pack STW_ACTN_RQ with live fields, VSL=1, counter mod 16, and CRC-8."""
+    if msg_stw is None:
+      return None
+    values = {"MC_STW_ACTN_RQ": int(counter) % 16, "CRC_STW_ACTN_RQ": 0, "SpdCtrlLvr_Stat": int(lever)}
+    for key, default in STW_DEFAULTS.items():
+      values[key] = msg_stw.get(key, default)
+    values["VSL_Enbl_Rq"] = 1
+    data = self.packer.make_can_msg("STW_ACTN_RQ", CANBUS.party, values)[1]
+    values["CRC_STW_ACTN_RQ"] = stw_crc8(data[:7])
+    return self.packer.make_can_msg("STW_ACTN_RQ", CANBUS.party, values)
+
+  def create_action_request(self, button_to_press, bus, counter, msg_stw=None):
+    """Stock-CC TX: CANCEL=1 or SET_ACCEL=16 only. MAIN is never synthesized."""
+    del bus
+    if int(button_to_press) not in _STOCK_CC_LEVERS:
+      return None
+    return self.pack_stw_action(int(button_to_press), int(counter), msg_stw)

@@ -19,6 +19,15 @@ _VALID_MODES = (
   EngagementMode.longitudinalOnly,
 )
 
+# Direct stock-cruise +/- . Same four RX levers as StockCcTransaction/Panda:
+# disarm the instantaneous edge, keep the pending double-pull origin.
+_PASSTHROUGH_LEVERS = (
+  CruiseButtons.RES_ACCEL,
+  CruiseButtons.RES_ACCEL_2ND,
+  CruiseButtons.DECEL_SET,
+  CruiseButtons.DECEL_2ND,
+)
+
 
 @dataclass(frozen=True)
 class PreAPIntentRecord:
@@ -46,13 +55,16 @@ class PreAPIntentTranslator:
     # Unknown sources start blocked so boot cannot emit a disable record.
     self._terminal_failure = False
     self._blocked = True
+    self.stock_cc_active = False
+    self._coupled_deferred = False
 
   def set_long_active(self, long_active: bool) -> None:
-    """Controller feeds prior-cycle CC.longActive into the shared CarState.
+    """Controller feeds prior-cycle logical standard-long active state.
 
-    Accurate long-active classification is not available from CAN at CarState.
-    Do not infer pedal/stock long from factual DI cruiseState.enabled. One-cycle
-    lag is expected. Until the first explicit input, pulls fail closed.
+    No-pedal stock cruise uses CC.enabled. Pedal/openpilot-long uses CC.longActive.
+    Accurate classification is not available from CAN at CarState. Do not infer
+    pedal/stock long from factual DI cruiseState.enabled. One-cycle lag is
+    expected. Until the first explicit input, pulls fail closed.
     """
     self.long_active = bool(long_active)
 
@@ -63,6 +75,7 @@ class PreAPIntentTranslator:
   def _clear_pending(self) -> None:
     self._first_pull_ms = None
     self._stalk_armed = False
+    self._coupled_deferred = False
 
   def _disable(self, *, coupled_only: bool = False) -> None:
     if coupled_only:
@@ -87,8 +100,20 @@ class PreAPIntentTranslator:
   def update_terminal_failure(self, failed: bool) -> None:
     """Publish an attributable long terminal exit once per failure edge."""
     if failed and not self._terminal_failure:
+      self._coupled_deferred = False
       self._disable(coupled_only=True)
     self._terminal_failure = failed
+
+  def publish_confirmed_coupled_enable(self) -> None:
+    """Release deferred cruiseCoupled enable on the matching StockCC confirmation."""
+    if not self._coupled_deferred or self.mode != EngagementMode.cruiseCoupled:
+      return
+    self._coupled_deferred = False
+    self._publish(LateralIntent.mainCruiseRequest, LongitudinalIntent.enable)
+
+  def sync_counter(self, counter: int) -> None:
+    """Advance the consecutive-counter tracker without treating the frame as a pull."""
+    self._stalk_counter = int(counter) & 0xF
 
   def update_stalk(self, lever: int, counter: int, now_ms: int) -> None:
     lever = int(lever)
@@ -117,6 +142,11 @@ class PreAPIntentTranslator:
       self._stalk_armed = True
       return
 
+    if lever in _PASSTHROUGH_LEVERS:
+      # Direct stock-cruise +/- : disarm the edge, keep pending double-pull origin.
+      self._stalk_armed = False
+      return
+
     if lever != CruiseButtons.MAIN:
       self._stalk_armed = False
       self._first_pull_ms = None
@@ -132,6 +162,10 @@ class PreAPIntentTranslator:
     elapsed = None if self._first_pull_ms is None else (now_ms - self._first_pull_ms) & _UINT32_MASK
     if elapsed is not None and 0 < elapsed < STALK_DOUBLE_PULL_MS:
       self._first_pull_ms = None
+      if self.stock_cc_active and self.mode == EngagementMode.cruiseCoupled:
+        self._coupled_deferred = True
+        self._publish(LateralIntent.none, LongitudinalIntent.none)
+        return
       lateral = LateralIntent.mainCruiseRequest if self.mode == EngagementMode.cruiseCoupled else LateralIntent.none
       self._publish(lateral, LongitudinalIntent.enable)
       return

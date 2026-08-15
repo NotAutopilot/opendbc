@@ -2,6 +2,7 @@ import unittest
 
 from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.tesla.interface import CarInterface
+from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values
 from opendbc.car.tesla.preap.teslacan import BODY_ADDR, EPAS_ADDR, STEERING_ADDR, tesla_byte_sum_checksum
 from opendbc.car.tesla.values import CANBUS, CAR
 
@@ -9,9 +10,24 @@ from opendbc.car.tesla.values import CANBUS, CAR
 STW_ADDR = 0x45
 
 
-def _make_ci():
+def _make_ci(*, pedal=False, engagement_mode=None):
   CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
   CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+  snapshot_kwargs = {}
+  if pedal:
+    snapshot_kwargs.update(
+      pedal_enabled=True,
+      pedal_bus=2,
+      pedal_calib_done=True,
+      pedal_calib_factor=0.035,
+      pedal_calib_zero=0.25,
+      pedal_calib_min=-3.0,
+      pedal_calib_max=99.6,
+    )
+  if engagement_mode is not None:
+    snapshot_kwargs["engagement_mode"] = engagement_mode
+  if snapshot_kwargs:
+    apply_preap_hardware_snapshot(CP, CP_SP, hardware_snapshot_from_values(**snapshot_kwargs))
   return CarInterface(CP, CP_SP)
 
 
@@ -94,8 +110,28 @@ class TestPreAPCarController(unittest.TestCase):
 
   def test_set_long_active_is_fed_from_controller(self):
     CI = _make_ci()
+    self.assertFalse(CI.CP.openpilotLongitudinalControl)
+    self.assertTrue(CI.CP.pcmCruise)
     CI.update([])
     CC, CC_SP = _permitted_controls()
+    CC.enabled = True
+    CC.longActive = False
+    CI.apply(CC, CC_SP, now_nanos=0)
+    self.assertTrue(CI.CS.intent.long_active)
+
+    CI = _make_ci()
+    CI.update([])
+    CC, CC_SP = _permitted_controls()
+    CC.enabled = False
+    CC.longActive = True
+    CI.apply(CC, CC_SP, now_nanos=0)
+    self.assertFalse(CI.CS.intent.long_active)
+
+    CI = _make_ci(pedal=True)
+    self.assertTrue(CI.CP.openpilotLongitudinalControl)
+    CI.update([])
+    CC, CC_SP = _permitted_controls()
+    CC.enabled = False
     CC.longActive = True
     CI.apply(CC, CC_SP, now_nanos=0)
     self.assertTrue(CI.CS.intent.long_active)

@@ -209,6 +209,13 @@ class CarStateSP:
   )
   preapIntentSequence: int = auto_field()
   preapIntentEpoch: int = auto_field()
+  # Stock-CC transaction outbox. Pin capnp ordinals @5-@8.
+  preapStockCcState: 'CarStateSP.PreapStockCcTransactionState' = field(
+    default_factory=lambda: CarStateSP.PreapStockCcTransactionState.idle
+  )
+  preapStockCcBoundCounter: int = auto_field()
+  preapStockCcHostDiConfirmed: bool = auto_field()
+  preapStockCcEnablePending: bool = auto_field()
 
   class PreapLateralIntent(StrEnum):
     none = auto()
@@ -219,3 +226,13 @@ class CarStateSP:
     none = auto()
     enable = auto()
     disable = auto()
+
+  class PreapStockCcTransactionState(StrEnum):
+    idle = auto()
+    cancelRequested = auto()
+    awaitingCancelConfirmation = auto()
+    awaitingSecondPull = auto()
+    reengageRequested = auto()
+    awaitingDiConfirmation = auto()
+    confirmed = auto()
+    cancelledOrFailed = auto()

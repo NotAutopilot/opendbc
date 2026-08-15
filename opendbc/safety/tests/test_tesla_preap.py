@@ -311,6 +311,42 @@ class TestTeslaPreAPIndependent(TeslaPreAPSafetyBase, MomentaryMadsSafetyTestBas
         self._rx(self._stalk(2))
         self.assertFalse(self.safety.get_controls_allowed_lateral())
 
+  # Host/Panda DI brake-pressed truth table: pressed iff raw==1 OR state==ON(1).
+  DI_BRAKE_PRESSED_TRUTH = tuple(
+    (state, raw, (raw == 1) or (state == 1))
+    for state in (0, 1, 2, 3)
+    for raw in (0, 1)
+  )
+
+  def test_di_brake_pressed_truth_table_matches_host(self):
+    for state, raw, expected_pressed in self.DI_BRAKE_PRESSED_TRUTH:
+      with self.subTest(state=state, raw=raw):
+        self.setUp()
+        self._prime_required_rx()
+        self.assertFalse(self.safety.get_brake_pressed_prev())
+        self._rx(self._di_torque2(brake=bool(raw), brake_state=state))
+        self.assertEqual(bool(self.safety.get_brake_pressed_prev()), expected_pressed)
+        if state == 1 and raw == 0:
+          self.assertTrue(self.safety.get_brake_pressed_prev())
+
+  def test_invalid_brake_semantics_are_required_source_blockers(self):
+    for brake_state in (2, 3):
+      with self.subTest(di_brake_state=brake_state):
+        self.setUp()
+        self._prime_required_rx()
+        self._rx(self._di_torque2(brake_state=brake_state))
+        self._rx(self._stalk(0))
+        self._rx(self._stalk(2))
+        self.assertFalse(self.safety.get_controls_allowed_lateral())
+    for status in (0, 3):
+      with self.subTest(driver_brake_status=status):
+        self.setUp()
+        self._prime_required_rx()
+        self._rx(self._brake(status=status))
+        self._rx(self._stalk(0))
+        self._rx(self._stalk(2))
+        self.assertFalse(self.safety.get_controls_allowed_lateral())
+
   def test_hands_on_inhibits_steering_without_changing_permissions(self):
     self._engage_pedal()
     self.safety.set_timer(500000)
@@ -448,6 +484,509 @@ class TestTeslaPreAPRadarTxDisabled(TeslaPreAPSafetyBase):
     self.safety.set_current_safety_param_sp(self.MODE)
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, 0)
     self.assertFalse(self._tx(self._packet(0x219, bytes(8), 1)))
+
+
+
+class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
+  PARAM = 0
+
+  def _stw_bytes(self, lever, counter, wiper=2, dtr=0xFF, vsl=True, checksum=True):
+    data = bytearray(8)
+    data[0] = (lever & 0x3F) | (0x40 if vsl else 0)
+    data[1] = dtr
+    data[6] = ((counter & 0xF) << 4) | (wiper & 0x07)
+    data[7] = _stw_crc(data[:7])
+    if not checksum:
+      data[7] ^= 1
+    return data
+
+  def _stw_msg(self, lever, counter, wiper=2, dtr=0xFF, vsl=True, checksum=True, bus=0, returned=False):
+    packet = self._packet(0x45, self._stw_bytes(lever, counter, wiper=wiper, dtr=dtr, vsl=vsl, checksum=checksum), bus)
+    packet[0].returned = returned
+    return packet
+
+  def _authorized(self, lever, live, counter, bus=0, checksum=True, wiper=None, dtr=None, vsl=True):
+    data = bytearray(live)
+    if dtr is not None:
+      data[1] = dtr
+    data[0] = (lever & 0x3F) | (0x40 if vsl else 0)
+    data[6] = ((counter & 0xF) << 4) | ((live[6] if wiper is None else wiper) & 0x07)
+    data[7] = _stw_crc(data[:7])
+    if not checksum:
+      data[7] ^= 1
+    return self._packet(0x45, data, bus)
+
+  def _handshake_to_set_auth(self, second_pull_us=399000, early_pull2=False, wiper=2):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0, wiper=wiper)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 1, wiper=wiper)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    next_counter = 2
+    if early_pull2:
+      self.safety.set_timer(50000)
+      live = self._stw_bytes(0, next_counter, wiper=wiper)
+      self.assertTrue(self._rx(self._packet(0x45, live)))
+      next_counter = (next_counter + 1) & 0xF
+      live = self._stw_bytes(2, next_counter, wiper=wiper)
+      self.assertTrue(self._rx(self._packet(0x45, live)))
+      next_counter = (next_counter + 1) & 0xF
+    cancel = self._authorized(1, live, next_counter)
+    self.assertTrue(self._tx(cancel))
+    next_counter = (next_counter + 1) & 0xF
+    self.safety.set_timer(max(second_pull_us // 4, 1))
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    if not early_pull2:
+      self.safety.set_timer(second_pull_us)
+      live = self._stw_bytes(0, next_counter, wiper=wiper)
+      self.assertTrue(self._rx(self._packet(0x45, live)))
+      next_counter = (next_counter + 1) & 0xF
+      live = self._stw_bytes(2, next_counter, wiper=wiper)
+      self.assertTrue(self._rx(self._packet(0x45, live)))
+      next_counter = (next_counter + 1) & 0xF
+    return live, next_counter
+
+  def test_first_cancel_requires_exact_live_tuple(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0, wiper=2, dtr=0xFF)
+    self._rx(self._packet(0x45, live))
+    live = self._stw_bytes(2, 1, wiper=2, dtr=0xFF)
+    self._rx(self._packet(0x45, live))
+    self.assertFalse(self._tx(self._authorized(1, live, 2, vsl=False)))
+    self.assertFalse(self._tx(self._authorized(1, live, 2, wiper=1)))
+    self.assertFalse(self._tx(self._authorized(1, live, 2, dtr=0x00)))
+    self.assertFalse(self._tx(self._authorized(1, live, 3)))
+    self.assertFalse(self._tx(self._authorized(1, live, 2, checksum=False)))
+    self.assertFalse(self._tx(self._authorized(1, live, 2, bus=1)))
+    self.assertTrue(self._tx(self._authorized(1, live, 2)))
+
+  def test_exact_cancel_set_handshake_grants_long(self):
+    live, set_counter = self._handshake_to_set_auth()
+    set_msg = self._authorized(16, live, set_counter)
+    self.assertTrue(self._tx(set_msg))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self.safety.set_timer(450000)
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
+    self.assertEqual(1, self.safety.get_stock_cc_reengage_counter())
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+
+  def test_early_pull2_still_requires_cancel_and_post_cancel_di(self):
+    live, set_counter = self._handshake_to_set_auth(early_pull2=True)
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.safety.set_timer(200000)
+    self._rx(self._di_state(cruise=2))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_399_allows_set_400_401_do_not(self):
+    for delta, allowed in ((399000, True), (400000, False), (401000, False)):
+      with self.subTest(delta=delta):
+        self.setUp()
+        live, set_counter = self._handshake_to_set_auth(second_pull_us=delta)
+        set_msg = self._authorized(16, live, set_counter)
+        self.assertEqual(allowed, self._tx(set_msg))
+        if not allowed:
+          cancel = self._authorized(1, live, set_counter)
+          self.assertTrue(self._tx(cancel))
+
+  def test_rejects_echo_wrong_bus_len_lever_counter_checksum_preserved_order_time(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0)
+    self._rx(self._packet(0x45, live))
+    live = self._stw_bytes(2, 1)
+    self._rx(self._packet(0x45, live))
+    cancel = self._authorized(1, live, 2)
+    self.assertTrue(self._tx(cancel))
+    self.assertFalse(self._tx(cancel))
+    self.assertFalse(self._tx(self._authorized(1, live, 2, bus=1)))
+    self.assertFalse(self._tx(self._packet(0x45, bytes(self._stw_bytes(1, 3)[:7]))))
+    self.assertFalse(self._tx(self._authorized(2, live, 3)))
+    self.assertFalse(self._tx(self._authorized(16, live, 3)))
+    self.assertFalse(self._tx(self._authorized(1, live, 4)))
+    self.assertFalse(self._tx(self._authorized(1, live, 3, checksum=False)))
+    self.assertFalse(self._tx(self._authorized(1, live, 3, dtr=0x00)))
+    self.assertFalse(self._tx(self._authorized(1, live, 3, wiper=1)))
+    self._rx(self._di_state(cruise=0))
+    self.safety.set_timer(399000)
+    live = self._stw_bytes(0, 3)
+    self._rx(self._packet(0x45, live))
+    live = self._stw_bytes(2, 4)
+    self._rx(self._packet(0x45, live))
+    set_ok = self._authorized(16, live, 5)
+    self.safety.set_timer(399000 + 500000)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self._tx(set_ok))
+
+  def test_wrap_counter_and_no_main_tx(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 14, wiper=2)
+    self._rx(self._packet(0x45, live))
+    live = self._stw_bytes(2, 15, wiper=2)
+    self._rx(self._packet(0x45, live))
+    cancel = self._authorized(1, live, 0)
+    self.assertTrue(self._tx(cancel))
+    self.assertFalse(self._tx(self._authorized(2, live, 1)))
+    self.assertFalse(self._tx(self._authorized(4, live, 1)))
+    self.assertFalse(self._tx(self._authorized(8, live, 1)))
+    self.assertFalse(self._tx(self._authorized(32, live, 1)))
+
+  def test_non_stockcc_deferred_tx_remains_blocked(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.safety.set_timer(450000)
+    self._rx(self._di_state(cruise=2))
+    self.assertTrue(self.safety.get_controls_allowed())
+    blocked = (
+      self._steering_command(),
+      self._packet(0x2B9, bytes(8)),
+      self._packet(0x214, bytes(8)),
+      self._body_command(),
+      self._pedal_command(enabled=True),
+      self._stw_msg(2, 8),
+    )
+    for msg in blocked:
+      with self.subTest(address=hex(msg[0].addr)):
+        self.assertFalse(self._tx(msg))
+
+  def test_brake_aborts_authorized_set(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self._rx(self._brake(True))
+    self.assertFalse(self._tx(self._authorized(16, live, set_counter)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_host_events_cannot_be_inferred_from_panda_without_physical(self):
+    self._prime_required_rx()
+    self.assertFalse(self._tx(self._stw_msg(1, 1)))
+    self.assertFalse(self._tx(self._stw_msg(16, 1)))
+    self._rx(self._di_state(cruise=2))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+
+
+  def test_cancel_auth_budget_120ms_positive_offset_and_wrap(self):
+    for elapsed, allowed in ((100000, True), (119999, True), (120000, True), (120001, False)):
+      with self.subTest(elapsed=elapsed):
+        self.setUp()
+        self._prime_required_rx()
+        self.safety.set_timer(0)
+        live = self._stw_bytes(0, 0, wiper=2)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        live = self._stw_bytes(2, 1, wiper=2)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        self.safety.set_timer(elapsed)
+        allowed_tx = self._tx(self._authorized(1, live, 2))
+        self.assertEqual(allowed, allowed_tx)
+        if not allowed:
+          self.assertFalse(self._tx(self._authorized(1, live, 2)))
+
+    self.setUp()
+    base = 0xFFFFF000
+    self.safety.set_timer(base)
+    self._prime_required_rx()
+    live = self._stw_bytes(0, 0, wiper=2)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 1, wiper=2)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.safety.set_timer((base + 120000) & 0xFFFFFFFF)
+    self.assertTrue(self._tx(self._authorized(1, live, 2)))
+
+    self.setUp()
+    self.safety.set_timer(base)
+    self._prime_required_rx()
+    live = self._stw_bytes(0, 0, wiper=2)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 1, wiper=2)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.safety.set_timer((base + 120001) & 0xFFFFFFFF)
+    self.assertFalse(self._tx(self._authorized(1, live, 2)))
+    self.assertFalse(self._tx(self._authorized(1, live, 2)))
+
+  def test_rejects_inv_and_unused_bit3_with_corrected_crc(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0, wiper=2)
+    self._rx(self._packet(0x45, live))
+    live = self._stw_bytes(2, 1, wiper=2)
+    self._rx(self._packet(0x45, live))
+
+    inv = bytearray(live)
+    inv[0] = (1 & 0x3F) | 0x40 | 0x80
+    inv[6] = ((2 & 0xF) << 4) | (live[6] & 0x07)
+    inv[7] = _stw_crc(inv[:7])
+    self.assertFalse(self._tx(self._packet(0x45, inv)))
+
+    bit3 = bytearray(live)
+    bit3[0] = (1 & 0x3F) | 0x40
+    bit3[6] = ((2 & 0xF) << 4) | (live[6] & 0x07) | 0x08
+    bit3[7] = _stw_crc(bit3[:7])
+    self.assertFalse(self._tx(self._packet(0x45, bit3)))
+
+    self.assertTrue(self._tx(self._authorized(1, live, 2)))
+
+  def test_nonzero_live_switch_bytes_are_required(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0, wiper=2, dtr=0xFF)
+    live[4] = 0x80
+    live[5] = 0x01
+    live[7] = _stw_crc(live[:7])
+    self._rx(self._packet(0x45, live))
+    live = self._stw_bytes(2, 1, wiper=2, dtr=0xFF)
+    live[4] = 0x80
+    live[5] = 0x01
+    live[7] = _stw_crc(live[:7])
+    self._rx(self._packet(0x45, live))
+    zeroed = bytearray(live)
+    zeroed[0] = (1 & 0x3F) | 0x40
+    zeroed[4] = 0
+    zeroed[5] = 0
+    zeroed[6] = ((2 & 0xF) << 4) | (live[6] & 0x07)
+    zeroed[7] = _stw_crc(zeroed[:7])
+    self.assertFalse(self._tx(self._packet(0x45, zeroed)))
+    self.assertTrue(self._tx(self._authorized(1, live, 2)))
+
+  def _handshake_to_cancel_and_early_pull2(self, origin=0):
+    self.safety.set_timer(origin)
+    self._prime_required_rx()
+    live = self._stw_bytes(0, 0)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 1)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.assertTrue(self._tx(self._authorized(1, live, 2)))
+    next_counter = 3
+    self.safety.set_timer((origin + 50000) & 0xFFFFFFFF)
+    live = self._stw_bytes(0, next_counter)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    next_counter = (next_counter + 1) & 0xF
+    live = self._stw_bytes(2, next_counter)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    next_counter = (next_counter + 1) & 0xF
+    return live, next_counter
+
+  def _confirm_stock_cc(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.safety.set_timer(450000)
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
+    return live
+
+  def test_confirmed_di_fall_independent_retains_lateral(self):
+    self._confirm_stock_cc()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._rx(self._di_state(cruise=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._rx(self._di_state(cruise=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_pre_confirmation_di_disengaged_is_not_confirmed_fall(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self._rx(self._di_state(cruise=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self.safety.set_timer(450000)
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
+
+  def test_post_cancel_di_499_allows_500_501_fail(self):
+    for elapsed, allowed in ((499000, True), (500000, False), (501000, False)):
+      with self.subTest(elapsed=elapsed):
+        self.setUp()
+        live, set_counter = self._handshake_to_cancel_and_early_pull2()
+        self.safety.set_timer(elapsed)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertEqual(allowed, self._tx(self._authorized(16, live, set_counter)))
+
+  def test_post_cancel_di_before_tick_keeps_handshake(self):
+    live, set_counter = self._handshake_to_cancel_and_early_pull2()
+    self.safety.set_timer(499000)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.safety.set_timer(500000)
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+
+  def test_tick_before_post_cancel_di_fails_and_cannot_resurrect(self):
+    live, set_counter = self._handshake_to_cancel_and_early_pull2()
+    self.safety.set_timer(500000)
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.assertFalse(self._tx(self._authorized(16, live, set_counter)))
+
+  def test_post_cancel_di_deadline_uint32_wrap(self):
+    origin = 0xFFFFFF00
+    for elapsed, allowed in ((499000, True), (500000, False), (501000, False)):
+      with self.subTest(elapsed=elapsed):
+        self.setUp()
+        live, set_counter = self._handshake_to_cancel_and_early_pull2(origin)
+        self.safety.set_timer((origin + elapsed) & 0xFFFFFFFF)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertEqual(allowed, self._tx(self._authorized(16, live, set_counter)))
+
+  def test_set_tx_rechecks_authorization_unexpired_without_tick(self):
+    for elapsed, allowed in ((499000, True), (500000, False), (501000, False)):
+      with self.subTest(elapsed=elapsed):
+        self.setUp()
+        live, set_counter = self._handshake_to_set_auth()
+        self.safety.set_timer(399000 + elapsed)
+        self.assertEqual(allowed, self._tx(self._authorized(16, live, set_counter)))
+
+  def test_stock_cc_exact_tuple_requires_classic_can(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 1)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    fd_true = self._authorized(1, live, 2)
+    fd_true[0].fd = True
+    self.assertFalse(self._tx(fd_true))
+    fd_false = self._authorized(1, live, 2)
+    self.assertFalse(bool(fd_false[0].fd))
+    self.assertTrue(self._tx(fd_false))
+
+
+
+  def test_nonconsecutive_counter_clears_set_auth_before_tx(self):
+    live, set_counter = self._handshake_to_set_auth()
+    last = (set_counter - 1) & 0xF
+    gap_counter = (last + 4) & 0xF
+    gap_live = self._stw_bytes(0, gap_counter)
+    self.assertTrue(self._rx(self._packet(0x45, gap_live)))
+    self.assertFalse(self._tx(self._authorized(16, gap_live, (gap_counter + 1) & 0xF)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+
+  def test_nonconsecutive_counter_after_set_blocks_di_confirmation(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    gap_counter = (set_counter + 4) & 0xF
+    self.assertTrue(self._rx(self._packet(0x45, self._stw_bytes(0, gap_counter))))
+    self.safety.set_timer(450000)
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+
+  def test_nonconsecutive_counter_revokes_confirmed_authority(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.safety.set_timer(450000)
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
+    gap_counter = (set_counter + 4) & 0xF
+    gap_live = self._stw_bytes(0, gap_counter)
+    self.assertTrue(self._rx(self._packet(0x45, gap_live)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self.assertFalse(self._tx(self._authorized(16, gap_live, (gap_counter + 1) & 0xF)))
+    if self.MODE == PREAP_MODE_INDEPENDENT:
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
+    else:
+      self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_consecutive_counter_wrap_15_to_0_keeps_set_auth(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 14)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 15)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.assertTrue(self._tx(self._authorized(1, live, 0)))
+    self.safety.set_timer(100000)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.safety.set_timer(399000)
+    live = self._stw_bytes(0, 1)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 2)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.assertTrue(self._tx(self._authorized(16, live, 3)))
+
+  def test_direct_adjustment_levers_preserve_set_authorization(self):
+    # Host PASSTHROUGH_LEVERS: RES_ACCEL=16, RES_ACCEL_2ND=4, DECEL_SET=32, DECEL_2ND=8.
+    for lever in (16, 4, 32, 8):
+      with self.subTest(lever=lever):
+        self.setUp()
+        self._prime_required_rx()
+        self.safety.set_timer(0)
+        live = self._stw_bytes(0, 0)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        live = self._stw_bytes(2, 1)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        live = self._stw_bytes(lever, 2)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        self.assertFalse(self._tx(self._authorized(lever, live, 3)))
+        self.assertFalse(self._tx(self._authorized(2, live, 3)))
+        self.assertTrue(self._tx(self._authorized(1, live, 3)))
+        self.safety.set_timer(100000)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.safety.set_timer(399000)
+        live = self._stw_bytes(0, 4)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        live = self._stw_bytes(2, 5)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        self.assertTrue(self._tx(self._authorized(16, live, 6)))
+        self.assertFalse(self._tx(self._authorized(2, live, 7)))
+
+
+class TestTeslaPreAPNoPedalCoupledStockCc(TestTeslaPreAPNoPedalStockCc):
+  MODE = PREAP_MODE_CRUISE_COUPLED
+
+
+  def test_confirm_requests_lateral_in_coupled_mode(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.safety.set_timer(450000)
+    self._rx(self._di_state(cruise=2))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_confirmed_di_fall_independent_retains_lateral(self):
+    self._confirm_stock_cc()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._rx(self._di_state(cruise=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._rx(self._di_state(cruise=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_confirmed_di_fall_cruise_coupled_force_disables_lateral(self):
+    self.test_confirmed_di_fall_independent_retains_lateral()
+
+
+class TestTeslaPreAPNoPedalLongOnlyStockCc(TestTeslaPreAPNoPedalStockCc):
+  MODE = PREAP_MODE_LONGITUDINAL_ONLY
+
+  def test_confirm_does_not_grant_lateral(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
+    self.safety.set_timer(450000)
+    self._rx(self._di_state(cruise=2))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_confirmed_di_fall_independent_retains_lateral(self):
+    self._confirm_stock_cc()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._rx(self._di_state(cruise=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
 
 
 if __name__ == "__main__":

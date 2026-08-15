@@ -226,6 +226,7 @@ typedef void (*safety_tick_hook)(bool rx_checks_invalid);
 typedef struct {
   safety_hook_init init;
   rx_hook rx;
+  rx_hook rx_all;  // called for ALL received messages, before whitelist check (for CAN forwarding)
   invalid_rx_hook invalid_rx;
   tx_hook tx;
   fwd_hook fwd;

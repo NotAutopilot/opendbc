@@ -1,6 +1,8 @@
 """Read-only Pre-AP CarState. No Params, no engagement owner, no actuation."""
 from __future__ import annotations
 
+import time
+
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -8,10 +10,22 @@ from opendbc.car.interfaces import CarStateBase
 from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp
 from opendbc.car.tesla.preap.constants import PEDAL_DI_PRESSED
 from opendbc.car.tesla.preap.intent import PreAPIntentTranslator
+from opendbc.car.tesla.preap.stock_cc import StockCcState, StockCcTransaction
+from opendbc.car.tesla.preap.teslacan import STW_DEFAULTS
 from opendbc.car.tesla.values import CANBUS, DBC, GEAR_MAP, STEER_THRESHOLD
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
+REQUIRED_SOURCE_KEYS = ("DI_torque2", "GTW_carState", "EPAS_sysStatus", "BrakeMessage")
+REQUIRED_SOURCE_MAX_AGE_NS = 1_000_000_000
+
+
+def required_sources_fresh(seen_ns: dict[str, int | None], now_ns: int,
+                           max_age_ns: int = REQUIRED_SOURCE_MAX_AGE_NS) -> bool:
+  return all(
+    seen_ns.get(key) is not None and now_ns - int(seen_ns[key]) <= max_age_ns
+    for key in REQUIRED_SOURCE_KEYS
+  )
 
 
 class PreAPCarState(CarStateBase):
@@ -26,21 +40,47 @@ class PreAPCarState(CarStateBase):
     self.di_cruise_state = "OFF"
     self.speed_units = "MPH"
     self.intent = PreAPIntentTranslator(CP_SP.preapLateralEngagementMode)
+    self.stock_cc = StockCcTransaction(active=not bool(CP.openpilotLongitudinalControl))
+    self.intent.stock_cc_active = self.stock_cc.active
+    self.stock_cc_now_ms = 0
+    self._di_parser_ts = 0
+    self._di_generation = 0
+    self._last_ret_sp = None
     self._gear_seen = False
     self._doors_seen = False
     self._epas_seen = False
     self._di_brake_seen = False
     self._brake_message_seen = False
-    self._required_source_ts_nanos = {
-      "DI_torque2": 0,
-      "GTW_carState": 0,
-      "EPAS_sysStatus": 0,
-      "BrakeMessage": 0,
-    }
+    self._clock_ns = time.monotonic_ns
+    self._required_source_parser_ts = {key: 0 for key in REQUIRED_SOURCE_KEYS}
+    self._required_source_seen_ns: dict[str, int | None] = {key: None for key in REQUIRED_SOURCE_KEYS}
 
   def set_long_active(self, long_active: bool) -> None:
-    """Controller feeds prior-cycle CC.longActive. Never infer from DI cruiseState.enabled."""
+    """Controller feeds prior-cycle logical standard-long active state. Never infer from DI cruiseState.enabled."""
     self.intent.set_long_active(long_active)
+
+  def _sync_stock_cc_intent(self, ret_sp=None) -> None:
+    self.intent.update_terminal_failure(self.stock_cc.state == StockCcState.cancelledOrFailed)
+    if self.stock_cc.enable_pending:
+      self.intent.publish_confirmed_coupled_enable()
+    target = ret_sp if ret_sp is not None else self._last_ret_sp
+    if target is None:
+      return
+    target.preapLateralIntent = self.intent.record.lateral
+    target.preapLongitudinalIntent = self.intent.record.longitudinal
+    target.preapIntentSequence = self.intent.record.sequence
+
+  def update_stock_cc_panda(self, panda_state) -> None:
+    if panda_state is None:
+      self.stock_cc.update_panda(counter=None, confirmed=False, controls_allowed_longitudinal=False)
+      self._sync_stock_cc_intent()
+      return
+    self.stock_cc.update_panda(
+      counter=int(getattr(panda_state, "stockCcReengageCounter", 0) or 0),
+      confirmed=bool(getattr(panda_state, "stockCcReengageConfirmed", False)),
+      controls_allowed_longitudinal=bool(getattr(panda_state, "controlsAllowedLongitudinal", False)),
+    )
+    self._sync_stock_cc_intent()
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp_chassis = can_parsers[Bus.chassis]
@@ -54,7 +94,11 @@ class PreAPCarState(CarStateBase):
 
     ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > PEDAL_DI_PRESSED
 
-    di_brake_pressed = cp_chassis.vl["DI_torque2"]["DI_brakePedal"] == 1
+    # Panda tesla_preap.h: raw DI_brakePedal==1 OR DI_brakePedalState==ON(1).
+    di_brake_pressed = (
+      int(cp_chassis.vl["DI_torque2"]["DI_brakePedal"]) == 1 or
+      int(cp_chassis.vl["DI_torque2"]["DI_brakePedalState"]) == 1
+    )
     brake_message_pressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
     self.real_brake_pressed = di_brake_pressed or brake_message_pressed
     ret.brakePressed = self.real_brake_pressed
@@ -129,42 +173,58 @@ class PreAPCarState(CarStateBase):
       if interceptor_gas is not None:
         ret.gasPressed = interceptor_gas > PEDAL_DI_PRESSED
 
-    if cp_chassis.vl_all["DI_torque2"]["DI_brakePedal"]:
-      self._di_brake_seen = True
-    if cp_chassis.vl_all["BrakeMessage"]["driverBrakeStatus"]:
-      self._brake_message_seen = True
-    for message in self._required_source_ts_nanos:
+    now_ns = int(self._clock_ns())
+    now_ms = (now_ns // 1_000_000) & 0xFFFFFFFF
+    self.stock_cc_now_ms = now_ms
+    for message in REQUIRED_SOURCE_KEYS:
       message_ts = cp_chassis.ts_nanos.get(message, {})
       latest = max(message_ts.values(), default=0)
-      if latest:
-        self._required_source_ts_nanos[message] = latest
-    newest_can_ts = max(
-      (timestamp for message_ts in cp_chassis.ts_nanos.values() for timestamp in message_ts.values()),
-      default=0,
-    )
-    sources_fresh = newest_can_ts > 0 and all(
-      timestamp > 0 and newest_can_ts - timestamp <= 1_000_000_000
-      for timestamp in self._required_source_ts_nanos.values()
-    )
+      if latest and latest != self._required_source_parser_ts[message]:
+        self._required_source_parser_ts[message] = latest
+        self._required_source_seen_ns[message] = now_ns
+        if message == "DI_torque2":
+          # Panda: DI_brakePedalState 2/3 are INVALID/SNA and cannot satisfy the source.
+          self._di_brake_seen = int(cp_chassis.vl["DI_torque2"]["DI_brakePedalState"]) <= 1
+        elif message == "BrakeMessage":
+          # Panda: driverBrakeStatus is valid only for 1 (not applied) and 2 (applied).
+          self._brake_message_seen = int(cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"]) in (1, 2)
+    sources_fresh = required_sources_fresh(self._required_source_seen_ns, now_ns)
     blocked = not (
       sources_fresh and self._gear_seen and self._doors_seen and self._epas_seen and
       self._di_brake_seen and self._brake_message_seen and
       ret.gearShifter == structs.CarState.GearShifter.drive and not ret.doorOpen
     )
     self.intent.update_health(blocked=blocked, epas_fault=ret.steeringDisengage, brake_pressed=ret.brakePressed)
+    self.stock_cc.update_health(blocked=blocked, brake_pressed=ret.brakePressed)
 
     levers = cp_chassis.vl_all["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"]
     counters = cp_chassis.vl_all["STW_ACTN_RQ"]["MC_STW_ACTN_RQ"]
     if levers and len(levers) == len(counters):
-      now_ms = int(cp_chassis.ts_nanos["STW_ACTN_RQ"]["MC_STW_ACTN_RQ"] // 1_000_000) & 0xFFFFFFFF
+      stw = cp_chassis.vl["STW_ACTN_RQ"]
       for lever, counter in zip(levers, counters, strict=True):
-        self.intent.update_stalk(int(lever), int(counter), now_ms)
+        lever_i, counter_i = int(lever), int(counter)
+        if self.stock_cc.is_echo(lever_i, counter_i, now_ms):
+          self.intent.sync_counter(counter_i)
+          self.stock_cc.sync_counter(counter_i)
+          continue
+        live = {key: int(stw.get(key, default)) for key, default in STW_DEFAULTS.items()}
+        live["MC_STW_ACTN_RQ"] = counter_i
+        self.stock_cc.update_live_stw(live)
+        self.intent.update_stalk(lever_i, counter_i, now_ms)
+        self.stock_cc.update_stalk(lever_i, counter_i, now_ms)
 
-    ret_sp.preapLateralIntent = self.intent.record.lateral
-    ret_sp.preapLongitudinalIntent = self.intent.record.longitudinal
-    ret_sp.preapIntentSequence = self.intent.record.sequence
+    di_ts_map = cp_chassis.ts_nanos.get("DI_state", {})
+    di_ts = max(di_ts_map.values(), default=0) if di_ts_map else 0
+    if di_ts and di_ts != self._di_parser_ts:
+      self._di_parser_ts = di_ts
+      self._di_generation = (self._di_generation + 1) & 0xFFFFFFFF
+      self.stock_cc.update_di(ret.cruiseState.enabled, now_ms, self._di_generation)
+    self.stock_cc.tick_timeouts(now_ms)
+    self._sync_stock_cc_intent(ret_sp)
     # Epoch is stamped by card on the process incarnation.
     ret_sp.preapIntentEpoch = 0
+    self.stock_cc.publish(ret_sp)
+    self._last_ret_sp = ret_sp
     return ret, ret_sp
 
   @staticmethod

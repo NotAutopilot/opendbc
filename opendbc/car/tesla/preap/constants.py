@@ -2,6 +2,16 @@
 # Never consult Params or /data/nap_params.json for this value.
 STALK_DOUBLE_PULL_MS = 400
 
+# Stock-CC 0x45 cadence. 100 Hz controller, one TX slot every 10 frames.
+STOCK_CC_TX_PERIOD_FRAMES = 10
+STOCK_CC_CANCEL_DELAY_FRAMES = 10
+STOCK_CC_ENGAGE_TIMEOUT_FRAMES = 50
+STOCK_CC_CANCEL_ECHO_MS = 600
+STOCK_CC_SPOOF_ECHO_MS = 300
+STOCK_CC_CONFIRM_MS = 500
+STOCK_CC_TX_TIMEOUT_MS = 200
+STOCK_CC_SECOND_PULL_TIMEOUT_MS = 2000
+
 # DI_pedalPos threshold used for gasPressed on Pre-AP.
 PEDAL_DI_PRESSED = 2
 

@@ -13,10 +13,28 @@
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE (1U << 4)
 
 #define PREAP_STALK_DOUBLE_PULL_US 400000U
+#define PREAP_STOCK_CC_CANCEL_US 100000U
+#define PREAP_STOCK_CC_OBSERVATION_US 10000U
+#define PREAP_STOCK_CC_DELIVERY_US 10000U
+#define PREAP_STOCK_CC_CANCEL_AUTH_US (PREAP_STOCK_CC_CANCEL_US + PREAP_STOCK_CC_OBSERVATION_US + PREAP_STOCK_CC_DELIVERY_US)
 #define PREAP_STOCK_CC_CONFIRM_US 500000U
 #define PREAP_REQUIRED_SOURCE_MAX_AGE_US 1000000U
 #define PREAP_HANDS_ON_RESUME_US 1000000U
 #define PREAP_PEDAL_GAS_THRESHOLD 650
+#define PREAP_CANCEL_ECHO_US 600000U
+#define PREAP_SPOOF_ECHO_US 300000U
+#define PREAP_STALK_RES_ACCEL_2ND 4U
+#define PREAP_STALK_DECEL_2ND 8U
+#define PREAP_STALK_RES_ACCEL 16U
+#define PREAP_STALK_DECEL_SET 32U
+
+#define PREAP_GET_BYTES_04(msg) GET_BYTES((msg), 0, 4)
+#define PREAP_GET_BYTES_48(msg) GET_BYTES((msg), 4, 4)
+
+#if defined(STM32H7) || defined(STM32F4)
+void can_send(CANPacket_t *to_push, uint8_t bus_number, bool skip_tx_hook);
+void can_set_checksum(CANPacket_t *packet);
+#endif
 
 static bool preap_enable_pedal = false;
 static uint8_t preap_mode = PREAP_MODE_INVALID;
@@ -46,31 +64,83 @@ static bool preap_brake_paused_lateral = false;
 static bool preap_stock_cc_reengage_authorized = false;
 static bool preap_stock_cc_reengage_sent = false;
 static uint32_t preap_stock_cc_deadline_ts = 0U;
+static bool preap_stock_cc_cancel_authorized = false;
+static bool preap_stock_cc_cancel_sent = false;
+static uint32_t preap_stock_cc_cancel_sent_ts = 0U;
+static bool preap_stock_cc_post_cancel_di = false;
+static bool preap_stock_cc_pull2_latched = false;
+static bool preap_stock_cc_awaiting_di_rise = false;
+static uint8_t preap_stock_cc_expected_counter = 0U;
+static bool preap_stock_cc_di_engaged = false;
+static uint8_t preap_live_stw[8] = {0};
+static bool preap_live_stw_valid = false;
+static bool preap_echo_active = false;
+static uint8_t preap_echo_lever = 0U;
+static uint8_t preap_echo_counter = 0U;
+static uint32_t preap_echo_ts = 0U;
+static uint32_t preap_echo_window_us = 0U;
 static bool preap_hands_on_clear_timing = false;
 static uint32_t preap_hands_on_clear_ts = 0U;
 static bool preap_stalk_counter_seen = false;
 static uint8_t preap_stalk_counter_last = 0U;
 
+static bool preap_radar_emulation = false;
+static bool preap_radar_behind_nosecone = false;
+static int preap_radar_status = 0;
+static uint32_t preap_last_radar_signal = 0;
+static int preap_radar_epas_type = 0;
+static int preap_radar_position = 0;
+
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+#define PREAP_RADAR_GTW_CAPTURE_MAX 16
+static bool preap_radar_car_config_captured = false;
+static CANPacket_t preap_radar_car_config_capture;
+static int preap_radar_gtw_count = 0;
+static CANPacket_t preap_radar_gtw_capture[PREAP_RADAR_GTW_CAPTURE_MAX];
+#endif
 
 static bool tesla_preap_source_fresh(bool seen, uint32_t timestamp, uint32_t now) {
   const uint32_t elapsed = safety_get_ts_elapsed(now, timestamp);
   return seen && (elapsed <= PREAP_REQUIRED_SOURCE_MAX_AGE_US);
 }
 
+static void tesla_preap_clear_stock_cc_tx_state(void) {
+  preap_stock_cc_reengage_authorized = false;
+  preap_stock_cc_reengage_sent = false;
+  preap_stock_cc_deadline_ts = 0U;
+  preap_stock_cc_cancel_authorized = false;
+  preap_stock_cc_cancel_sent = false;
+  preap_stock_cc_cancel_sent_ts = 0U;
+  preap_stock_cc_post_cancel_di = false;
+  preap_stock_cc_pull2_latched = false;
+  preap_stock_cc_awaiting_di_rise = false;
+  preap_stock_cc_expected_counter = 0U;
+  preap_echo_active = false;
+}
+
+static bool tesla_preap_cancel_window_open(uint32_t now) {
+  const uint32_t elapsed = safety_get_ts_elapsed(now, preap_first_pull_ts);
+  return preap_stock_cc_cancel_authorized && !preap_stock_cc_cancel_sent &&
+         (elapsed <= PREAP_STOCK_CC_CANCEL_AUTH_US);
+}
+
+static void tesla_preap_expire_unsent_cancel(uint32_t now) {
+  if (preap_stock_cc_cancel_authorized && !preap_stock_cc_cancel_sent &&
+      (safety_get_ts_elapsed(now, preap_first_pull_ts) > PREAP_STOCK_CC_CANCEL_AUTH_US)) {
+    tesla_preap_clear_stock_cc_tx_state();
+  }
+}
+
 static void tesla_preap_clear_pull_state(void) {
   preap_stalk_armed = false;
   preap_pull_pending = false;
   preap_first_pull_ts = 0U;
-  preap_stock_cc_reengage_authorized = false;
-  preap_stock_cc_reengage_sent = false;
-  preap_stock_cc_deadline_ts = 0U;
+  tesla_preap_clear_stock_cc_tx_state();
 }
 
 static void tesla_preap_clear_stock_cc_confirmation(void) {
   stock_cc_reengage_confirmed = false;
-  preap_stock_cc_reengage_authorized = false;
-  preap_stock_cc_reengage_sent = false;
-  preap_stock_cc_deadline_ts = 0U;
+  tesla_preap_clear_stock_cc_tx_state();
 }
 
 static void tesla_preap_exit(DisengageReason reason) {
@@ -128,7 +198,6 @@ static uint8_t tesla_preap_get_counter(const CANPacket_t *msg) {
   }
   return counter;
 }
-
 
 static int tesla_preap_checksum_byte(uint32_t addr) {
   int checksum_byte = -1;
@@ -188,6 +257,255 @@ static bool tesla_preap_get_quality_flag_valid(const CANPacket_t *msg) {
   return valid;
 }
 
+static void preap_word_to_bytes(uint8_t *dst, uint32_t src) {
+  dst[0] = (uint8_t)(src & 0xFFU);
+  dst[1] = (uint8_t)((src >> 8U) & 0xFFU);
+  dst[2] = (uint8_t)((src >> 16U) & 0xFFU);
+  dst[3] = (uint8_t)((src >> 24U) & 0xFFU);
+}
+
+static const int preap_crc_lookup[256] = {
+  0x00, 0x1D, 0x3A, 0x27, 0x74, 0x69, 0x4E, 0x53, 0xE8, 0xF5, 0xD2, 0xCF, 0x9C, 0x81, 0xA6, 0xBB,
+  0xCD, 0xD0, 0xF7, 0xEA, 0xB9, 0xA4, 0x83, 0x9E, 0x25, 0x38, 0x1F, 0x02, 0x51, 0x4C, 0x6B, 0x76,
+  0x87, 0x9A, 0xBD, 0xA0, 0xF3, 0xEE, 0xC9, 0xD4, 0x6F, 0x72, 0x55, 0x48, 0x1B, 0x06, 0x21, 0x3C,
+  0x4A, 0x57, 0x70, 0x6D, 0x3E, 0x23, 0x04, 0x19, 0xA2, 0xBF, 0x98, 0x85, 0xD6, 0xCB, 0xEC, 0xF1,
+  0x13, 0x0E, 0x29, 0x34, 0x67, 0x7A, 0x5D, 0x40, 0xFB, 0xE6, 0xC1, 0xDC, 0x8F, 0x92, 0xB5, 0xA8,
+  0xDE, 0xC3, 0xE4, 0xF9, 0xAA, 0xB7, 0x90, 0x8D, 0x36, 0x2B, 0x0C, 0x11, 0x42, 0x5F, 0x78, 0x65,
+  0x94, 0x89, 0xAE, 0xB3, 0xE0, 0xFD, 0xDA, 0xC7, 0x7C, 0x61, 0x46, 0x5B, 0x08, 0x15, 0x32, 0x2F,
+  0x59, 0x44, 0x63, 0x7E, 0x2D, 0x30, 0x17, 0x0A, 0xB1, 0xAC, 0x8B, 0x96, 0xC5, 0xD8, 0xFF, 0xE2,
+  0x26, 0x3B, 0x1C, 0x01, 0x52, 0x4F, 0x68, 0x75, 0xCE, 0xD3, 0xF4, 0xE9, 0xBA, 0xA7, 0x80, 0x9D,
+  0xEB, 0xF6, 0xD1, 0xCC, 0x9F, 0x82, 0xA5, 0xB8, 0x03, 0x1E, 0x39, 0x24, 0x77, 0x6A, 0x4D, 0x50,
+  0xA1, 0xBC, 0x9B, 0x86, 0xD5, 0xC8, 0xEF, 0xF2, 0x49, 0x54, 0x73, 0x6E, 0x3D, 0x20, 0x07, 0x1A,
+  0x6C, 0x71, 0x56, 0x4B, 0x18, 0x05, 0x22, 0x3F, 0x84, 0x99, 0xBE, 0xA3, 0xF0, 0xED, 0xCA, 0xD7,
+  0x35, 0x28, 0x0F, 0x12, 0x41, 0x5C, 0x7B, 0x66, 0xDD, 0xC0, 0xE7, 0xFA, 0xA9, 0xB4, 0x93, 0x8E,
+  0xF8, 0xE5, 0xC2, 0xDF, 0x8C, 0x91, 0xB6, 0xAB, 0x10, 0x0D, 0x2A, 0x37, 0x64, 0x79, 0x5E, 0x43,
+  0xB2, 0xAF, 0x88, 0x95, 0xC6, 0xDB, 0xFC, 0xE1, 0x5A, 0x47, 0x60, 0x7D, 0x2E, 0x33, 0x14, 0x09,
+  0x7F, 0x62, 0x45, 0x58, 0x0B, 0x16, 0x31, 0x2C, 0x97, 0x8A, 0xAD, 0xB0, 0xE3, 0xFE, 0xD9, 0xC4
+};
+
+static int preap_compute_crc8(uint32_t lo, uint32_t hi, int msg_len) {
+  int crc = 0xFF;
+  for (int x = 0; x < msg_len; x++) {
+    int v = (x <= 3) ? ((int)((lo >> (x * 8)) & 0xFFU)) : ((int)((hi >> ((x - 4) * 8)) & 0xFFU));
+    crc = preap_crc_lookup[crc ^ v];
+  }
+  return crc ^ 0xFF;
+}
+
+static void preap_radar_capture_tx(const CANPacket_t *pkt) {
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  if (preap_radar_gtw_count < PREAP_RADAR_GTW_CAPTURE_MAX) {
+    preap_radar_gtw_capture[preap_radar_gtw_count] = *pkt;
+    preap_radar_gtw_count++;
+  }
+  if (pkt->addr == 0x2A9U) {
+    preap_radar_car_config_capture = *pkt;
+    preap_radar_car_config_captured = true;
+  }
+#else
+  SAFETY_UNUSED(pkt);
+#endif
+}
+
+static void preap_radar_send(CANPacket_t *pkt) {
+  preap_radar_capture_tx(pkt);
+#if defined(STM32H7) || defined(STM32F4)
+  can_set_checksum(pkt);
+  can_send(pkt, 1, true);
+#else
+  SAFETY_UNUSED(pkt);
+#endif
+}
+
+static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
+  CANPacket_t pkt = {0};
+  pkt.returned = 0U;
+  pkt.rejected = 0U;
+  pkt.extended = src->extended;
+  pkt.bus = 1U;
+  pkt.addr = new_addr;
+  pkt.data_len_code = src->data_len_code;
+  const int msg_len = (int)GET_LEN(src);
+  for (int i = 0; i < msg_len; i++) {
+    pkt.data[i] = src->data[i];
+  }
+  preap_radar_send(&pkt);
+}
+
+static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t *dst) {
+  *dst = (CANPacket_t){.returned = 0U, .rejected = 0U, .extended = src->extended,
+                       .bus = 1, .addr = 0x2A9, .data_len_code = src->data_len_code};
+  uint32_t lo = PREAP_GET_BYTES_04(src);
+  uint32_t hi = PREAP_GET_BYTES_48(src);
+  lo = (lo & 0xFFFFF33FU) | 0x100U | 0x440U;
+  hi = (hi & 0xCFFF0F0FU) | 0x10000000U | ((uint32_t)preap_radar_position << 4) | ((uint32_t)preap_radar_epas_type << 12);
+  preap_word_to_bytes(&dst->data[0], lo);
+  preap_word_to_bytes(&dst->data[4], hi);
+}
+
+static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
+  const uint8_t bus_num = to_fwd->bus;
+  const uint32_t addr = to_fwd->addr;
+  const uint8_t msg_len = (uint8_t)GET_LEN(to_fwd);
+
+  if ((bus_num == 0U) && preap_radar_emulation) {
+    if ((addr == 0x45U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x219); }
+    else if ((addr == 0x108U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x109); }
+    else if ((addr == 0x145U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x149); }
+    else if ((addr == 0x20AU) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x159); }
+    else if ((addr == 0x308U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x209); }
+    else if ((addr == 0x30AU) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x2D9); }
+    else if ((addr == 0x405U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x2B9); }
+    else {
+    }
+
+    if ((addr == 0x398U) && (msg_len == 8U)) {
+      CANPacket_t pkt = {0};
+      preap_transform_radar_car_config(to_fwd, &pkt);
+      preap_radar_send(&pkt);
+    }
+
+    if ((addr == 0x0EU) && (msg_len == 8U)) {
+      CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = to_fwd->extended,
+                         .bus = 1, .addr = 0x199, .data_len_code = to_fwd->data_len_code};
+      uint32_t lo = PREAP_GET_BYTES_04(to_fwd);
+      uint32_t hi = PREAP_GET_BYTES_48(to_fwd);
+      if (((lo >> 16) & 0xFF3FU) == 0xFF3FU) {
+        lo = (lo & 0x0000FFFFU) | (0x0020U << 16);
+        hi = (hi & 0x00FFFFF0U) | 0x00000004U;
+        int crc = preap_compute_crc8(lo, hi, 7);
+        hi = hi | ((uint32_t)crc << 24);
+      }
+      preap_word_to_bytes(&pkt.data[0], lo);
+      preap_word_to_bytes(&pkt.data[4], hi);
+      preap_radar_send(&pkt);
+    }
+
+    if ((addr == 0x115U) && (msg_len == 6U)) {
+      preap_radar_readdr(to_fwd, 0x129);
+      uint32_t hi_src = PREAP_GET_BYTES_48(to_fwd);
+      int counter = ((int)(hi_src & 0xF0U) >> 4) & 0x0F;
+      uint32_t syn_lo = 0x000C0000U | ((uint32_t)counter << 28);
+      int cksm = (0x38 + 0x0C + (counter << 4)) & 0xFF;
+      CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = 0,
+                         .bus = 1, .addr = 0x1A9, .data_len_code = 5};
+      preap_word_to_bytes(&pkt.data[0], syn_lo);
+      pkt.data[4] = (uint8_t)cksm;
+      preap_radar_send(&pkt);
+    }
+
+    if ((addr == 0x118U) && (msg_len == 6U)) {
+      preap_radar_readdr(to_fwd, 0x119);
+      uint32_t lo = PREAP_GET_BYTES_04(to_fwd);
+      uint32_t ws_counter = PREAP_GET_BYTES_48(to_fwd) & 0x0FU;
+      uint32_t raw_speed = (0xFFF0000U & lo) >> 16U;
+      uint32_t speed;
+      if (raw_speed == 0xFFFU) {
+        speed = 0x1FFFU;
+      } else {
+        int mph_x100 = ((int)raw_speed * 5) - 2500;
+        int kph_x100 = mph_x100 * 1609 / 1000;
+        speed = (kph_x100 < 0) ? 0U : (((uint32_t)kph_x100 / 4U) & 0x1FFFU);
+      }
+      uint32_t ws_lo = speed | (speed << 13U) | (speed << 26U);
+      uint32_t ws_hi = ((speed >> 6U) | (speed << 7U) | (ws_counter << 20U)) & 0x00FFFFFFU;
+      int ws_cksm = 0x76;
+      ws_cksm = (ws_cksm + (int)(ws_lo & 0xFFU) + (int)((ws_lo >> 8) & 0xFFU) + (int)((ws_lo >> 16) & 0xFFU) + (int)((ws_lo >> 24) & 0xFFU)) & 0xFF;
+      ws_cksm = (ws_cksm + (int)(ws_hi & 0xFFU) + (int)((ws_hi >> 8) & 0xFFU) + (int)((ws_hi >> 16) & 0xFFU)) & 0xFF;
+      ws_hi = ws_hi | ((uint32_t)ws_cksm << 24);
+      CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = 0,
+                         .bus = 1, .addr = 0x169, .data_len_code = 8};
+      preap_word_to_bytes(&pkt.data[0], ws_lo);
+      preap_word_to_bytes(&pkt.data[4], ws_hi);
+      preap_radar_send(&pkt);
+    }
+  }
+
+  if ((bus_num == 1U) && preap_radar_emulation) {
+    if ((addr == 0x631U) && (preap_radar_status == 0)) {
+      preap_radar_status = 1;
+      preap_last_radar_signal = microsecond_timer_get();
+    }
+    if ((addr == 0x300U) && (preap_radar_status == 1)) {
+      preap_radar_status = 2;
+      preap_last_radar_signal = microsecond_timer_get();
+    }
+  }
+}
+
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+bool tesla_preap_radar_car_config_captured(void) {
+  return preap_radar_car_config_captured;
+}
+
+uint32_t tesla_preap_radar_car_config_addr(void) {
+  return preap_radar_car_config_capture.addr;
+}
+
+uint8_t tesla_preap_radar_car_config_bus(void) {
+  return preap_radar_car_config_capture.bus;
+}
+
+uint8_t tesla_preap_radar_car_config_dlc(void) {
+  return preap_radar_car_config_capture.data_len_code;
+}
+
+uint8_t tesla_preap_radar_car_config_data(int index) {
+  if ((index < 0) || (index >= 8)) {
+    return 0U;
+  }
+  return preap_radar_car_config_capture.data[index];
+}
+
+int tesla_preap_radar_gateway_count(void) {
+  return preap_radar_gtw_count;
+}
+
+uint32_t tesla_preap_radar_gateway_addr(int index) {
+  if ((index < 0) || (index >= preap_radar_gtw_count)) {
+    return 0U;
+  }
+  return preap_radar_gtw_capture[index].addr;
+}
+
+uint8_t tesla_preap_radar_gateway_bus(int index) {
+  if ((index < 0) || (index >= preap_radar_gtw_count)) {
+    return 0U;
+  }
+  return preap_radar_gtw_capture[index].bus;
+}
+
+uint8_t tesla_preap_radar_gateway_dlc(int index) {
+  if ((index < 0) || (index >= preap_radar_gtw_count)) {
+    return 0U;
+  }
+  return preap_radar_gtw_capture[index].data_len_code;
+}
+
+bool tesla_preap_radar_gateway_fd(int index) {
+  if ((index < 0) || (index >= preap_radar_gtw_count)) {
+    return false;
+  }
+  return preap_radar_gtw_capture[index].fd;
+}
+
+uint8_t tesla_preap_radar_gateway_data(int index, int byte_index) {
+  if ((index < 0) || (index >= preap_radar_gtw_count) || (byte_index < 0) || (byte_index >= 8)) {
+    return 0U;
+  }
+  return preap_radar_gtw_capture[index].data[byte_index];
+}
+
+void tesla_preap_radar_gateway_reset(void) {
+  preap_radar_gtw_count = 0;
+  preap_radar_car_config_captured = false;
+}
+
+void tesla_preap_observe_can(const CANPacket_t *msg) {
+  tesla_preap_gtw_emulation(msg);
+}
+#endif
+
 static void tesla_preap_process_first_pull(uint32_t now) {
   if (controls_allowed) {
     controls_allowed = false;
@@ -201,6 +519,18 @@ static void tesla_preap_process_first_pull(uint32_t now) {
   }
   preap_pull_pending = true;
   preap_first_pull_ts = now;
+  if (!preap_enable_pedal) {
+    preap_stock_cc_cancel_authorized = true;
+    preap_stock_cc_cancel_sent = false;
+    preap_stock_cc_cancel_sent_ts = 0U;
+    preap_stock_cc_post_cancel_di = false;
+    preap_stock_cc_pull2_latched = false;
+    preap_stock_cc_awaiting_di_rise = false;
+    preap_stock_cc_expected_counter = 0U;
+    preap_stock_cc_reengage_authorized = false;
+    preap_stock_cc_reengage_sent = false;
+    stock_cc_reengage_confirmed = false;
+  }
 }
 
 static void tesla_preap_process_second_pull(uint32_t now) {
@@ -215,9 +545,12 @@ static void tesla_preap_process_second_pull(uint32_t now) {
         tesla_preap_request_lateral();
       }
     } else {
-      preap_stock_cc_reengage_authorized = true;
-      preap_stock_cc_deadline_ts = now;
+      preap_stock_cc_pull2_latched = true;
       stock_cc_reengage_confirmed = false;
+      if (preap_stock_cc_cancel_sent && preap_stock_cc_post_cancel_di) {
+        preap_stock_cc_reengage_authorized = true;
+        preap_stock_cc_deadline_ts = now;
+      }
     }
   } else {
     tesla_preap_clear_pull_state();
@@ -230,6 +563,15 @@ static void tesla_preap_process_main_pull(uint32_t now) {
     tesla_preap_process_second_pull(now);
   } else {
     tesla_preap_process_first_pull(now);
+  }
+}
+
+static void tesla_preap_revoke_stock_cc_longitudinal(void) {
+  controls_allowed = false;
+  tesla_preap_clear_stock_cc_confirmation();
+  if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
+    mads_exit_controls(MADS_DISENGAGE_REASON_LAG);
+  } else {
   }
 }
 
@@ -368,20 +710,44 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
 
       if (msg->addr == 0x368U) {
         const uint8_t cruise_state = (msg->data[1] >> 4) & 0x7U;
-        const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) || (cruise_state == 4U);
+        const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) || (cruise_state == 4U) ||
+                                    (cruise_state == 6U) || (cruise_state == 7U);
+        const bool cruise_rising = cruise_engaged && !preap_stock_cc_di_engaged;
+        const bool cruise_falling = !cruise_engaged && preap_stock_cc_di_engaged;
+        preap_stock_cc_di_engaged = cruise_engaged;
         const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
+        const uint32_t cancel_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_cancel_sent_ts);
         const bool sources_ready = tesla_preap_required_sources_ready(now);
-        if (!preap_enable_pedal && preap_stock_cc_reengage_sent) {
-          if ((confirmation_elapsed < PREAP_STOCK_CC_CONFIRM_US) && cruise_engaged && sources_ready) {
-            controls_allowed = true;
-            stock_cc_reengage_confirmed = true;
-            preap_stock_cc_reengage_sent = false;
-            if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-              tesla_preap_request_lateral();
+        if (!preap_enable_pedal) {
+          if (stock_cc_reengage_confirmed && cruise_falling) {
+            tesla_preap_revoke_stock_cc_longitudinal();
+          } else if (preap_stock_cc_cancel_sent && !cruise_engaged && !preap_stock_cc_post_cancel_di) {
+            if (cancel_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
+              tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+            } else {
+              preap_stock_cc_post_cancel_di = true;
+              if (preap_stock_cc_pull2_latched && !preap_stock_cc_reengage_authorized) {
+                preap_stock_cc_reengage_authorized = true;
+                preap_stock_cc_deadline_ts = now;
+              }
             }
-          } else if (confirmation_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
-            tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
           } else {
+          }
+          if (preap_stock_cc_reengage_sent) {
+            if ((confirmation_elapsed < PREAP_STOCK_CC_CONFIRM_US) && cruise_rising && sources_ready &&
+                preap_stock_cc_awaiting_di_rise) {
+              controls_allowed = true;
+              stock_cc_reengage_confirmed = true;
+              stock_cc_reengage_counter = preap_stock_cc_expected_counter;
+              preap_stock_cc_reengage_sent = false;
+              preap_stock_cc_awaiting_di_rise = false;
+              if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
+                tesla_preap_request_lateral();
+              }
+            } else if (confirmation_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
+              tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+            } else {
+            }
           }
         }
       }
@@ -391,27 +757,49 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
         const uint8_t counter = tesla_preap_get_counter(msg);
         const bool counter_consecutive = !preap_stalk_counter_seen || (counter == ((preap_stalk_counter_last + 1U) & 0xFU));
         const bool sources_ready = tesla_preap_required_sources_ready(now);
+        bool is_echo = false;
+        if (preap_echo_active) {
+          const uint32_t echo_elapsed = safety_get_ts_elapsed(now, preap_echo_ts);
+          if (echo_elapsed > preap_echo_window_us) {
+            preap_echo_active = false;
+          } else if ((lever == preap_echo_lever) && (counter == preap_echo_counter)) {
+            is_echo = true;
+          } else {
+          }
+        }
         preap_stalk_counter_seen = true;
         preap_stalk_counter_last = counter;
-
-        if (lever == 1U) {
-          tesla_preap_exit(MADS_DISENGAGE_REASON_BUTTON);
-        } else if (!counter_consecutive) {
-          preap_stalk_armed = false;
-          preap_pull_pending = false;
-        } else if (lever == 0U) {
-          if (sources_ready) {
-            preap_stalk_armed = true;
-          }
-        } else if (lever == 2U) {
-          if (preap_stalk_armed && sources_ready) {
-            preap_stalk_armed = false;
-            tesla_preap_process_main_pull(now);
-          }
+        if (is_echo) {
+          // Echo of authorized TX advances the counter without becoming a pull or cancel.
         } else {
-          // Unknown stalk positions cannot carry engagement authority.
-          preap_stalk_armed = false;
-          preap_pull_pending = false;
+          for (int i = 0; i < 8; i++) {
+            preap_live_stw[i] = msg->data[i];
+          }
+          preap_live_stw_valid = true;
+          if (lever == 1U) {
+            tesla_preap_exit(MADS_DISENGAGE_REASON_BUTTON);
+          } else if (!counter_consecutive) {
+            preap_stalk_armed = false;
+            preap_pull_pending = false;
+            tesla_preap_revoke_stock_cc_longitudinal();
+          } else if (lever == 0U) {
+            if (sources_ready) {
+              preap_stalk_armed = true;
+            }
+          } else if (lever == 2U) {
+            if (preap_stalk_armed && sources_ready) {
+              preap_stalk_armed = false;
+              tesla_preap_process_main_pull(now);
+            }
+          } else if ((lever == PREAP_STALK_RES_ACCEL) || (lever == PREAP_STALK_RES_ACCEL_2ND) ||
+                     (lever == PREAP_STALK_DECEL_SET) || (lever == PREAP_STALK_DECEL_2ND)) {
+            // Direct stock-cruise +/- : disarm the edge, keep pending double-pull origin.
+            preap_stalk_armed = false;
+          } else {
+            // Unknown stalk positions cannot carry engagement authority.
+            preap_stalk_armed = false;
+            preap_pull_pending = false;
+          }
         }
       }
 
@@ -435,8 +823,13 @@ static void tesla_preap_tick(bool rx_checks_invalid) {
   const uint32_t now = microsecond_timer_get();
   const bool sources_valid = tesla_preap_required_sources_valid(now);
   const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
+  tesla_preap_expire_unsent_cancel(now);
   if (rx_checks_invalid || !sources_valid) {
     preap_hands_on_clear_timing = false;
+    tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+  }
+  if (!preap_enable_pedal && preap_stock_cc_cancel_sent && !preap_stock_cc_post_cancel_di &&
+      (safety_get_ts_elapsed(now, preap_stock_cc_cancel_sent_ts) >= PREAP_STOCK_CC_CONFIRM_US)) {
     tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
   }
   if ((preap_stock_cc_reengage_authorized || preap_stock_cc_reengage_sent) &&
@@ -445,9 +838,65 @@ static void tesla_preap_tick(bool rx_checks_invalid) {
   }
 }
 
+static bool tesla_preap_stock_cc_tuple_ok(const CANPacket_t *msg, uint8_t lever) {
+  bool ok = false;
+  if ((msg->addr == 0x45U) && (msg->bus == 0U) && (msg->fd == false) && (GET_LEN(msg) == 8U) && preap_live_stw_valid) {
+    const uint8_t counter = tesla_preap_get_counter(msg);
+    const uint32_t checksum = tesla_preap_compute_checksum(msg);
+    ok = ((msg->data[0] & 0x40U) != 0U) &&
+         ((msg->data[0] & 0x80U) == 0U) &&
+         ((msg->data[0] & 0x3FU) == lever) &&
+         (checksum == tesla_preap_get_checksum(msg)) &&
+         (counter == ((preap_stalk_counter_last + 1U) & 0xFU)) &&
+         ((msg->data[6] & 0x07U) == (preap_live_stw[6] & 0x07U)) &&
+         ((msg->data[6] & 0x08U) == 0U);
+    for (int i = 1; i < 6; i++) {
+      if (msg->data[i] != preap_live_stw[i]) {
+        ok = false;
+      }
+    }
+  }
+  return ok;
+}
+
+static void tesla_preap_mark_echo(uint8_t lever, uint8_t counter, uint32_t window_us) {
+  preap_echo_active = true;
+  preap_echo_lever = lever;
+  preap_echo_counter = counter;
+  preap_echo_ts = microsecond_timer_get();
+  preap_echo_window_us = window_us;
+}
+
 static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
-  SAFETY_UNUSED(msg);
-  return false;
+  bool allowed = false;
+  if (!preap_enable_pedal && (msg->addr == 0x45U)) {
+    const uint32_t now = microsecond_timer_get();
+    tesla_preap_expire_unsent_cancel(now);
+    const uint8_t lever = msg->data[0] & 0x3FU;
+    const uint8_t counter = tesla_preap_get_counter(msg);
+    if ((lever == 1U) && tesla_preap_cancel_window_open(now) &&
+        tesla_preap_stock_cc_tuple_ok(msg, 1U)) {
+      preap_stock_cc_cancel_sent = true;
+      preap_stock_cc_cancel_sent_ts = now;
+      preap_stalk_counter_last = counter;
+      tesla_preap_mark_echo(1U, counter, PREAP_CANCEL_ECHO_US);
+      allowed = true;
+    } else if ((lever == 16U) && preap_stock_cc_reengage_authorized &&
+               (safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts) < PREAP_STOCK_CC_CONFIRM_US) &&
+               preap_stock_cc_cancel_sent &&
+               preap_stock_cc_post_cancel_di && !preap_stock_cc_reengage_sent &&
+               tesla_preap_stock_cc_tuple_ok(msg, 16U)) {
+      preap_stock_cc_reengage_sent = true;
+      preap_stock_cc_awaiting_di_rise = true;
+      preap_stock_cc_expected_counter = (uint8_t)((stock_cc_reengage_counter + 1U) & 0xFFU);
+      preap_stalk_counter_last = counter;
+      preap_stock_cc_deadline_ts = now;
+      tesla_preap_mark_echo(16U, counter, PREAP_SPOOF_ECHO_US);
+      allowed = true;
+    } else {
+    }
+  }
+  return allowed;
 }
 
 static bool tesla_preap_fwd_hook(int bus_num, int addr) {
@@ -479,9 +928,21 @@ static safety_config tesla_preap_init(uint16_t param) {
     {.msg = {{0x552, 0, 6, 50U, .max_counter = 15U, .ignore_quality_flag = true},
              {0x552, 2, 6, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }}},
   };
-
   preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
   preap_mode = (uint8_t)(current_safety_param_sp & PREAP_MODE_MASK);
+  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
+  preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
+  if (preap_radar_behind_nosecone && !preap_radar_emulation) {
+    preap_radar_behind_nosecone = false;
+  }
+  preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+  preap_radar_epas_type = 0;
+  preap_radar_status = 0;
+  preap_last_radar_signal = 0;
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  preap_radar_car_config_captured = false;
+  preap_radar_gtw_count = 0;
+#endif
 
   preap_gear_seen = false;
   preap_gear_drive = false;
@@ -508,6 +969,8 @@ static safety_config tesla_preap_init(uint16_t param) {
   stock_cc_reengage_confirmed = false;
   preap_stalk_counter_seen = false;
   preap_stalk_counter_last = 0U;
+  preap_live_stw_valid = false;
+  preap_stock_cc_di_engaged = false;
   tesla_preap_clear_pull_state();
 
   safety_config ret = {
@@ -521,12 +984,20 @@ static safety_config tesla_preap_init(uint16_t param) {
     ret.rx_checks = preap_rx_checks_with_pedal;
     ret.rx_checks_len = 9;
   }
+  if (!preap_enable_pedal) {
+    static CanMsg PREAP_TX_MSGS_STOCK_CC[] = {
+      {0x45, 0, 8, .check_relay = false, .disable_static_blocking = true},
+    };
+    ret.tx_msgs = PREAP_TX_MSGS_STOCK_CC;
+    ret.tx_msgs_len = 1;
+  }
   return ret;
 }
 
 const safety_hooks tesla_preap_hooks = {
   .init = tesla_preap_init,
   .rx = tesla_preap_rx_hook,
+  .rx_all = tesla_preap_gtw_emulation,  // must see ALL CAN traffic for radar GTW forwarding
   .invalid_rx = tesla_preap_invalid_rx_hook,
   .tx = tesla_preap_tx_hook,
   .fwd = tesla_preap_fwd_hook,
