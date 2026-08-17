@@ -3,6 +3,7 @@ import struct
 from ctypes import create_string_buffer
 
 from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PEDAL_D, PEDAL_M1, PEDAL_M2
+from opendbc.car.tesla.teslacan import tesla_checksum
 from opendbc.car.tesla.values import CANBUS, CruiseButtons
 
 STEERING_ADDR = 0x488
@@ -31,6 +32,22 @@ _STOCK_CC_LEVERS = (CruiseButtons.CANCEL, CruiseButtons.SET_ACCEL)
 def tesla_byte_sum_checksum(msg_id: int, dat: bytes | bytearray) -> int:
   """Address bytes plus payload bytes, truncated to 8 bits."""
   return ((msg_id & 0xFF) + ((msg_id >> 8) & 0xFF) + sum(dat)) & 0xFF
+
+# The gateway remaps these messages without changing their checksum seed.
+_RX_CHECKSUM_SOURCE_ADDRESS = {
+  0x108: 0x106,
+  0x118: 0x116,
+  0x368: 0x256,
+}
+
+
+def tesla_preap_checksum(address: int, sig, data: bytearray) -> int:
+  # ESP_B protects its speed and counter fields with an inverted sum.
+  if address == 0x155:
+    counter = (data[7] >> 3) & 0xF
+    return (0xFF - (0x0C + (counter << 4) + data[5] + data[6])) & 0xFF
+
+  return tesla_checksum(_RX_CHECKSUM_SOURCE_ADDRESS.get(address, address), sig, data)
 
 
 def stw_crc8(data: bytes | bytearray) -> int:

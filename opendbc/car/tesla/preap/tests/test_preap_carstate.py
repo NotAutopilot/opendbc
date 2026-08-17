@@ -19,6 +19,29 @@ def _packet_with_bad_checksum(name, values, bus=0):
   corrupted[-1] ^= 0xFF
   return [(1, [CanData(addr, bytes(corrupted), bus)])]
 
+_VEHICLE_CHECKSUM_VECTORS = (
+  (0x108, "b17eaf1eb50300bb", 7),
+  (0x118, "0040914282ac", 5),
+  (0x368, "84094d30085000ba", 7),
+  (0x155, "b71914835404fb53", 4),
+)
+
+
+def _vehicle_packets(corrupt_address=None):
+  frames = []
+  for address, payload_hex, checksum_index in _VEHICLE_CHECKSUM_VECTORS:
+    payload = bytearray.fromhex(payload_hex)
+    if address == corrupt_address:
+      payload[checksum_index] ^= 1
+    frames.append(CanData(address, bytes(payload), 0))
+
+  packets = [(1, frames)]
+  packets += _packet("BrakeMessage", {})
+  packets += _packet("GTW_carState", {})
+  packets += _packet("STW_ANGLHP_STAT", {})
+  packets += _packet("EPAS_sysStatus", {})
+  packets += _packet("STW_ACTN_RQ", {})
+  return packets
 
 def _make_ci(engagement_mode=None):
   CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
@@ -37,6 +60,17 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
       self.assertTrue(CS.blockPcmEnable)
       self.assertEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.none)
       self.assertEqual(CS_SP.preapIntentSequence, 0)
+
+  def test_vehicle_rx_checksum_vectors(self):
+    CI = _make_ci()
+    CS, _ = CI.update(_vehicle_packets())
+    self.assertTrue(CS.canValid)
+
+    for address, _, _ in _VEHICLE_CHECKSUM_VECTORS:
+      with self.subTest(address=hex(address)):
+        CI = _make_ci()
+        CS, _ = CI.update(_vehicle_packets(corrupt_address=address))
+        self.assertFalse(CS.canValid)
 
   def test_bad_checksum_does_not_update_cruise_state(self):
     CI = _make_ci()
@@ -407,7 +441,6 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
     self.assertEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.none)
     self.assertNotEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.mainCruiseRequest)
     self.assertNotEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.forceDisable)
-
 
   def test_pedal_failed_force_disables_only_when_coupled(self):
     cases = (

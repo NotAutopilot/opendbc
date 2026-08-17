@@ -266,8 +266,22 @@ static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
   uint8_t checksum = 0U;
   if (msg->addr == 0x45U) {
     checksum = tesla_preap_crc8(msg->data, 7);
+  } else if (msg->addr == 0x155U) {
+    // ESP_B protects its speed and counter fields with an inverted sum.
+    const uint8_t counter = tesla_preap_get_counter(msg);
+    checksum = (uint8_t)(0xFFU - (0x0CU + ((uint32_t)counter << 4U) + msg->data[5] + msg->data[6]));
   } else if (checksum_byte >= 0) {
-    checksum = (uint8_t)((msg->addr & 0xFFU) + ((msg->addr >> 8) & 0xFFU));
+    // The gateway remaps these messages without changing their checksum seed.
+    uint32_t checksum_address = msg->addr;
+    if (msg->addr == 0x108U) {
+      checksum_address = 0x106U;
+    } else if (msg->addr == 0x118U) {
+      checksum_address = 0x116U;
+    } else if (msg->addr == 0x368U) {
+      checksum_address = 0x256U;
+    } else {
+    }
+    checksum = (uint8_t)((checksum_address & 0xFFU) + ((checksum_address >> 8) & 0xFFU));
     const int msg_len = (int)GET_LEN(msg);
     for (int i = 0; i < msg_len; i++) {
       if (i != checksum_byte) {
@@ -282,8 +296,7 @@ static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
 static bool tesla_preap_get_quality_flag_valid(const CANPacket_t *msg) {
   bool valid = true;
   if (msg->addr == 0x155U) {
-    const uint8_t quality = msg->data[7] & 0x3U;
-    valid = (quality == 1U) || (quality == 2U);
+    valid = (msg->data[7] & 0x3U) == 0x3U;
   }
   return valid;
 }

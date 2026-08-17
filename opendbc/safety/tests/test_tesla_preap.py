@@ -23,6 +23,16 @@ def _byte_sum(address, data, checksum_index):
   payload[checksum_index] = ((address & 0xFF) + (address >> 8) + sum(payload)) & 0xFF
   return payload
 
+def _preap_rx_checksum(address, data, checksum_index):
+  if address == 0x155:
+    payload = bytearray(data)
+    counter = (payload[7] >> 3) & 0xF
+    payload[checksum_index] = (0xFF - (0x0C + (counter << 4) + payload[5] + payload[6])) & 0xFF
+    return payload
+
+  source_address = {0x108: 0x106, 0x118: 0x116, 0x368: 0x256}.get(address, address)
+  return _byte_sum(source_address, data, checksum_index)
+
 
 def _stw_crc(data):
   crc = 0xFF
@@ -72,7 +82,7 @@ class TeslaPreAPSafetyBase(common.SafetyTestBase):
     data = bytearray(8)
     data[1] = counter << 5
     data[6] = gas
-    data = _byte_sum(0x108, data, 7)
+    data = _preap_rx_checksum(0x108, data, 7)
     if not checksum:
       data[7] ^= 1
     return self._packet(0x108, data)
@@ -83,7 +93,7 @@ class TeslaPreAPSafetyBase(common.SafetyTestBase):
     data = bytearray(6)
     data[1] = (gear << 4) | (0x80 if brake else 0)
     data[4] = (brake_state << 4) | counter
-    data = _byte_sum(0x118, data, 5)
+    data = _preap_rx_checksum(0x118, data, 5)
     if not checksum:
       data[5] ^= 1
     return self._packet(0x118, data)
@@ -110,19 +120,19 @@ class TeslaPreAPSafetyBase(common.SafetyTestBase):
     data = bytearray(8)
     data[1] = cruise << 4
     data[5] = counter << 4
-    data = _byte_sum(0x368, data, 7)
+    data = _preap_rx_checksum(0x368, data, 7)
     if not checksum:
       data[7] ^= 1
     return self._packet(0x368, data)
 
-  def _esp(self, speed_raw=0, quality=2, *, counter=None, checksum=True):
+  def _esp(self, speed_raw=0, quality=3, *, counter=None, checksum=True):
     if counter is None:
       counter = self._counter(0x155)
     data = bytearray(8)
     data[5] = (speed_raw >> 8) & 0xFF
     data[6] = speed_raw & 0xFF
     data[7] = (counter << 3) | quality
-    data = _byte_sum(0x155, data, 4)
+    data = _preap_rx_checksum(0x155, data, 4)
     if not checksum:
       data[4] ^= 1
     return self._packet(0x155, data)
@@ -185,6 +195,24 @@ class TeslaPreAPSafetyBase(common.SafetyTestBase):
     self._engage_pedal()
     self.safety.set_timer(500_001)
     self.safety.safety_tick_current_safety_config()
+
+  def test_vehicle_rx_checksum_vectors(self):
+    vectors = (
+      (0x108, "b17eaf1eb50300bb", 7),
+      (0x118, "0040914282ac", 5),
+      (0x368, "84094d30085000ba", 7),
+      (0x155, "b71914835404fb53", 4),
+    )
+    for address, payload_hex, checksum_index in vectors:
+      with self.subTest(address=hex(address), valid=True):
+        self.setUp()
+        self.assertTrue(self._rx(self._packet(address, bytes.fromhex(payload_hex))))
+
+      with self.subTest(address=hex(address), valid=False):
+        self.setUp()
+        payload = bytearray.fromhex(payload_hex)
+        payload[checksum_index] ^= 1
+        self.assertFalse(self._rx(self._packet(address, payload)))
 
   def _unhealthy_pedal_tick(self):
     self._engage_pedal()

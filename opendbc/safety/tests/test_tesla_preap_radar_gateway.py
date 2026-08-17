@@ -98,6 +98,16 @@ def _byte_sum(address, data, checksum_index):
   payload[checksum_index] = ((address & 0xFF) + (address >> 8) + sum(payload)) & 0xFF
   return payload
 
+def _preap_rx_checksum(address, data, checksum_index):
+  if address == 0x155:
+    payload = bytearray(data)
+    counter = (payload[7] >> 3) & 0xF
+    payload[checksum_index] = (0xFF - (0x0C + (counter << 4) + payload[5] + payload[6])) & 0xFF
+    return payload
+
+  source_address = {0x108: 0x106, 0x118: 0x116, 0x368: 0x256}.get(address, address)
+  return _byte_sum(source_address, data, checksum_index)
+
 
 def _stw_crc(data):
   crc = 0xFF
@@ -233,17 +243,17 @@ class TestTeslaPreAPRadarGateway:
     epas = bytearray(8)
     epas = _byte_sum(0x370, epas, 7)
     di1 = bytearray(8)
-    di1 = _byte_sum(0x108, di1, 7)
+    di1 = _preap_rx_checksum(0x108, di1, 7)
     di2 = bytearray(6)
-    di2 = _byte_sum(0x118, di2, 5)
+    di2 = _preap_rx_checksum(0x118, di2, 5)
     brake = bytes(8)
     doors = bytes(8)
-    state = _byte_sum(0x368, bytearray(8), 7)
+    state = _preap_rx_checksum(0x368, bytearray(8), 7)
     stalk = bytearray(8)
     stalk[7] = _stw_crc(stalk[:7])
     esp = bytearray(8)
-    esp[7] = 2
-    esp = _byte_sum(0x155, esp, 4)
+    esp[7] = 3
+    esp = _preap_rx_checksum(0x155, esp, 4)
     return (
       (0x370, epas),
       (0x108, di1),
