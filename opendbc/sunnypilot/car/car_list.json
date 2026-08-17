@@ -3335,6 +3335,18 @@
     ],
     "package": "All"
   },
+  "Tesla Model S (Pre-AP) 2012-14": {
+    "platform": "TESLA_MODEL_S_PREAP",
+    "make": "Tesla",
+    "brand": "tesla",
+    "model": "Model S (Pre-AP)",
+    "year": [
+      "2012",
+      "2013",
+      "2014"
+    ],
+    "package": "All"
+  },
   "Tesla Model X (with HW4) 2024": {
     "platform": "TESLA_MODEL_X",
     "make": "Tesla",
