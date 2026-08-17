@@ -39,9 +39,20 @@ _RX_CHECKSUM_SOURCE_ADDRESS = {
   0x118: 0x116,
   0x368: 0x256,
 }
+_RX_CHECKSUM_PAYLOAD_LENGTH = {
+  0x108: 8,
+  0x118: 6,
+  0x155: 8,
+  0x368: 8,
+}
 
 
 def tesla_preap_checksum(address: int, sig, data: bytearray) -> int:
+  expected_length = _RX_CHECKSUM_PAYLOAD_LENGTH.get(address)
+  if expected_length is not None and len(data) != expected_length:
+    # Raw checksum signals are 8-bit, so this can never match a malformed frame.
+    return 0x100
+
   # ESP_B protects its speed and counter fields with an inverted sum.
   if address == 0x155:
     counter = (data[7] >> 3) & 0xF

@@ -27,12 +27,14 @@ _VEHICLE_CHECKSUM_VECTORS = (
 )
 
 
-def _vehicle_packets(corrupt_address=None):
+def _vehicle_packets(corrupt_address=None, payload_override=None):
   frames = []
   for address, payload_hex, checksum_index in _VEHICLE_CHECKSUM_VECTORS:
     payload = bytearray.fromhex(payload_hex)
     if address == corrupt_address:
       payload[checksum_index] ^= 1
+    if payload_override is not None and address == payload_override[0]:
+      payload = bytearray(payload_override[1])
     frames.append(CanData(address, bytes(payload), 0))
 
   packets = [(1, frames)]
@@ -71,6 +73,15 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
         CI = _make_ci()
         CS, _ = CI.update(_vehicle_packets(corrupt_address=address))
         self.assertFalse(CS.canValid)
+
+  def test_vehicle_rx_rejects_wrong_payload_lengths(self):
+    for address, payload_hex, _ in _VEHICLE_CHECKSUM_VECTORS:
+      payload = bytes.fromhex(payload_hex)
+      for malformed_payload in (payload[:-1], payload + b"\x00"):
+        with self.subTest(address=hex(address), payload_length=len(malformed_payload)):
+          CI = _make_ci()
+          CS, _ = CI.update(_vehicle_packets(payload_override=(address, malformed_payload)))
+          self.assertFalse(CS.canValid)
 
   def test_bad_checksum_does_not_update_cruise_state(self):
     CI = _make_ci()
