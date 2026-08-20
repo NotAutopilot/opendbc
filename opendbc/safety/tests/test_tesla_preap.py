@@ -14,6 +14,11 @@ from opendbc.safety.tests.common import CANPackerSafety
 PREAP_FLAG_ENABLE_PEDAL = 1
 PREAP_FLAG_RADAR_EMULATION = 2
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
+PREAP_FLAG_RADAR_VIN_LEARN = 8
+
+# Radar UDS request address / bus (see scripts/nap/vin_learn_radar.py)
+RADAR_UDS_ADDR = 0x641
+RADAR_BUS = 1
 
 # Stalk lever positions from tesla_preap.h
 STALK_FWD_CANCEL = 1
@@ -608,6 +613,68 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
                                                  {"GAS_COMMAND": 100, "ENABLE": 0})
     self.assertFalse(self._tx(attack_msg),
                      "ENABLE=0 with high GAS_COMMAND must be blocked (defense-in-depth)")
+
+
+class TestTeslaPreAPRadarVinLearn(unittest.TestCase):
+  """Radar UDS diagnostics (0x641 on the radar bus), gated by PREAP_FLAG_RADAR_VIN_LEARN.
+
+  The VIN-learn tool is the only thing that ever sets this flag: it runs offroad
+  with pandad stopped, so no other openpilot process is on the bus at the time.
+  """
+  # Read by common.CarSafetyTest.test_tx_hook_on_wrong_safety_mode, which scans
+  # every Test* class for the messages its configuration is allowed to send.
+  TX_MSGS = [[RADAR_UDS_ADDR, RADAR_BUS]]
+
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+
+  def _set_flags(self, flags):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, flags)
+    self.safety.init_tests()
+
+  def _uds_msg(self, first_byte=0x02, bus=RADAR_BUS, length=8):
+    dat = bytes([first_byte]) + b"\x00" * (length - 1)
+    return common.make_msg(bus, RADAR_UDS_ADDR, length, dat=dat)
+
+  def test_blocked_without_flag(self):
+    # Radar emulation alone must not open the diagnostic channel.
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION)
+    self.assertFalse(self.safety.safety_tx_hook(self._uds_msg()))
+
+  def test_allowed_with_flag(self):
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_VIN_LEARN)
+    self.assertTrue(self.safety.safety_tx_hook(self._uds_msg()))
+
+  def test_isotp_frame_types_allowed(self):
+    # Single (0), first (1), consecutive (2) and flow control (3) frames.
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_VIN_LEARN)
+    for frame_type in range(4):
+      with self.subTest(frame_type=frame_type):
+        self.assertTrue(self.safety.safety_tx_hook(self._uds_msg(first_byte=frame_type << 4)))
+
+  def test_non_isotp_frame_types_blocked(self):
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_VIN_LEARN)
+    for frame_type in range(4, 16):
+      with self.subTest(frame_type=frame_type):
+        self.assertFalse(self.safety.safety_tx_hook(self._uds_msg(first_byte=frame_type << 4)))
+
+  def test_blocked_on_car_bus(self):
+    # Only the radar bus is whitelisted — 0x641 must never reach the chassis bus.
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_VIN_LEARN)
+    for bus in (0, 2, 3):
+      with self.subTest(bus=bus):
+        self.assertFalse(self.safety.safety_tx_hook(self._uds_msg(bus=bus)))
+
+  def test_blocked_when_not_eight_bytes(self):
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_VIN_LEARN)
+    for length in (1, 4, 7):
+      with self.subTest(length=length):
+        self.assertFalse(self.safety.safety_tx_hook(self._uds_msg(length=length)))
+
+  def test_does_not_enable_controls(self):
+    # Arming the diagnostic channel must not engage anything.
+    self._set_flags(PREAP_FLAG_RADAR_EMULATION | PREAP_FLAG_RADAR_VIN_LEARN)
+    self.assertFalse(self.safety.get_controls_allowed())
 
 
 if __name__ == "__main__":

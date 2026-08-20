@@ -78,6 +78,9 @@ void can_set_checksum(CANPacket_t *packet);
 #define PREAP_FLAG_ENABLE_PEDAL         1U
 #define PREAP_FLAG_RADAR_EMULATION      2U
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
+// Radar UDS diagnostics (0x641 on the radar bus). Only ever set by the offroad
+// VIN-learn tool, never by the car interface — see scripts/nap/vin_learn_radar.py.
+#define PREAP_FLAG_RADAR_VIN_LEARN      8U
 
 // ============================================
 // State variables
@@ -86,6 +89,7 @@ void can_set_checksum(CANPacket_t *packet);
 static bool preap_enable_pedal = false;
 static bool preap_radar_emulation = false;
 static bool preap_radar_behind_nosecone = false;
+static bool preap_radar_vin_learn = false;
 
 static int preap_pedal_can = -1;
 
@@ -543,6 +547,21 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // Radar UDS request (0x641): only while the offroad VIN-learn tool has armed
+  // PREAP_FLAG_RADAR_VIN_LEARN. Bus 1 reaches the Bosch radar and nothing else
+  // — no car ECU listens there — and the tool runs parked with pandad stopped.
+  // Payload is limited to ISO-TP frame types (single/first/consecutive/flow
+  // control) so a stray sender can't push arbitrary bytes at the radar.
+  if (msg->addr == 0x641U) {
+    int isotp_frame_type = msg->data[0] >> 4;
+    if (!preap_radar_vin_learn) {
+      violation = true;
+    }
+    if (isotp_frame_type > 3) {
+      violation = true;
+    }
+  }
+
   if (violation) {
     tx = false;
   }
@@ -569,6 +588,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
   preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
+  preap_radar_vin_learn = GET_FLAG(param, PREAP_FLAG_RADAR_VIN_LEARN);
 
   preap_gear = 4;
   preap_gear_prev = 4;
@@ -587,6 +607,7 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 0
     {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
     {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
+    {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // Radar UDS request (VIN learn)
   };
 
   // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
