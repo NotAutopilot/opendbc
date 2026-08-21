@@ -77,6 +77,9 @@ uint32_t tesla_preap_radar_car_config_addr(void);
 uint8_t tesla_preap_radar_car_config_bus(void);
 uint8_t tesla_preap_radar_car_config_dlc(void);
 uint8_t tesla_preap_radar_car_config_data(int index);
+bool tesla_preap_radar_vin_feed_captured(void);
+uint8_t tesla_preap_radar_vin_feed_data(int index);
+bool tesla_preap_radar_donor_active_debug(void);
 
 void set_honda_fwd_brake(bool c);
 bool get_honda_fwd_brake(void);
