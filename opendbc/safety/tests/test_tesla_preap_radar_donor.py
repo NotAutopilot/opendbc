@@ -4,7 +4,6 @@ from opendbc.safety.tests.libsafety import libsafety_py
 
 
 PREAP_FLAG_RADAR_EMULATION = 2
-PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
 
 AWD_VIN = "5YJSA1E42FF156789"  # character 8 is '4'
 RWD_VIN = "5YJSA1E12FF156789"  # character 8 is '1'
@@ -34,6 +33,12 @@ class TestTeslaPreAPRadarDonor:
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, source))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555300000010")
     assert self.safety.tesla_preap_radar_donor_active_debug() is False
+
+  def test_empty_vin_still_applies_position(self):
+    _send_donor(self.safety, "", position=1, epas_type=0)
+    assert self.safety.tesla_preap_radar_donor_active_debug() is False
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
+    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555310000010")
 
   def test_awd_vin_sets_four_wheel_drive(self):
     _send_donor(self.safety, AWD_VIN, position=1, epas_type=3)

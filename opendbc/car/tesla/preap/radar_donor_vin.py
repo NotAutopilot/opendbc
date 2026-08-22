@@ -153,10 +153,26 @@ class RadarDonorVinCommissioner:
     self._vin_fault_frames = 0
     self._attempted = False
     self._force_used = False
+    self._persisted_vin: str | None = None
 
   @property
   def read_finished(self) -> bool:
     return self.reader.state in (RadarDonorVinState.COMPLETE, RadarDonorVinState.FAILED)
+
+  def _persist_vin(self, vin: str | None) -> None:
+    # F190 is the VIN. Cleanup is courtesy. A cleanup timeout used to
+    # drop a completed read, which left the spare radar on this-car
+    # passthrough for the rest of the drive.
+    if not vin or vin == self._persisted_vin:
+      return
+    self.store_vin(vin)
+    self._persisted_vin = vin
+
+  def _start_read(self, now: float) -> None:
+    self._attempted = True
+    self._vin_fault_frames = 0
+    self._persisted_vin = None
+    self.reader.start(now)
 
   def update(self, can_packets: list[CanData], now: float, *, radar_enabled: bool,
              stored_vin: str, controls_allowed: bool, enabled: bool,
@@ -176,21 +192,15 @@ class RadarDonorVinCommissioner:
       self._force_used = False
     elif force_read and not self._force_used and not running:
       self._force_used = True
-      self._attempted = True
-      self._vin_fault_frames = 0
-      self.reader.start(now)
+      self._start_read(now)
       running = True
 
-    if self.reader.state == RadarDonorVinState.COMPLETE:
-      if self.reader.vin:
-        self.store_vin(self.reader.vin)
-      return ()
-    if self.reader.state == RadarDonorVinState.FAILED:
+    if self.reader.state in (RadarDonorVinState.COMPLETE, RadarDonorVinState.FAILED):
+      self._persist_vin(self.reader.vin)
       return ()
     if running:
       output = self.reader.update(can_packets, now)
-      if output.state == RadarDonorVinState.COMPLETE and output.vin:
-        self.store_vin(output.vin)
+      self._persist_vin(output.vin)
       return output.can_sends
 
     if stored_vin or self._attempted:
@@ -200,9 +210,10 @@ class RadarDonorVinCommissioner:
         self._vin_fault_frames += 1
     if self._vin_fault_frames < self.STABLE_FRAMES:
       return ()
-    self._attempted = True
-    self.reader.start(now)
-    return self.reader.update(can_packets, now).can_sends
+    self._start_read(now)
+    output = self.reader.update(can_packets, now)
+    self._persist_vin(output.vin)
+    return output.can_sends
 
 
 class RadarDonorVinReader:

@@ -77,6 +77,7 @@ void can_set_checksum(CANPacket_t *packet);
 
 #define PREAP_FLAG_ENABLE_PEDAL         1U
 #define PREAP_FLAG_RADAR_EMULATION      2U
+// Leftover bit. Position comes from host 0x560, not this flag.
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
 #define PREAP_HANDS_ON_DISENGAGE_LEVEL  2
 
@@ -86,7 +87,6 @@ void can_set_checksum(CANPacket_t *packet);
 
 static bool preap_enable_pedal = false;
 static bool preap_radar_emulation = false;
-static bool preap_radar_behind_nosecone = false;
 
 static int preap_pedal_can = -1;
 
@@ -778,7 +778,6 @@ static bool tesla_preap_fwd_hook(int bus_num, int addr) {
 static safety_config tesla_preap_init(uint16_t param) {
   preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
-  preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
 
   preap_gear = 4;
   preap_gear_prev = 4;
@@ -789,7 +788,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_radar_status = 0;
   preap_last_radar_signal = 0;
   preap_last_stalk_engage_us = 0;
-  preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+  preap_radar_position = 0;
   preap_radar_epas_type = 0;
   preap_radar_vin_complete = 0;
   for (int i = 0; i < 17; i++) {

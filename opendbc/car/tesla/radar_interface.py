@@ -11,6 +11,11 @@ try:
 except ImportError:
   nap_conf = None
 
+try:
+  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
+except ImportError:
+  BoschTableFreezeWatch = None
+
 
 BOSCH_POINT_BASE_ADDRESS = 0x310
 BOSCH_POINT_ADDRESS_STRIDE = 3
@@ -118,6 +123,7 @@ class RadarInterface(RadarInterfaceBase):
     self.updated_messages = set()
     self.track_id = 0
     self.bosch_tracks = BoschTrackLifecycle()
+    self.table_freeze = BoschTableFreezeWatch() if BoschTableFreezeWatch is not None else None
     # Keep parity with Tinkla radar lateral alignment behavior.
     # For behind-nosecone installs, users can configure horizontal offset in meters.
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
@@ -162,6 +168,8 @@ class RadarInterface(RadarInterfaceBase):
       # HWFail is the dead-sensor bit and still blocks.
       if radar_status['RADC_HWFail']:
         ret.errors.radarFault = True
+        if self.table_freeze is not None:
+          self.table_freeze.reset()
       if radar_status['RADC_SensorDirty']:
         ret.errors.radarUnavailableTemporary = True
 
@@ -204,6 +212,10 @@ class RadarInterface(RadarInterfaceBase):
       self.pts[i].measured = bool(msg_a['Meas'])
 
     ret.points = self.bosch_tracks.points if self.bosch_radar else list(self.pts.values())
+    if self.bosch_radar and self.table_freeze is not None:
+      frozen = self.table_freeze.update(ret.points)
+      if frozen and bool(self.rcp.vl['TeslaRadarSguInfo']['RADC_SGUFail']):
+        ret.errors.radarFault = True
     self.updated_messages.clear()
     return ret
 

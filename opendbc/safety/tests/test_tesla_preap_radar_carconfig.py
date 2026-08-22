@@ -5,7 +5,6 @@ from opendbc.safety.tests.libsafety import libsafety_py
 
 
 PREAP_FLAG_RADAR_EMULATION = 2
-PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
 
 
 class TestTeslaPreAPRadarCarConfig:
@@ -15,16 +14,14 @@ class TestTeslaPreAPRadarCarConfig:
     self.safety = libsafety_py.libsafety
 
   def _set_safety_hooks(self, radar_emulation):
-    radar_flags = PREAP_FLAG_RADAR_BEHIND_NOSECONE
-    if radar_emulation:
-      radar_flags |= PREAP_FLAG_RADAR_EMULATION
+    radar_flags = PREAP_FLAG_RADAR_EMULATION if radar_emulation else 0
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, radar_flags)
     self.safety.init_tests()
 
   def test_car_config_emulation_preserves_application_data(self):
     test_cases = (
-      (bytes.fromhex("0290555300001700"), bytes.fromhex("4295555310001710")),
-      (bytes.fromhex("0281555300000000"), bytes.fromhex("4285555310000010")),
+      (bytes.fromhex("0290555300001700"), bytes.fromhex("4295555300001710")),
+      (bytes.fromhex("0281555300000000"), bytes.fromhex("4285555300000010")),
     )
     actual_payloads = []
     expected_payloads = []

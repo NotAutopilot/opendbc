@@ -25,3 +25,11 @@ def test_create_radar_vin_msg_matches_tinkla_layout():
   _addr, dat2, _bus = TeslaCANPreAP.create_radar_vin_msg(2, vin, True, 1, 3)
   assert dat2[0] == 2
   assert dat2[1:] == b"F156789"
+
+
+def test_create_radar_vin_msg_empty_vin_still_packs_position():
+  addr, dat, bus = TeslaCANPreAP.create_radar_vin_msg(0, "", True, 1, 0)
+  assert addr == 0x560
+  assert bus == 0
+  assert dat[2] == 1 + (1 << 1)
+  assert dat[5:8] == b"   "

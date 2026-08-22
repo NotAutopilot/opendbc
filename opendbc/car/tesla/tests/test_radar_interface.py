@@ -64,6 +64,8 @@ def _make_bosch_interface():
   radar.pts = {}
   if hasattr(radar_interface_module, "BoschTrackLifecycle"):
     radar.bosch_tracks = radar_interface_module.BoschTrackLifecycle()
+  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
+  radar.table_freeze = BoschTableFreezeWatch(stable_cycles=3, min_points=4)
   radar.rcp = FakeRadarParser()
   return radar
 
@@ -165,3 +167,38 @@ class TestBoschHealth:
 
     assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is False
+
+  def test_sgufail_with_frozen_table_is_radar_fault(self):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
+    for slot in range(4):
+      radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
+      radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
+
+    def _frozen_cycle():
+      radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+      for slot in range(4):
+        addr = 0x310 + slot * 3
+        radar.rcp.updated_addresses.update((addr, addr + 1))
+      return radar.update([])
+
+    assert _frozen_cycle().errors.radarFault is False
+    assert _frozen_cycle().errors.radarFault is False
+    assert _frozen_cycle().errors.radarFault is True
+
+  def test_frozen_table_without_sgufail_is_not_fault(self):
+    radar = _make_bosch_interface()
+    for slot in range(4):
+      radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
+      radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
+
+    def _frozen_cycle():
+      radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+      for slot in range(4):
+        addr = 0x310 + slot * 3
+        radar.rcp.updated_addresses.update((addr, addr + 1))
+      return radar.update([])
+
+    assert _frozen_cycle().errors.radarFault is False
+    assert _frozen_cycle().errors.radarFault is False
+    assert _frozen_cycle().errors.radarFault is False

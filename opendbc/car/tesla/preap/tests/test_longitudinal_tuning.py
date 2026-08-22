@@ -10,7 +10,6 @@ def test_pedal_params_leave_generic_outer_feedback_disabled(monkeypatch):
   pedal_conf = SimpleNamespace(
     use_pedal=True,
     radar_enabled=False,
-    radar_behind_nosecone=False,
   )
   monkeypatch.setattr(interface, "nap_conf", pedal_conf)
   params = structs.CarParams.new_message()

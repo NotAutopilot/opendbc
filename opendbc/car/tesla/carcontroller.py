@@ -123,13 +123,13 @@ class CarController(CarControllerBase):
     if self.stock_cc.pcc_event:
       CS.pccEvent = self.stock_cc.pcc_event
 
-    # Tinkla 0.6.6 donor contract: stream VIN/position/EPAS to panda on 0x560.
-    # Empty VIN keeps current passthrough (this car). A 17-char VIN makes panda
-    # impersonate the radar's donor.
-    donor_vin = nap_conf.radar_donor_vin
-    if nap_conf.radar_enabled and donor_vin and self.frame % 100 == 0:
+    # Tinkla 0.6.6 donor contract: always stream VIN/position/EPAS on 0x560
+    # when radar is on. Empty VIN is 17 spaces (this-car passthrough);
+    # position and EPAS still apply.
+    if nap_conf.radar_enabled and self.frame % 100 == 0:
       can_sends.append(self.tesla_can.create_radar_vin_msg(
-        self.radar_vin_idx, donor_vin, True, nap_conf.radar_position, nap_conf.radar_epas_type,
+        self.radar_vin_idx, nap_conf.radar_donor_vin, True,
+        nap_conf.radar_position, nap_conf.radar_epas_type,
       ))
       self.radar_vin_idx = (self.radar_vin_idx + 1) % 3
 
