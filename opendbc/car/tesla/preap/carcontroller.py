@@ -8,7 +8,10 @@ from opendbc.car import Bus
 from opendbc.car.carlog import carlog
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.lateral import apply_steer_angle_limits_vm
-from opendbc.car.tesla.preap.boot import PedalCalib, pedal_bus_from_cp_sp, pedal_calib_from_cp_sp, pedal_pipeline_enabled
+from opendbc.car.tesla.preap.boot import (
+  PedalCalib, pedal_bus_from_cp_sp, pedal_calib_from_cp_sp, pedal_pipeline_enabled, preap_radar_present,
+)
+from opendbc.car.tesla.preap.radar_donor_vin import radar_donor_live
 from opendbc.car.tesla.preap.constants import (
   ENGAGE_GRACE_FRAMES,
   ENGAGE_GRACE_PEDAL_RAMP_RATE_UP,
@@ -366,6 +369,8 @@ class PreAPCarController(CarControllerBase):
       int(CP_SP.safetyParam) & PREAP_MODE_MASK
     ) != PREAP_MODE_INVALID
     self.long_controller = None
+    self.radar_vin_idx = 0
+    self._radar_present = preap_radar_present(CP, CP_SP)
     # Invalid mode bits grant neither pedal nor stock-CC authority.
     if self._pedal_pipeline and self._engagement_mode_valid:
       self.tesla_can.pedal_can_bus = pedal_bus_from_cp_sp(CP_SP)
@@ -422,6 +427,16 @@ class PreAPCarController(CarControllerBase):
 
     if self.long_controller is not None and self._engagement_mode_valid:
       can_sends.extend(self.long_controller.update(CC, CS, self.frame, self.tesla_can, now_nanos=now_nanos))
+
+    # Tinkla 0.6.6 donor contract: stream VIN/position/EPAS to panda on 0x560.
+    # Empty VIN keeps current passthrough (this car). A 17-char VIN makes panda
+    # impersonate the radar's donor.
+    if self._radar_present and radar_donor_live.vin and self.frame % 100 == 0:
+      can_sends.append(self.tesla_can.create_radar_vin_msg(
+        self.radar_vin_idx, radar_donor_live.vin, True,
+        radar_donor_live.position, radar_donor_live.epas_type,
+      ))
+      self.radar_vin_idx = (self.radar_vin_idx + 1) % 3
 
     new_actuators = actuators.as_builder() if hasattr(actuators, "as_builder") else actuators
     if hasattr(new_actuators, "steeringAngleDeg"):

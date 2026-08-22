@@ -100,6 +100,22 @@ class TeslaCANPreAP:
     struct.pack_into("B", msg, 5, tesla_byte_sum_checksum(GAS_COMMAND_ID, bytes(msg.raw[:5])))
     return (GAS_COMMAND_ID, bytes(msg.raw[:6]), pedal_can_bus)
 
+  @staticmethod
+  def create_radar_vin_msg(fragment, vin, use_radar, position, epas_type):
+    """Host→panda 0x560 fragment. Panda consumes this; it does not go on the car.
+
+    Layout is the Tinkla 0.6.6 create_radar_VIN_msg packing.
+    """
+    padded = (vin + (" " * 17))[:17]
+    if fragment == 0:
+      flags = (1 if use_radar else 0) + ((position & 0x03) << 1) + ((epas_type & 0x07) << 3)
+      dat = bytes((0, 1, flags, 0, 0, ord(padded[0]), ord(padded[1]), ord(padded[2])))
+    elif fragment == 1:
+      dat = bytes((1, *(ord(padded[i]) for i in range(3, 10))))
+    else:
+      dat = bytes((2, *(ord(padded[i]) for i in range(10, 17))))
+    return (0x560, dat, 0)
+
   def create_steering_control(self, counter, angle, enabled):
     values = {
       "DAS_steeringControlCounter": counter,

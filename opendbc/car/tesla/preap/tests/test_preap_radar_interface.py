@@ -255,13 +255,13 @@ class TestBoschHealth:
     assert result.errors.radarUnavailableTemporary is False
     assert list(result.points) == []
 
-  def test_sgufail_is_radar_fault(self):
+  def test_sgufail_is_not_radar_fault(self):
     radar = _make_bosch_interface()
     radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
     result = _run_cycle(radar)
-    assert result.errors.radarFault is True
+    assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is False
-    assert list(result.points) == []
+    assert len(result.points) == 1
 
   def test_sensor_dirty_is_temporary_unavailable(self):
     radar = _make_bosch_interface()

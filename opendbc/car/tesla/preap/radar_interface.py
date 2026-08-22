@@ -147,9 +147,13 @@ class RadarInterface(RadarInterfaceBase):
 
     radar_status = self.rcp.vl["TeslaRadarSguInfo"]
     hw_fail = bool(radar_status.get("RADC_HWFail"))
-    sgu_fail = bool(radar_status.get("RADC_SGUFail"))
     dirty = bool(radar_status.get("RADC_SensorDirty"))
-    if hw_fail or sgu_fail:
+    # SGUFail is a summary lamp: calibration, VIN reject, dirty-behind-
+    # nosecone, and worse. Tinkla ignored it on Pre-AP. IRITable's unit
+    # raised it for the adjustment triad while tracks were still live.
+    # Driving is how that calibration clears, so do not block engage.
+    # HWFail is the dead-sensor bit and still blocks.
+    if hw_fail:
       ret.errors.radarFault = True
       return False
     if dirty:

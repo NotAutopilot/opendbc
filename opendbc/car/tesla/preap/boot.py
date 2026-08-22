@@ -23,6 +23,7 @@ from opendbc.car.tesla.preap.constants import (
   SP_SAFETY_MADS_MAIN_CRUISE_ALLOWED,
   SP_SAFETY_MADS_UNIFIED_ENGAGEMENT_MODE,
 )
+from opendbc.car.tesla.preap.radar_donor_vin import normalize_radar_donor_vin, seed_radar_donor_live
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 
 
@@ -78,6 +79,9 @@ class PreAPHardwareSnapshot:
   radar_present: bool = False
   radar_behind_nosecone: bool = False
   radar_offset: float = 0.0
+  radar_donor_vin: str = ""
+  radar_position: int = 0
+  radar_epas_type: int = 0
   engagement_mode: int = PREAP_MODE_INDEPENDENT
   mads_main_cruise_allowed: bool = False
   mads_unified_engagement_mode: bool = False
@@ -179,6 +183,9 @@ def hardware_snapshot_from_values(
   radar_enabled=None,
   radar_behind_nosecone=None,
   radar_offset=None,
+  radar_donor_vin=None,
+  radar_position=None,
+  radar_epas_type=None,
   engagement_mode=None,
   mads_main_cruise_allowed=None,
   mads_unified_engagement_mode=None,
@@ -210,6 +217,23 @@ def hardware_snapshot_from_values(
     offset = 0.0
     radar_present = False
     nosecone = False
+  donor_vin = normalize_radar_donor_vin(radar_donor_vin) if radar_present else ""
+  position = 1 if nosecone else 0
+  if radar_present and _value_present(radar_position):
+    try:
+      parsed_position = int(radar_position)
+    except (TypeError, ValueError):
+      parsed_position = position
+    if 0 <= parsed_position <= 3:
+      position = parsed_position
+  epas_type = 0
+  if radar_present and _value_present(radar_epas_type):
+    try:
+      parsed_epas = int(radar_epas_type)
+    except (TypeError, ValueError):
+      parsed_epas = 0
+    if 0 <= parsed_epas <= 7:
+      epas_type = parsed_epas
   mode = parse_engagement_mode(engagement_mode)
   main_allowed, uem = compatibility_from_mode(mode)
   factor = _finite_number(pedal_calib_factor)
@@ -228,6 +252,9 @@ def hardware_snapshot_from_values(
     radar_present=radar_present,
     radar_behind_nosecone=nosecone,
     radar_offset=offset,
+    radar_donor_vin=donor_vin,
+    radar_position=position,
+    radar_epas_type=epas_type,
     engagement_mode=mode,
     mads_main_cruise_allowed=main_allowed,
     mads_unified_engagement_mode=uem,
@@ -291,6 +318,7 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
     CP_SP.flags |= TeslaFlagsSP.PREAP_RADAR_PRESENT
   if snapshot.radar_behind_nosecone:
     CP_SP.flags |= TeslaFlagsSP.PREAP_RADAR_NOSECONE
+  seed_radar_donor_live(snapshot.radar_donor_vin, snapshot.radar_position, snapshot.radar_epas_type)
   if snapshot.pedal_calib_available:
     CP_SP.flags |= TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE
   if snapshot.pedal_bus == 0:
