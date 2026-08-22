@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 
 from opendbc.can import CANDefine, CANParser
+from opendbc.can.parser import CAN_INVALID_CNT
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from dataclasses import dataclass
@@ -20,6 +21,22 @@ from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
 REQUIRED_SOURCE_KEYS = ("DI_torque2", "GTW_carState", "EPAS_sysStatus", "BrakeMessage")
 REQUIRED_SOURCE_MAX_AGE_NS = 1_000_000_000
+ESP_B_ADDR = 0x155
+
+
+def _esp_b_quality_valid(cp) -> bool:
+  """Match panda tesla_preap_get_quality_flag_valid: (ESP_vehicleSpeedQF & 3) == 3."""
+  return (int(cp.vl["ESP_B"]["ESP_vehicleSpeedQF"]) & 3) == 3
+
+
+def _reject_esp_b(cp) -> None:
+  """Drop ESP_B this cycle so invalid quality cannot keep speed or CAN valid."""
+  if "ESP_B" in cp.vl:
+    cp.vl["ESP_B"]["ESP_vehicleSpeed"] = 0.0
+  state = cp.message_states.get(ESP_B_ADDR)
+  if state is not None:
+    state.timestamps.clear()
+  cp.can_invalid_cnt = CAN_INVALID_CNT
 
 
 @dataclass
@@ -127,7 +144,11 @@ class PreAPCarState(CarStateBase):
     ret_sp = PreAPCarStateSP()
     ret.blockPcmEnable = True
 
-    ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
+    if cp_chassis.vl_all["ESP_B"]["ESP_vehicleSpeedQF"] and not _esp_b_quality_valid(cp_chassis):
+      _reject_esp_b(cp_chassis)
+      ret.vEgoRaw = 0.0
+    else:
+      ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
 
     ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > PEDAL_DI_PRESSED

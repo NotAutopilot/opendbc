@@ -74,6 +74,36 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
         CS, _ = CI.update(_vehicle_packets(corrupt_address=address))
         self.assertFalse(CS.canValid)
 
+  def test_esp_b_quality_flag_matches_panda(self):
+    address, payload_hex, _checksum_index = next(v for v in _VEHICLE_CHECKSUM_VECTORS if v[0] == 0x155)
+    for qf in (0, 1, 2, 3):
+      with self.subTest(qf=qf):
+        payload = bytearray.fromhex(payload_hex)
+        payload[7] = (payload[7] & ~0x3) | qf
+        CI = _make_ci()
+        CS, _ = CI.update(_vehicle_packets(payload_override=(address, bytes(payload))))
+        if qf == 3:
+          self.assertTrue(CS.canValid)
+          expected = ((payload[5] << 8) | payload[6]) * 0.00999999978 * CV.KPH_TO_MS
+          self.assertAlmostEqual(CS.vEgoRaw, expected, places=5)
+        else:
+          self.assertFalse(CS.canValid)
+          self.assertEqual(CS.vEgoRaw, 0.0)
+
+    payload_good = bytearray.fromhex(payload_hex)
+    payload_good[7] = (payload_good[7] & ~0x3) | 3
+    for qf in (1, 2):
+      with self.subTest(primed=True, qf=qf):
+        CI = _make_ci()
+        CS, _ = CI.update(_vehicle_packets(payload_override=(address, bytes(payload_good))))
+        self.assertTrue(CS.canValid)
+        self.assertGreater(CS.vEgoRaw, 0.0)
+        payload_bad = bytearray.fromhex(payload_hex)
+        payload_bad[7] = (payload_bad[7] & ~0x3) | qf
+        CS, _ = CI.update(_vehicle_packets(payload_override=(address, bytes(payload_bad))))
+        self.assertFalse(CS.canValid)
+        self.assertEqual(CS.vEgoRaw, 0.0)
+
   def test_vehicle_rx_rejects_wrong_payload_lengths(self):
     for address, payload_hex, _ in _VEHICLE_CHECKSUM_VECTORS:
       payload = bytes.fromhex(payload_hex)
@@ -95,7 +125,7 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
   def test_speed_brake_gear_doors(self):
     CI = _make_ci()
     packets = []
-    packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0})
+    packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0, "ESP_vehicleSpeedQF": 3})
     packets += _packet("DI_torque2", {"DI_brakePedal": 1, "DI_gear": 4})  # drive
     packets += _packet("BrakeMessage", {"driverBrakeStatus": 2})
     packets += _packet("DI_torque1", {"DI_pedalPos": 0})
@@ -227,7 +257,7 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
 
   def _prime_drive(self, CI, ts=1_000_000):
     packets = []
-    packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0}, ts=ts)
+    packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0, "ESP_vehicleSpeedQF": 3}, ts=ts)
     packets += _packet("DI_torque2", {"DI_brakePedal": 0, "DI_gear": 4}, ts=ts)
     packets += _packet("BrakeMessage", {"driverBrakeStatus": 1}, ts=ts)
     packets += _packet("DI_torque1", {"DI_pedalPos": 0}, ts=ts)
@@ -524,7 +554,7 @@ def _di(enabled, ts):
 class TestPreAPCarStateDirectAdjustmentCoupled(unittest.TestCase):
   def _prime(self, CI, ts=1_000_000):
     packets = []
-    packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0}, ts=ts)
+    packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0, "ESP_vehicleSpeedQF": 3}, ts=ts)
     packets += _packet("DI_torque2", {"DI_brakePedal": 0, "DI_gear": 4, "DI_brakePedalState": 0}, ts=ts)
     packets += _packet("BrakeMessage", {"driverBrakeStatus": 1}, ts=ts)
     packets += _packet("DI_torque1", {"DI_pedalPos": 0}, ts=ts)
