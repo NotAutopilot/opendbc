@@ -165,3 +165,34 @@ def test_commissioner_does_not_touch_existing_donor_vin():
     sends = commissioner.update([_fault_frame()], float(now), **_commissioner_kwargs(stored_vin=VIN))
     assert sends == ()
   assert stored == []
+
+
+def test_commissioner_force_read_starts_without_vin_fault():
+  stored = []
+  commissioner = RadarDonorVinCommissioner(stored.append)
+  sends = commissioner.update([], 0.0, **_commissioner_kwargs(stored_vin=VIN), force_read=True)
+  assert sends
+  assert sends[0].address == RADAR_UDS_TX
+  assert stored == []
+  assert commissioner.reader.state == RadarDonorVinState.TESTER_PRESENT
+
+
+def test_commissioner_force_read_does_not_restart_every_tick():
+  stored = []
+  commissioner = RadarDonorVinCommissioner(stored.append)
+  first = commissioner.update([], 0.0, **_commissioner_kwargs(), force_read=True)
+  second = commissioner.update([], 0.01, **_commissioner_kwargs(), force_read=True)
+  assert first
+  assert second == ()
+  assert commissioner.reader.state == RadarDonorVinState.TESTER_PRESENT
+
+
+def test_commissioner_force_read_can_run_again_after_clear():
+  stored = []
+  commissioner = RadarDonorVinCommissioner(stored.append)
+  commissioner.update([], 0.0, **_commissioner_kwargs(), force_read=True)
+  commissioner.reader.state = RadarDonorVinState.COMPLETE
+  commissioner.update([], 0.01, **_commissioner_kwargs(), force_read=False)
+  sends = commissioner.update([], 0.02, **_commissioner_kwargs(), force_read=True)
+  assert sends
+  assert commissioner.reader.state == RadarDonorVinState.TESTER_PRESENT

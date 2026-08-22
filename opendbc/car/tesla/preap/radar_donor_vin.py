@@ -143,7 +143,7 @@ def _uds_frame(payload: bytes) -> CanData:
 
 
 class RadarDonorVinCommissioner:
-  """Start one F190 read when a parked radar keeps asserting vinValidity."""
+  """Read F190 when vinValidity sticks, or when the UI asks once."""
 
   STABLE_FRAMES = 8
 
@@ -152,10 +152,16 @@ class RadarDonorVinCommissioner:
     self.reader = RadarDonorVinReader()
     self._vin_fault_frames = 0
     self._attempted = False
+    self._force_used = False
+
+  @property
+  def read_finished(self) -> bool:
+    return self.reader.state in (RadarDonorVinState.COMPLETE, RadarDonorVinState.FAILED)
 
   def update(self, can_packets: list[CanData], now: float, *, radar_enabled: bool,
-             stored_vin: str, controls_allowed: bool, enabled: bool) -> tuple[CanData, ...]:
-    if not radar_enabled or stored_vin:
+             stored_vin: str, controls_allowed: bool, enabled: bool,
+             force_read: bool = False) -> tuple[CanData, ...]:
+    if not radar_enabled:
       return ()
 
     running = self.reader.state not in (
@@ -165,6 +171,15 @@ class RadarDonorVinCommissioner:
       if running:
         return self.reader.abort(now).can_sends
       return ()
+
+    if not force_read:
+      self._force_used = False
+    elif force_read and not self._force_used and not running:
+      self._force_used = True
+      self._attempted = True
+      self._vin_fault_frames = 0
+      self.reader.start(now)
+      running = True
 
     if self.reader.state == RadarDonorVinState.COMPLETE:
       if self.reader.vin:
@@ -178,7 +193,7 @@ class RadarDonorVinCommissioner:
         self.store_vin(output.vin)
       return output.can_sends
 
-    if self._attempted:
+    if stored_vin or self._attempted:
       return ()
     for packet in can_packets:
       if packet.address == 0x501 and packet.src == RADAR_UDS_BUS and radar_alert_vin_validity(packet.dat):

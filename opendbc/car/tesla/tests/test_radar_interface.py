@@ -135,7 +135,7 @@ class TestBoschHealth:
     ("signal", "radar_fault", "temporary_unavailable"),
     (
       ("RADC_HWFail", True, False),
-      ("RADC_SGUFail", True, False),
+      ("RADC_SGUFail", False, False),
       ("RADC_SensorDirty", False, True),
     ),
   )

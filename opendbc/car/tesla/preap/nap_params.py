@@ -29,6 +29,7 @@ class NAPParamKeys:
   RADAR_DONOR_VIN = "NAPRadarDonorVin"
   RADAR_EPAS_TYPE = "NAPRadarEpasType"
   RADAR_POSITION = "NAPRadarPosition"
+  RADAR_READ_VIN = "NAPRadarReadVin"
 
   # iBooster / Braking
   IBOOSTER_ENABLED = "NAPiBoosterEnabled"
