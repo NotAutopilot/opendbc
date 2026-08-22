@@ -428,10 +428,10 @@ class PreAPCarController(CarControllerBase):
     if self.long_controller is not None and self._engagement_mode_valid:
       can_sends.extend(self.long_controller.update(CC, CS, self.frame, self.tesla_can, now_nanos=now_nanos))
 
-    # Tinkla 0.6.6 donor contract: stream VIN/position/EPAS to panda on 0x560.
-    # Empty VIN keeps current passthrough (this car). A 17-char VIN makes panda
-    # impersonate the radar's donor.
-    if self._radar_present and radar_donor_live.vin and self.frame % 100 == 0:
+    # Tinkla 0.6.6 donor contract: always stream VIN/position/EPAS on 0x560
+    # when radar is present. Empty VIN is 17 spaces (this-car passthrough);
+    # position and EPAS still apply.
+    if self._radar_present and self.frame % 100 == 0:
       can_sends.append(self.tesla_can.create_radar_vin_msg(
         self.radar_vin_idx, radar_donor_live.vin, True,
         radar_donor_live.position, radar_donor_live.epas_type,

@@ -316,8 +316,6 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
     CP_SP.flags |= TeslaFlagsSP.PREAP_PEDAL_PRESENT
   if snapshot.radar_present:
     CP_SP.flags |= TeslaFlagsSP.PREAP_RADAR_PRESENT
-  if snapshot.radar_behind_nosecone:
-    CP_SP.flags |= TeslaFlagsSP.PREAP_RADAR_NOSECONE
   seed_radar_donor_live(snapshot.radar_donor_vin, snapshot.radar_position, snapshot.radar_epas_type)
   if snapshot.pedal_calib_available:
     CP_SP.flags |= TeslaFlagsSP.PREAP_PEDAL_CALIB_AVAILABLE
@@ -331,8 +329,6 @@ def apply_preap_hardware_snapshot(CP: structs.CarParams, CP_SP: structs.CarParam
       host_safety |= PREAP_FLAG_PEDAL_BUS_ZERO
   if snapshot.radar_present:
     host_safety |= PREAP_FLAG_RADAR_EMULATION
-  if snapshot.radar_behind_nosecone:
-    host_safety |= PREAP_FLAG_RADAR_BEHIND_NOSECONE
   # Serialize frozen hardware bits on the dedicated safety config.
   if CP.safetyConfigs:
     safety_param = int(CP.safetyConfigs[0].safetyParam)

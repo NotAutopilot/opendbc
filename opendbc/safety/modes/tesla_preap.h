@@ -10,6 +10,7 @@
 
 #define PREAP_FLAG_ENABLE_PEDAL (1U << 2)
 #define PREAP_FLAG_RADAR_EMULATION (1U << 3)
+// Leftover bit. Position comes from host 0x560, not this flag.
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE (1U << 4)
 #define PREAP_FLAG_PEDAL_BUS_ZERO (1U << 5)
 #define PREAP_FLAG_PEDAL_CALIBRATION (1U << 6)
@@ -98,7 +99,6 @@ static bool preap_stalk_counter_seen = false;
 static uint8_t preap_stalk_counter_last = 0U;
 
 static bool preap_radar_emulation = false;
-static bool preap_radar_behind_nosecone = false;
 static int preap_radar_status = 0;
 static uint32_t preap_last_radar_signal = 0;
 static int preap_radar_epas_type = 0;
@@ -1284,11 +1284,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_pedal_bus = GET_FLAG(param, PREAP_FLAG_PEDAL_BUS_ZERO) ? 0U : 2U;
   preap_mode = (uint8_t)(current_safety_param_sp & PREAP_MODE_MASK);
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
-  preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
-  if (preap_radar_behind_nosecone && !preap_radar_emulation) {
-    preap_radar_behind_nosecone = false;
-  }
-  preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+  preap_radar_position = 0;
   preap_radar_epas_type = 0;
   preap_radar_status = 0;
   preap_last_radar_signal = 0;

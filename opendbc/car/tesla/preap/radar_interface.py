@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from opendbc.can import CANParser
 from opendbc.car import structs
 from opendbc.car.interfaces import RadarInterfaceBase
+from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
 from opendbc.car.tesla.preap.radar_can import (
   BOSCH_POINT_ADDRESS_STRIDE,
   BOSCH_POINT_BASE_ADDRESS,
@@ -105,6 +106,7 @@ class RadarInterface(RadarInterfaceBase):
     self.radar_offset = float(getattr(CP_SP, "radarOffset", 0.0) or 0.0)
     self.updated_messages = set()
     self.bosch_tracks = BoschTrackLifecycle()
+    self.table_freeze = BoschTableFreezeWatch()
     self.radar_off_can = bool(CP.radarUnavailable)
     self.rcp = None if self.radar_off_can else get_bosch_radar_can_parser()
 
@@ -124,6 +126,7 @@ class RadarInterface(RadarInterfaceBase):
     status_healthy = self._apply_status(ret)
     if not can_valid or not status_healthy:
       self.bosch_tracks.clear()
+      self.table_freeze.reset()
       ret.points = []
       self.updated_messages.clear()
       return ret
@@ -137,6 +140,9 @@ class RadarInterface(RadarInterfaceBase):
       self.bosch_tracks.update(i, observation)
 
     ret.points = self.bosch_tracks.points
+    frozen = self.table_freeze.update(ret.points)
+    if frozen and bool(self.rcp.vl["TeslaRadarSguInfo"].get("RADC_SGUFail")):
+      ret.errors.radarFault = True
     self.updated_messages.clear()
     return ret
 

@@ -196,3 +196,44 @@ def test_commissioner_force_read_can_run_again_after_clear():
   sends = commissioner.update([], 0.02, **_commissioner_kwargs(), force_read=True)
   assert sends
   assert commissioner.reader.state == RadarDonorVinState.TESTER_PRESENT
+
+
+def test_commissioner_stores_vin_when_cleanup_fails():
+  stored = []
+  commissioner = RadarDonorVinCommissioner(stored.append)
+  commissioner.reader.vin = VIN
+  commissioner.reader.state = RadarDonorVinState.FAILED
+  commissioner.reader.failure = RadarDonorVinFailure.TIMEOUT
+  commissioner.update([], 1.0, **_commissioner_kwargs())
+  commissioner.update([], 1.1, **_commissioner_kwargs())
+  assert stored == [VIN]
+
+
+def test_commissioner_stores_vin_as_soon_as_f190_decodes():
+  stored = []
+  commissioner = RadarDonorVinCommissioner(stored.append)
+  now = 0.0
+  commissioner.update([], now, **_commissioner_kwargs(), force_read=True)
+  replies = {
+    RadarDonorVinState.TESTER_PRESENT: b"\x7e\x00",
+    RadarDonorVinState.DEFAULT_SESSION: b"\x50\x01",
+    RadarDonorVinState.EXTENDED_SESSION: b"\x50\x03",
+    RadarDonorVinState.READINESS: b"\x7e\x00",
+  }
+  while commissioner.reader.state in replies:
+    now += 0.01
+    commissioner.update([_rx(replies[commissioner.reader.state])], now, **_commissioner_kwargs())
+  assert commissioner.reader.state == RadarDonorVinState.READ_F190
+  now += 0.01
+  commissioner.update([], now, **_commissioner_kwargs())
+  vin_payload = b"\x62\xf1\x90" + VIN.encode("ascii")
+  now += 0.01
+  commissioner.update([_first_frame(vin_payload)], now, **_commissioner_kwargs())
+  now += 0.01
+  rest = vin_payload[6:]
+  commissioner.update(
+    [_consecutive(1, rest[:7]), _consecutive(2, rest[7:])],
+    now, **_commissioner_kwargs(),
+  )
+  assert stored == [VIN]
+  assert commissioner.reader.state == RadarDonorVinState.CLEANUP

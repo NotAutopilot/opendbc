@@ -211,6 +211,33 @@ class TestPreAPCarController(unittest.TestCase):
     expected = TeslaCANPreAP.create_radar_vin_msg(0, "5YJSA1E42FF156789", True, 1, 3)
     self.assertEqual(found, expected)
 
+  def test_streams_position_when_donor_vin_empty(self):
+    from opendbc.car.tesla.preap.radar_donor_vin import seed_radar_donor_live
+    from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
+
+    CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+    apply_preap_hardware_snapshot(CP, CP_SP, hardware_snapshot_from_values(
+      radar_enabled=True, radar_offset=0.0, radar_donor_vin="",
+      radar_position=1, radar_epas_type=0,
+    ))
+    seed_radar_donor_live("", 1, 0)
+    CI = CarInterface(CP, CP_SP)
+    CI.update([])
+    CC, CC_SP = _permitted_controls()
+    found = None
+    for frame in range(101):
+      _act, msgs = CI.apply(CC, CC_SP, now_nanos=frame)
+      for msg in msgs:
+        if msg[0] == 0x560:
+          found = msg
+          break
+      if found is not None:
+        break
+    self.assertIsNotNone(found)
+    expected = TeslaCANPreAP.create_radar_vin_msg(0, "", True, 1, 0)
+    self.assertEqual(found, expected)
+
 
 if __name__ == "__main__":
   unittest.main()

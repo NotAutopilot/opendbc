@@ -109,7 +109,7 @@ class TestPreAPHardwareFailClosed(unittest.TestCase):
     self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_ENABLE_PEDAL)
     self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_RADAR_EMULATION)
-    self.assertTrue(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_RADAR_BEHIND_NOSECONE)
+    self.assertFalse(CP.safetyConfigs[0].safetyParam & PREAP_FLAG_RADAR_BEHIND_NOSECONE)
     self.assertTrue(hasattr(structs.CarParams.SafetyModel, "teslaPreap"))
 
   def test_mode_derives_main_uem_not_legacy_params(self):

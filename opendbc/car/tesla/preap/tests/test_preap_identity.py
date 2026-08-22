@@ -74,7 +74,7 @@ class TestPreAPIdentity(unittest.TestCase):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(radar_enabled=True, radar_behind_nosecone=True, radar_offset=0.0))
     self.assertFalse(CP.radarUnavailable)
     self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_PRESENT)
-    self.assertTrue(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_NOSECONE)
+    self.assertFalse(bool(CP_SP.flags & TeslaFlagsSP.PREAP_RADAR_NOSECONE))
 
   def test_invalid_config_grants_no_authority(self):
     CP, CP_SP = _make_preap(hardware_snapshot_from_values(pedal_enabled=True, pedal_calib_done=False))

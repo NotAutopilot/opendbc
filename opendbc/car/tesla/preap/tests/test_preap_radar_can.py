@@ -15,37 +15,40 @@ from opendbc.car.tesla.preap.radar_can import (
 
 
 CAR_CONFIG_VECTORS = (
-  (bytes.fromhex("0290555300001700"), bytes.fromhex("4295555310001710")),
-  (bytes.fromhex("0281555300000000"), bytes.fromhex("4285555310000010")),
+  (bytes.fromhex("0290555300001700"), bytes.fromhex("4295555300001710")),
+  (bytes.fromhex("0281555300000000"), bytes.fromhex("4285555300000010")),
 )
 
 
 class TestRadarConfigGate:
   def test_emulation_is_required(self):
-    assert radar_config_allowed(True, False) is True
-    assert radar_config_allowed(True, True) is True
-    assert radar_config_allowed(False, False) is False
-    assert radar_config_allowed(False, True) is False
+    assert radar_config_allowed(True) is True
+    assert radar_config_allowed(False) is False
 
-  def test_missing_or_contradictory_config_yields_no_frames(self):
+  def test_missing_config_yields_no_frames(self):
     payload = bytes.fromhex("0290555300001700")
-    assert gateway_frames(0x398, 0, payload, radar_emulation=False, behind_nosecone=False) == ()
-    assert gateway_frames(0x398, 0, payload, radar_emulation=False, behind_nosecone=True) == ()
-    assert gateway_frames(0x45, 1, bytes(8), radar_emulation=True, behind_nosecone=False) == ()
+    assert gateway_frames(0x398, 0, payload, radar_emulation=False) == ()
+    assert gateway_frames(0x45, 1, bytes(8), radar_emulation=True) == ()
 
 
 class TestCarConfigTransform:
   def test_frozen_application_vectors(self):
     for source, expected in CAR_CONFIG_VECTORS:
-      assert transform_car_config(source, behind_nosecone=True) == expected
+      assert transform_car_config(source, position=0) == expected
+
+  def test_position_one_sets_nibble(self):
+    source, _ = CAR_CONFIG_VECTORS[0]
+    payload = transform_car_config(source, position=1)
+    assert payload is not None
+    assert (payload[4] & 0xF0) == 0x10
 
   def test_wrong_length_is_rejected(self):
-    assert transform_car_config(bytes(7), behind_nosecone=True) is None
-    assert gateway_frames(0x398, 0, bytes(7), radar_emulation=True, behind_nosecone=True) == ()
+    assert transform_car_config(bytes(7), position=1) is None
+    assert gateway_frames(0x398, 0, bytes(7), radar_emulation=True) == ()
 
-  def test_emulation_without_nosecone_keeps_position_clear(self):
+  def test_default_position_is_clear(self):
     source, _ = CAR_CONFIG_VECTORS[0]
-    payload = transform_car_config(source, behind_nosecone=False)
+    payload = transform_car_config(source)
     assert payload is not None
     assert (payload[4] & 0xF0) == 0x00
 
@@ -54,17 +57,17 @@ class TestGatewayAllowlist:
   def test_readdr_destinations(self):
     data = bytes(range(8))
     for src, dst, dlc, _name in READDR:
-      frames = gateway_frames(src, 0, data[:dlc], radar_emulation=True, behind_nosecone=False)
+      frames = gateway_frames(src, 0, data[:dlc], radar_emulation=True, position=0)
       assert [(frame.addr, frame.bus, frame.data) for frame in frames] == [(dst, RADAR_BUS, data[:dlc])]
 
   def test_readdr_wrong_dlc_is_rejected(self):
     for src, _dst, dlc, _name in READDR:
-      frames = gateway_frames(src, 0, bytes(dlc - 1 if dlc > 1 else 0), radar_emulation=True, behind_nosecone=False)
+      frames = gateway_frames(src, 0, bytes(dlc - 1 if dlc > 1 else 0), radar_emulation=True, position=0)
       assert frames == ()
 
   def test_car_config_destination(self):
     source, expected = CAR_CONFIG_VECTORS[0]
-    frames = gateway_frames(0x398, 0, source, radar_emulation=True, behind_nosecone=True)
+    frames = gateway_frames(0x398, 0, source, radar_emulation=True, position=0)
     assert len(frames) == 1
     assert frames[0].addr == GTW_CAR_CONFIG_DST
     assert frames[0].bus == RADAR_BUS
@@ -72,7 +75,7 @@ class TestGatewayAllowlist:
 
   def test_stw_sna_replacement_destination(self):
     sna = bytes.fromhex("0000ffff00000000")
-    frames = gateway_frames(0x0E, 0, sna, radar_emulation=True, behind_nosecone=False)
+    frames = gateway_frames(0x0E, 0, sna, radar_emulation=True, position=0)
     assert len(frames) == 1
     assert frames[0].addr == STW_ANGLHP_DST
     assert frames[0].bus == RADAR_BUS
@@ -84,12 +87,12 @@ class TestGatewayAllowlist:
     expected = bytes.fromhex("00002000040000cd")
     assert expected[2] == 0x20
     assert transform_stw_anglhp(src) == expected
-    frames = gateway_frames(0x0E, 0, src, radar_emulation=True, behind_nosecone=False)
+    frames = gateway_frames(0x0E, 0, src, radar_emulation=True, position=0)
     assert frames[0].data == expected
 
   def test_esp_115_synthesizes_di_esp_control(self):
     src = bytes.fromhex("010203040050")
-    frames = gateway_frames(0x115, 0, src, radar_emulation=True, behind_nosecone=False)
+    frames = gateway_frames(0x115, 0, src, radar_emulation=True, position=0)
     addrs = [frame.addr for frame in frames]
     assert addrs == [ESP_115_DST, DI_ESP_CONTROL_DST]
     assert frames[0].data == src
@@ -97,7 +100,7 @@ class TestGatewayAllowlist:
 
   def test_di_torque2_synthesizes_wheel_speeds(self):
     src = bytes.fromhex("000000000001")
-    frames = gateway_frames(0x118, 0, src, radar_emulation=True, behind_nosecone=False)
+    frames = gateway_frames(0x118, 0, src, radar_emulation=True, position=0)
     addrs = [frame.addr for frame in frames]
     assert addrs == [DI_TORQUE2_DST, ESP_WHEEL_SPEEDS_DST]
     assert frames[0].data == src
@@ -108,7 +111,7 @@ class TestGatewayAllowlist:
     payload8 = bytes(range(8))
     payload6 = bytes(range(6))
     for src, _dst, dlc, _name in READDR:
-      for frame in gateway_frames(src, 0, payload8[:dlc], radar_emulation=True, behind_nosecone=False):
+      for frame in gateway_frames(src, 0, payload8[:dlc], radar_emulation=True, position=0):
         destinations.add(frame.addr)
     for addr, data in (
       (0x398, bytes.fromhex("0290555300001700")),
@@ -116,7 +119,7 @@ class TestGatewayAllowlist:
       (0x115, payload6),
       (0x118, payload6),
     ):
-      for frame in gateway_frames(addr, 0, data, radar_emulation=True, behind_nosecone=True):
+      for frame in gateway_frames(addr, 0, data, radar_emulation=True, position=0):
         destinations.add(frame.addr)
     assert destinations == {
       0x219, 0x109, 0x149, 0x159, 0x209, 0x2D9, 0x2B9, 0x2A9, 0x199, 0x129, 0x1A9, 0x119, 0x169,

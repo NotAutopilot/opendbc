@@ -17,6 +17,7 @@ from opendbc.car.tesla.preap.radar_interface import (
   RadarInterface as PreAPRadarInterface,
   get_bosch_radar_can_parser,
 )
+from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
 from opendbc.car.tesla.values import CAR
 
 
@@ -83,6 +84,7 @@ def _make_bosch_interface(*, radar_offset=0.0):
   assert type(radar) is PreAPRadarInterface
   radar.radar_off_can = False
   radar.radar_offset = radar_offset
+  radar.table_freeze = BoschTableFreezeWatch(stable_cycles=3, min_points=4)
   radar.rcp = FakeRadarParser()
   return radar
 
@@ -99,6 +101,16 @@ def _run_cycle(radar, *, tracked=True, d_rel=40.0, v_rel=-2.0, y_rel=0.5, slot_u
     radar.rcp.updated_addresses.add(BOSCH_ALERT_ADDRESS)
   if slot_updated:
     radar.rcp.updated_addresses.update((BOSCH_POINT_A_ADDRESS, BOSCH_POINT_B_ADDRESS))
+  return radar.update([])
+
+
+def _run_frozen_table(radar):
+  radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS, BOSCH_STATUS_ADDRESS, BOSCH_ALERT_ADDRESS}
+  for slot in range(4):
+    radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0, y_rel=0.25 * slot)
+    radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
+    addr = BOSCH_POINT_BASE_ADDRESS + slot * BOSCH_POINT_ADDRESS_STRIDE
+    radar.rcp.updated_addresses.update((addr, addr + 1))
   return radar.update([])
 
 
@@ -262,6 +274,25 @@ class TestBoschHealth:
     assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is False
     assert len(result.points) == 1
+
+  def test_sgufail_with_frozen_table_is_radar_fault(self):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
+    result = None
+    for _ in range(3):
+      result = _run_frozen_table(radar)
+    assert result is not None
+    assert result.errors.radarFault is True
+    assert len(result.points) == 4
+
+  def test_frozen_table_without_sgufail_is_not_fault(self):
+    radar = _make_bosch_interface()
+    result = None
+    for _ in range(3):
+      result = _run_frozen_table(radar)
+    assert result is not None
+    assert result.errors.radarFault is False
+    assert len(result.points) == 4
 
   def test_sensor_dirty_is_temporary_unavailable(self):
     radar = _make_bosch_interface()
