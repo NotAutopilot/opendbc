@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from opendbc.car.tesla import radar_interface as radar_interface_module
+from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
 
 
 BOSCH_POINT_A_ADDRESS = 0x310
@@ -64,7 +65,6 @@ def _make_bosch_interface():
   radar.pts = {}
   if hasattr(radar_interface_module, "BoschTrackLifecycle"):
     radar.bosch_tracks = radar_interface_module.BoschTrackLifecycle()
-  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
   radar.table_freeze = BoschTableFreezeWatch(stable_cycles=3, min_points=4)
   radar.rcp = FakeRadarParser()
   return radar
@@ -217,8 +217,9 @@ class TestBoschHealth:
     assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is True
 
-  def test_ignore_hw_fail_does_not_fault_on_frozen_table_with_sgufail(self, monkeypatch):
+  def test_ignore_hw_fail_faults_on_frozen_table_with_sgufail(self, monkeypatch):
     radar = _make_bosch_interface()
+    radar.table_freeze = BoschTableFreezeWatch()
     monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
     radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
     radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
@@ -226,9 +227,9 @@ class TestBoschHealth:
       radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
       radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
 
-    assert _run_frozen_table(radar).errors.radarFault is False
-    assert _run_frozen_table(radar).errors.radarFault is False
-    assert _run_frozen_table(radar).errors.radarFault is False
+    for _ in range(39):
+      assert _run_frozen_table(radar).errors.radarFault is False  # HWFail is ignored.
+    assert _run_frozen_table(radar).errors.radarFault is True
 
   def test_ignore_hw_fail_is_resolved_live_each_update(self, monkeypatch):
     radar = _make_bosch_interface()

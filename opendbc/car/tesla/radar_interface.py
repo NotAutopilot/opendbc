@@ -206,7 +206,6 @@ class RadarInterface(RadarInterfaceBase):
       # Driving is how that calibration clears, so do not block engage.
       # HWFail is the dead-sensor bit and still blocks, unless
       # NAPRadarIgnoreHwFail is set (tracks can stay live on a false HWFail).
-      # Freeze+SGUFail is the same lockout family — honor the toggle there too.
       if radar_status['RADC_HWFail'] and not ignore_hw_fail:
         ret.errors.radarFault = True
         if self.table_freeze is not None:
@@ -255,7 +254,7 @@ class RadarInterface(RadarInterfaceBase):
     ret.points = self.bosch_tracks.points if self.bosch_radar else list(self.pts.values())
     if self.bosch_radar and self.table_freeze is not None:
       frozen = self.table_freeze.update(ret.points)
-      if frozen and bool(self.rcp.vl['TeslaRadarSguInfo']['RADC_SGUFail']) and not ignore_hw_fail:
+      if frozen and bool(self.rcp.vl['TeslaRadarSguInfo']['RADC_SGUFail']):
         ret.errors.radarFault = True
     self.updated_messages.clear()
     return ret
