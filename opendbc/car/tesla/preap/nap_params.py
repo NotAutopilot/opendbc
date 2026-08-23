@@ -24,6 +24,7 @@ class NAPParamKeys:
 
   # Radar
   RADAR_ENABLED = "NAPRadarEnabled"
+  RADAR_IGNORE_HW_FAIL = "NAPRadarIgnoreHwFail"
   RADAR_BEHIND_NOSECONE = "NAPRadarBehindNosecone"
   RADAR_OFFSET = "NAPRadarOffset"
   RADAR_DONOR_VIN = "NAPRadarDonorVin"
@@ -53,6 +54,7 @@ DEFAULTS = {
   NAPParamKeys.PEDAL_CALIB_FACTOR: 1.0,
   NAPParamKeys.PEDAL_CALIB_ZERO: 0.0,
   NAPParamKeys.RADAR_ENABLED: False,
+  NAPParamKeys.RADAR_IGNORE_HW_FAIL: False,
   NAPParamKeys.RADAR_BEHIND_NOSECONE: False,
   NAPParamKeys.RADAR_OFFSET: 0.0,
   NAPParamKeys.RADAR_DONOR_VIN: "",

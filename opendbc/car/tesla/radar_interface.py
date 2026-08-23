@@ -128,8 +128,13 @@ class RadarInterface(RadarInterfaceBase):
     # For behind-nosecone installs, users can configure horizontal offset in meters.
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
       self.radar_offset = float(nap_conf.radar_offset)
+      try:
+        self.ignore_hw_fail = bool(nap_conf.radar_ignore_hw_fail)
+      except Exception:
+        self.ignore_hw_fail = False
     else:
       self.radar_offset = 0.0
+      self.ignore_hw_fail = False
 
   def update(self, can_msgs):
 
@@ -165,11 +170,19 @@ class RadarInterface(RadarInterfaceBase):
       # nosecone, and worse. Tinkla ignored it on Pre-AP. IRITable's unit
       # raised it for the adjustment triad while tracks were still live.
       # Driving is how that calibration clears, so do not block engage.
-      # HWFail is the dead-sensor bit and still blocks.
+      # HWFail is the dead-sensor bit and still blocks, unless
+      # NAPRadarIgnoreHwFail is set (tracks can stay live on a false HWFail).
       if radar_status['RADC_HWFail']:
-        ret.errors.radarFault = True
-        if self.table_freeze is not None:
-          self.table_freeze.reset()
+        ignore_hw_fail = bool(getattr(self, "ignore_hw_fail", False))
+        if nap_conf is not None:
+          try:
+            ignore_hw_fail = bool(nap_conf.radar_ignore_hw_fail)
+          except Exception:
+            pass
+        if not ignore_hw_fail:
+          ret.errors.radarFault = True
+          if self.table_freeze is not None:
+            self.table_freeze.reset()
       if radar_status['RADC_SensorDirty']:
         ret.errors.radarUnavailableTemporary = True
 

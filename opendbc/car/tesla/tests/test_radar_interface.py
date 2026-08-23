@@ -202,3 +202,43 @@ class TestBoschHealth:
     assert _frozen_cycle().errors.radarFault is False
     assert _frozen_cycle().errors.radarFault is False
     assert _frozen_cycle().errors.radarFault is False
+
+  def test_ignore_hw_fail_param_does_not_set_radar_fault(self, monkeypatch):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarFault is False
+    assert result.errors.radarUnavailableTemporary is False
+
+  def test_ignore_hw_fail_leaves_sensor_dirty_temp_unavailable(self, monkeypatch):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SensorDirty"] = 1
+    monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarFault is False
+    assert result.errors.radarUnavailableTemporary is True
+
+  def test_ignore_hw_fail_still_faults_on_frozen_table_with_sgufail(self, monkeypatch):
+    radar = _make_bosch_interface()
+    monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
+    for slot in range(4):
+      radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
+      radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
+
+    def _frozen_cycle():
+      radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+      for slot in range(4):
+        addr = 0x310 + slot * 3
+        radar.rcp.updated_addresses.update((addr, addr + 1))
+      return radar.update([])
+
+    assert _frozen_cycle().errors.radarFault is False
+    assert _frozen_cycle().errors.radarFault is False
+    assert _frozen_cycle().errors.radarFault is True

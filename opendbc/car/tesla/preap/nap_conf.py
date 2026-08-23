@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
   'pedal_calib_zero': 0.0,
   'pedal_calib_factor': 1.0,
   'radar_enabled': False,
+  'radar_ignore_hw_fail': False,
   'radar_behind_nosecone': False,
   'radar_offset': 0.0,
   'radar_donor_vin': '',
@@ -208,6 +209,14 @@ class NAPConf:
   @radar_enabled.setter
   def radar_enabled(self, value):
     self._put_param_bool(NAPParamKeys.RADAR_ENABLED, 'radar_enabled', value)
+
+  @property
+  def radar_ignore_hw_fail(self):
+    return self._get_param_bool(NAPParamKeys.RADAR_IGNORE_HW_FAIL, 'radar_ignore_hw_fail')
+
+  @radar_ignore_hw_fail.setter
+  def radar_ignore_hw_fail(self, value):
+    self._put_param_bool(NAPParamKeys.RADAR_IGNORE_HW_FAIL, 'radar_ignore_hw_fail', value)
 
   @property
   def radar_behind_nosecone(self):
@@ -415,6 +424,7 @@ class NAPConf:
     print("")
     print("  [RADAR]")
     print(f"    Radar Enabled:        {'ON' if self.radar_enabled else 'OFF'}")
+    print(f"    Ignore HWFail:        {'ON' if self.radar_ignore_hw_fail else 'OFF'}")
     print(f"    Behind Nosecone:      {'YES' if self.radar_behind_nosecone else 'NO'}")
     print(f"    Radar Offset:         {self.radar_offset}m")
     print("")
@@ -435,6 +445,7 @@ class NAPConf:
       'pedal_can_bus': self.pedal_can_bus,
       'pedal_can_zero': self.pedal_can_zero,
       'radar_enabled': self.radar_enabled,
+      'radar_ignore_hw_fail': self.radar_ignore_hw_fail,
       'radar_behind_nosecone': self.radar_behind_nosecone,
       'radar_offset': self.radar_offset,
     }
