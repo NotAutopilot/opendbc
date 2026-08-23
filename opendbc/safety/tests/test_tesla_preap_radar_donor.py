@@ -6,7 +6,7 @@ from opendbc.safety.tests.libsafety import libsafety_py
 PREAP_FLAG_RADAR_EMULATION = 2
 
 AWD_VIN = "5YJSA1E42FF156789"  # character 8 is '4'
-RWD_VIN = "5YJSA1E12FF156789"  # character 8 is '1'
+JACK_RWD_VIN = "5YJSA1E25FF106153"  # character 8 is '2' (2015 70 RWD)
 
 
 def _payload(safety, getter):
@@ -40,16 +40,22 @@ class TestTeslaPreAPRadarDonor:
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555310000010")
 
-  def test_awd_vin_sets_four_wheel_drive(self):
+  def test_awd_donor_vin_preserves_rwd_source_config(self):
     _send_donor(self.safety, AWD_VIN, position=1, epas_type=3)
     assert self.safety.tesla_preap_radar_donor_active_debug() is True
 
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
-    # 0x02 | 0x08 = 0x0A, position nibble 1, EPAS 3
-    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4a85555310300010")
+    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555310300010")
 
-  def test_rwd_vin_does_not_force_awd(self):
-    _send_donor(self.safety, RWD_VIN, position=0, epas_type=0)
+  def test_awd_source_config_remains_four_wheel_drive(self):
+    _send_donor(self.safety, AWD_VIN, position=0, epas_type=0)
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0a90555300001700")))
+    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4a95555300001710")
+
+  def test_jack_rwd_vin_char2_does_not_force_awd(self):
+    # Live car VIN. Old heuristic treated char 8=='2' as dual-motor.
+    _send_donor(self.safety, JACK_RWD_VIN, position=0, epas_type=0)
+    assert self.safety.tesla_preap_radar_donor_active_debug() is True
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0290555300001700")))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4295555300001710")
 

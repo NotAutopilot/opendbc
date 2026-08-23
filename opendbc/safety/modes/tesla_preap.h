@@ -301,12 +301,9 @@ static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t
   uint32_t hi = PREAP_GET_BYTES_48(src);
   lo = (lo & 0xFFFFF33F) | 0x100 | 0x440;  // country=US, radar_type=Bosch
   hi = (hi & 0xCFFF0F0F) | 0x10000000 | (preap_radar_position << 4) | (preap_radar_epas_type << 12);
-  // Tinkla 0.6.6: VIN character 8 of '2' or '4' is dual-motor. Force 4WD
-  // on the live 0x2A9 so xWD matches the donor VIN, not this Pre-AP chassis.
-  if (preap_radar_donor_active() && ((preap_radar_vin[7] == (uint8_t)'2') ||
-                                     (preap_radar_vin[7] == (uint8_t)'4'))) {
-    lo |= 0x08U;
-  }
+  // Do not OR Msg2A9_FourWheelDrive from VIN[7]=='2'/'4'. 2015 RWD 5YJSA1E2
+  // has char 8=='2'; forcing 4WD on this chassis sprays Bosch yRel in motion.
+  // Empty-VIN passthrough kept chassis 2WD and was clean. Preserve 0x398 xWD.
   PREAP_WORD_TO_BYTES(&dst->data[0], lo);
   PREAP_WORD_TO_BYTES(&dst->data[4], hi);
 }
