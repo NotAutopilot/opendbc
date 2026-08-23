@@ -217,7 +217,7 @@ class TestBoschHealth:
     assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is True
 
-  def test_ignore_hw_fail_faults_on_frozen_table_with_sgufail(self, monkeypatch):
+  def test_ignore_hw_fail_drops_frozen_sgufail_tracks_without_fault(self, monkeypatch):
     radar = _make_bosch_interface()
     radar.table_freeze = BoschTableFreezeWatch()
     monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
@@ -228,7 +228,23 @@ class TestBoschHealth:
       radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
 
     for _ in range(39):
-      assert _run_frozen_table(radar).errors.radarFault is False  # HWFail is ignored.
+      early = _run_frozen_table(radar)
+      assert early.errors.radarFault is False  # HWFail is ignored; freeze not latched yet.
+    result = _run_frozen_table(radar)
+    assert result.errors.radarFault is False
+    assert len(result.points) == 0
+
+  def test_frozen_sgufail_still_faults_when_ignore_hw_fail_off(self, monkeypatch):
+    radar = _make_bosch_interface()
+    radar.table_freeze = BoschTableFreezeWatch()
+    monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=False))
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
+    for slot in range(4):
+      radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
+      radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
+
+    for _ in range(39):
+      assert _run_frozen_table(radar).errors.radarFault is False
     assert _run_frozen_table(radar).errors.radarFault is True
 
   def test_ignore_hw_fail_is_resolved_live_each_update(self, monkeypatch):
