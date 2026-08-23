@@ -79,6 +79,14 @@ def _run_cycle(radar, *, tracked=True, d_rel=40.0, v_rel=-2.0, slot_updated=True
   return radar.update([])
 
 
+def _run_frozen_table(radar):
+  radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
+  for slot in range(4):
+    addr = 0x310 + slot * 3
+    radar.rcp.updated_addresses.update((addr, addr + 1))
+  return radar.update([])
+
+
 class TestBoschSlotLifecycle:
   def test_one_missing_frame_coasts_as_unmeasured(self):
     radar = _make_bosch_interface()
@@ -175,16 +183,9 @@ class TestBoschHealth:
       radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
       radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
 
-    def _frozen_cycle():
-      radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
-      for slot in range(4):
-        addr = 0x310 + slot * 3
-        radar.rcp.updated_addresses.update((addr, addr + 1))
-      return radar.update([])
-
-    assert _frozen_cycle().errors.radarFault is False
-    assert _frozen_cycle().errors.radarFault is False
-    assert _frozen_cycle().errors.radarFault is True
+    assert _run_frozen_table(radar).errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is True
 
   def test_frozen_table_without_sgufail_is_not_fault(self):
     radar = _make_bosch_interface()
@@ -192,16 +193,9 @@ class TestBoschHealth:
       radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
       radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
 
-    def _frozen_cycle():
-      radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
-      for slot in range(4):
-        addr = 0x310 + slot * 3
-        radar.rcp.updated_addresses.update((addr, addr + 1))
-      return radar.update([])
-
-    assert _frozen_cycle().errors.radarFault is False
-    assert _frozen_cycle().errors.radarFault is False
-    assert _frozen_cycle().errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is False
 
   def test_ignore_hw_fail_param_does_not_set_radar_fault(self, monkeypatch):
     radar = _make_bosch_interface()
@@ -223,7 +217,7 @@ class TestBoschHealth:
     assert result.errors.radarFault is False
     assert result.errors.radarUnavailableTemporary is True
 
-  def test_ignore_hw_fail_still_faults_on_frozen_table_with_sgufail(self, monkeypatch):
+  def test_ignore_hw_fail_does_not_fault_on_frozen_table_with_sgufail(self, monkeypatch):
     radar = _make_bosch_interface()
     monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
     radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
@@ -232,13 +226,62 @@ class TestBoschHealth:
       radar.rcp.vl[f"RadarPoint{slot}_A"] = _point_a(d_rel=10.0 + slot * 5, v_rel=0.0)
       radar.rcp.vl[f"RadarPoint{slot}_B"] = _point_b()
 
-    def _frozen_cycle():
-      radar.rcp.updated_addresses = {BOSCH_TRIGGER_ADDRESS}
-      for slot in range(4):
-        addr = 0x310 + slot * 3
-        radar.rcp.updated_addresses.update((addr, addr + 1))
-      return radar.update([])
+    assert _run_frozen_table(radar).errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is False
+    assert _run_frozen_table(radar).errors.radarFault is False
 
-    assert _frozen_cycle().errors.radarFault is False
-    assert _frozen_cycle().errors.radarFault is False
-    assert _frozen_cycle().errors.radarFault is True
+  def test_ignore_hw_fail_is_resolved_live_each_update(self, monkeypatch):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    ns = SimpleNamespace(radar_ignore_hw_fail=False)
+    monkeypatch.setattr(radar_interface_module, "nap_conf", ns)
+
+    assert _run_cycle(radar).errors.radarFault is True
+    ns.radar_ignore_hw_fail = True
+    assert _run_cycle(radar).errors.radarFault is False
+
+  def test_ignore_hw_fail_file_fallback_when_sources_raise(self, monkeypatch, tmp_path):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    param_file = tmp_path / "NAPRadarIgnoreHwFail"
+    param_file.write_bytes(b"1")
+
+    class _MissingKey:
+      @property
+      def radar_ignore_hw_fail(self):
+        raise AttributeError("unknown key")
+
+    monkeypatch.setattr(radar_interface_module, "nap_conf", _MissingKey())
+    monkeypatch.setattr(
+      radar_interface_module,
+      "_ignore_hw_fail_from_params",
+      lambda: (_ for _ in ()).throw(RuntimeError("params_pyx")),
+    )
+    monkeypatch.setattr(radar_interface_module, "IGNORE_HW_FAIL_PATH", str(param_file))
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarFault is False
+
+  def test_ignore_hw_fail_file_zero_does_not_ignore(self, monkeypatch, tmp_path):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    param_file = tmp_path / "NAPRadarIgnoreHwFail"
+    param_file.write_bytes(b"0")
+
+    class _MissingKey:
+      @property
+      def radar_ignore_hw_fail(self):
+        raise AttributeError("unknown key")
+
+    monkeypatch.setattr(radar_interface_module, "nap_conf", _MissingKey())
+    monkeypatch.setattr(
+      radar_interface_module,
+      "_ignore_hw_fail_from_params",
+      lambda: (_ for _ in ()).throw(RuntimeError("params_pyx")),
+    )
+    monkeypatch.setattr(radar_interface_module, "IGNORE_HW_FAIL_PATH", str(param_file))
+
+    result = _run_cycle(radar)
+
+    assert result.errors.radarFault is True
