@@ -301,9 +301,18 @@ static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t
   uint32_t hi = PREAP_GET_BYTES_48(src);
   lo = (lo & 0xFFFFF33F) | 0x100 | 0x440;  // country=US, radar_type=Bosch
   hi = (hi & 0xCFFF0F0F) | 0x10000000 | (preap_radar_position << 4) | (preap_radar_epas_type << 12);
-  // Do not OR Msg2A9_FourWheelDrive from VIN[7]=='2'/'4'. 2015 RWD 5YJSA1E2
-  // has char 8=='2'; forcing 4WD on this chassis sprays Bosch yRel in motion.
-  // Empty-VIN passthrough kept chassis 2WD and was clean. Preserve 0x398 xWD.
+  // Bosch xWD checks 0x2A9 against the VIN on 0x2B9, not chassis 0x398.
+  // Tesla char 8 '2'/'4' is dual motor. This car VIN 5YJSA1E25FF106153 is
+  // '2'; GTW still declares 2WD. Honest 2WD then latches xwdValidity and
+  // freezes the object table (~12 s). Tinkla 0.6.6 ORed 4WD from that char.
+  // Routes 8/9 with the OR kept a live table. Empty donor leaves 0x398 xWD
+  // (old A, char 8 '1', 2WD, rock-solid).
+  if (preap_radar_donor_active()) {
+    const uint8_t drive = preap_radar_vin[7];
+    if ((drive == (uint8_t)'2') || (drive == (uint8_t)'4')) {
+      lo |= 0x08U;
+    }
+  }
   PREAP_WORD_TO_BYTES(&dst->data[0], lo);
   PREAP_WORD_TO_BYTES(&dst->data[4], hi);
 }

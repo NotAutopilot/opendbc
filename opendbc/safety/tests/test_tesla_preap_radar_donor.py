@@ -6,7 +6,8 @@ from opendbc.safety.tests.libsafety import libsafety_py
 PREAP_FLAG_RADAR_EMULATION = 2
 
 AWD_VIN = "5YJSA1E42FF156789"  # character 8 is '4'
-JACK_RWD_VIN = "5YJSA1E25FF106153"  # character 8 is '2' (2015 70 RWD)
+JACK_RWD_VIN = "5YJSA1E25FF106153"  # character 8 is '2' (Tesla dual-motor)
+OLD_A_RWD_VIN = "5YJSA1H13EFP20460"  # character 8 is '1' (old A daily lock)
 
 
 def _payload(safety, getter):
@@ -40,21 +41,29 @@ class TestTeslaPreAPRadarDonor:
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555310000010")
 
-  def test_awd_donor_vin_preserves_rwd_source_config(self):
+  def test_awd_donor_vin_sets_4wd_to_match_vin_char(self):
     _send_donor(self.safety, AWD_VIN, position=1, epas_type=3)
     assert self.safety.tesla_preap_radar_donor_active_debug() is True
 
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
-    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555310300010")
+    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4a85555310300010")
 
   def test_awd_source_config_remains_four_wheel_drive(self):
     _send_donor(self.safety, AWD_VIN, position=0, epas_type=0)
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0a90555300001700")))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4a95555300001710")
 
-  def test_jack_rwd_vin_char2_does_not_force_awd(self):
-    # Live car VIN. Old heuristic treated char 8=='2' as dual-motor.
+  def test_this_car_vin_char2_sets_4wd_matching_tinkla(self):
+    # 5YJSA1E25FF106153 char 8 is '2' (Tesla dual-motor encoding). Honest
+    # chassis 2WD against that VIN is the 1d/11/14/15 freeze (xwdValidity).
     _send_donor(self.safety, JACK_RWD_VIN, position=0, epas_type=0)
+    assert self.safety.tesla_preap_radar_donor_active_debug() is True
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0290555300001700")))
+    assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4a95555300001710")
+
+  def test_rwd_single_motor_vin_preserves_chassis_2wd(self):
+    # Old A daily lock: char 8 '1', empty-style 2WD declaration.
+    _send_donor(self.safety, OLD_A_RWD_VIN, position=0, epas_type=0)
     assert self.safety.tesla_preap_radar_donor_active_debug() is True
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0290555300001700")))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4295555300001710")
