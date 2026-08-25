@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from opendbc.car.structs import CarParams
+from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.safety import DLC_TO_LEN
 from opendbc.safety.tests.libsafety import libsafety_py
 
@@ -31,6 +32,9 @@ class TestTeslaPreAPRadarCarConfig:
     assert not self.safety.tesla_preap_radar_car_config_captured()
 
     self._set_safety_hooks(True)
+    for fragment in range(3):
+      _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, "", True, 0, 0)
+      self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
     for source_data, expected_data in test_cases:
       source = libsafety_py.make_CANPacket(0x398, 0, source_data)
       self.safety.safety_rx_hook(source)
