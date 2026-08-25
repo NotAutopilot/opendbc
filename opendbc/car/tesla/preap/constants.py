@@ -2,6 +2,12 @@
 # Never consult Params or /data/nap_params.json for this value.
 STALK_DOUBLE_PULL_MS = 400
 
+# Tagged CarState DI generation: exact source nanoseconds plus an 8-bit same-time ordinal.
+# Values above UInt32 are CarState-originated; synthetic unit-test gens stay in UInt32.
+DI_GENERATION_ORDINAL_BITS = 8
+DI_GENERATION_ORDINAL_LIMIT = 1 << DI_GENERATION_ORDINAL_BITS
+DI_GENERATION_ABSOLUTE_BASE = 1 << 64
+
 # Stock-CC 0x45 cadence. 100 Hz controller, one TX slot every 10 frames.
 STOCK_CC_TX_PERIOD_FRAMES = 10
 STOCK_CC_CANCEL_DELAY_FRAMES = 10
@@ -11,6 +17,9 @@ STOCK_CC_SPOOF_ECHO_MS = 300
 STOCK_CC_CONFIRM_MS = 500
 STOCK_CC_TX_TIMEOUT_MS = 200
 STOCK_CC_SECOND_PULL_TIMEOUT_MS = 2000
+# Panda revokes confirmed stock-CC authorization immediately. This bounds the
+# host-only fallback when its panda state has not yet arrived.
+STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS = 100
 
 # DI_pedalPos threshold used for gasPressed on Pre-AP.
 PEDAL_DI_PRESSED = 2

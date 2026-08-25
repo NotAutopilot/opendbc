@@ -1,8 +1,11 @@
 import unittest
+from unittest.mock import patch
 
 from opendbc.car import gen_empty_fingerprint, structs
+from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.preap.constants import PREAP_FLAG_ENABLE_PEDAL
 from opendbc.car.tesla.interface import CarInterface
+from opendbc.car.tesla.preap.teslacan import EPAS_ADDR, STEERING_ADDR
 from opendbc.car.tesla.radar_interface import RadarInterface
 from opendbc.car.tesla.values import CAR
 from opendbc.car.honda.interface import CarInterface as HondaInterface
@@ -53,14 +56,43 @@ class TestPreAPContainment(unittest.TestCase):
     CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
     CI = CarInterface(CP, CP_SP)
     self.assertEqual(CP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.tesla)
+    self.assertFalse(CI.v_ego_cluster_seen)
     self.assertIsNotNone(CI.CC)
     pCP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
     pSP = CarInterface.get_params_sp(pCP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
     pCI = CarInterface(pCP, pSP)
+    self.assertTrue(pCI._preap_platform)
+    self.assertTrue(pCI.v_ego_cluster_seen)
     pCI.update([])
     _act, pmsgs = pCI.apply(structs.CarControl(), structs.CarControlSP(), now_nanos=0)
-    self.assertEqual(pmsgs, [])
+    self.assertEqual([msg[0] for msg in pmsgs], [STEERING_ADDR, EPAS_ADDR])
+    self.assertEqual((pmsgs[0][1][2] >> 6) & 0x3, 0)
+    self.assertEqual(pmsgs[1][1][0] & 0x7, 0)
     self.assertEqual(pCP.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.teslaPreap)
+
+  def test_only_preap_sorts_can_packet_groups_by_monotime(self):
+    packets = [(3, []), (1, []), (3, []), (2, [])]
+    expected_preap = [packets[1], packets[3], packets[0], packets[2]]
+    return_value = (structs.CarState(), structs.CarStateSP())
+
+    pCP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+    pSP = CarInterface.get_params_sp(pCP, CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)
+    pCI = CarInterface(pCP, pSP)
+    with patch.object(CarInterfaceBase, "update", autospec=True, return_value=return_value) as base_update:
+      pCI.update(packets)
+      preap_packets = base_update.call_args.args[1]
+    self.assertEqual(preap_packets, expected_preap)
+    self.assertIs(preap_packets[2], packets[0])
+    self.assertIs(preap_packets[3], packets[2])
+
+    CP = CarInterface.get_params(CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.TESLA_MODEL_3, gen_empty_fingerprint(), [], False, False, False)
+    CI = CarInterface(CP, CP_SP)
+    self.assertFalse(CI._preap_platform)
+    with patch.object(CarInterfaceBase, "update", autospec=True, return_value=return_value) as base_update:
+      CI.update(packets)
+      modern_packets = base_update.call_args.args[1]
+    self.assertIs(modern_packets, packets)
 
   def test_preap_radar_interface_does_not_tx(self):
     CP = CarInterface.get_params(CAR.TESLA_MODEL_S_PREAP, gen_empty_fingerprint(), [], False, False, False)

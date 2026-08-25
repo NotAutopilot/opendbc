@@ -82,9 +82,14 @@ static bool preap_stock_cc_cancel_sent = false;
 static uint32_t preap_stock_cc_cancel_sent_ts = 0U;
 static bool preap_stock_cc_post_cancel_di = false;
 static bool preap_stock_cc_pull2_latched = false;
+static uint32_t preap_stock_cc_pull2_ts = 0U;
 static bool preap_stock_cc_awaiting_di_rise = false;
 static uint8_t preap_stock_cc_expected_counter = 0U;
 static bool preap_stock_cc_di_engaged = false;
+static uint32_t preap_stock_cc_di_ts = 0U;
+static bool preap_stock_cc_di_seen = false;
+static bool preap_stock_cc_di_prior_engaged = false;
+static bool preap_stock_cc_di_prior_valid = false;
 static uint8_t preap_live_stw[8] = {0};
 static bool preap_live_stw_valid = false;
 static bool preap_echo_active = false;
@@ -126,9 +131,25 @@ static void tesla_preap_clear_stock_cc_tx_state(void) {
   preap_stock_cc_cancel_sent_ts = 0U;
   preap_stock_cc_post_cancel_di = false;
   preap_stock_cc_pull2_latched = false;
+  preap_stock_cc_pull2_ts = 0U;
   preap_stock_cc_awaiting_di_rise = false;
   preap_stock_cc_expected_counter = 0U;
   preap_echo_active = false;
+}
+
+static void tesla_preap_retire_confirmed_stock_cc_handshake(void) {
+  preap_stock_cc_reengage_authorized = false;
+  preap_stock_cc_reengage_sent = false;
+  preap_stock_cc_deadline_ts = 0U;
+  preap_stock_cc_cancel_authorized = false;
+  preap_stock_cc_cancel_sent = false;
+  preap_stock_cc_cancel_sent_ts = 0U;
+  preap_stock_cc_post_cancel_di = false;
+  preap_stock_cc_pull2_latched = false;
+  preap_stock_cc_pull2_ts = 0U;
+  preap_stock_cc_awaiting_di_rise = false;
+  preap_stock_cc_expected_counter = 0U;
+  // Keep preap_echo_active: the just-sent SET may still return on the bus.
 }
 
 static bool tesla_preap_cancel_window_open(uint32_t now) {
@@ -550,6 +571,16 @@ void tesla_preap_observe_can(const CANPacket_t *msg) {
 }
 #endif
 
+static bool tesla_preap_stock_cc_off_before_pull(uint32_t now) {
+  if (preap_stock_cc_di_ts != now) {
+    return !preap_stock_cc_di_engaged;
+  }
+  if (preap_stock_cc_di_engaged) {
+    return false;
+  }
+  return preap_stock_cc_di_prior_valid && !preap_stock_cc_di_prior_engaged;
+}
+
 static void tesla_preap_process_first_pull(uint32_t now) {
   if (controls_allowed) {
     controls_allowed = false;
@@ -569,6 +600,7 @@ static void tesla_preap_process_first_pull(uint32_t now) {
     preap_stock_cc_cancel_sent_ts = 0U;
     preap_stock_cc_post_cancel_di = false;
     preap_stock_cc_pull2_latched = false;
+    preap_stock_cc_pull2_ts = 0U;
     preap_stock_cc_awaiting_di_rise = false;
     preap_stock_cc_expected_counter = 0U;
     preap_stock_cc_reengage_authorized = false;
@@ -594,11 +626,10 @@ static void tesla_preap_process_second_pull(uint32_t now) {
         tesla_preap_request_lateral();
       }
     } else {
-      preap_stock_cc_pull2_latched = true;
-      stock_cc_reengage_confirmed = false;
-      if (preap_stock_cc_cancel_sent && preap_stock_cc_post_cancel_di) {
-        preap_stock_cc_reengage_authorized = true;
-        preap_stock_cc_deadline_ts = now;
+      if (tesla_preap_stock_cc_off_before_pull(now)) {
+        preap_stock_cc_pull2_latched = true;
+        preap_stock_cc_pull2_ts = now;
+        stock_cc_reengage_confirmed = false;
       }
     }
   } else {
@@ -771,24 +802,42 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
                                     (cruise_state == 6U) || (cruise_state == 7U);
         const bool cruise_rising = cruise_engaged && !preap_stock_cc_di_engaged;
         const bool cruise_falling = !cruise_engaged && preap_stock_cc_di_engaged;
+        if (preap_stock_cc_di_seen && (now != preap_stock_cc_di_ts)) {
+          preap_stock_cc_di_prior_engaged = preap_stock_cc_di_engaged;
+          preap_stock_cc_di_prior_valid = true;
+        }
         preap_stock_cc_di_engaged = cruise_engaged;
+        preap_stock_cc_di_ts = now;
+        preap_stock_cc_di_seen = true;
         const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
         const uint32_t cancel_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_cancel_sent_ts);
         const bool sources_ready = tesla_preap_required_sources_ready(now);
         if (!preap_enable_pedal) {
           if (stock_cc_reengage_confirmed && cruise_falling) {
             tesla_preap_revoke_stock_cc_longitudinal();
+          } else if (preap_stock_cc_cancel_sent && preap_stock_cc_post_cancel_di && cruise_engaged &&
+                     !preap_stock_cc_reengage_sent) {
+            if (preap_stock_cc_pull2_latched || preap_stock_cc_reengage_authorized) {
+              tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
+            } else {
+              // A post-CANCEL OFF sample is no longer current. Do not let it
+              // authorize a later SET after cruise has re-engaged.
+              preap_stock_cc_post_cancel_di = false;
+              preap_stock_cc_reengage_authorized = false;
+            }
           } else if (preap_stock_cc_cancel_sent && !cruise_engaged && !preap_stock_cc_post_cancel_di) {
             if (cancel_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
               tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
             } else {
               preap_stock_cc_post_cancel_di = true;
-              if (preap_stock_cc_pull2_latched && !preap_stock_cc_reengage_authorized) {
-                preap_stock_cc_reengage_authorized = true;
-                preap_stock_cc_deadline_ts = now;
-              }
             }
           } else {
+          }
+          if (preap_stock_cc_cancel_sent && !cruise_engaged && preap_stock_cc_post_cancel_di &&
+              preap_stock_cc_pull2_latched && !preap_stock_cc_reengage_authorized &&
+              (safety_get_ts_elapsed(now, preap_stock_cc_pull2_ts) > 0U)) {
+            preap_stock_cc_reengage_authorized = true;
+            preap_stock_cc_deadline_ts = now;
           }
           if (preap_stock_cc_reengage_sent) {
             if ((confirmation_elapsed < PREAP_STOCK_CC_CONFIRM_US) && cruise_rising && sources_ready &&
@@ -796,8 +845,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
               controls_allowed = true;
               stock_cc_reengage_confirmed = true;
               stock_cc_reengage_counter = preap_stock_cc_expected_counter;
-              preap_stock_cc_reengage_sent = false;
-              preap_stock_cc_awaiting_di_rise = false;
+              tesla_preap_retire_confirmed_stock_cc_handshake();
               if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
                 tesla_preap_request_lateral();
               }
@@ -824,11 +872,11 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
           } else {
           }
         }
-        preap_stalk_counter_seen = true;
-        preap_stalk_counter_last = counter;
         if (is_echo) {
-          // Echo of authorized TX advances the counter without becoming a pull or cancel.
+          // Authorized TX echoes do not participate in the physical stalk sequence.
         } else {
+          preap_stalk_counter_seen = true;
+          preap_stalk_counter_last = counter;
           for (int i = 0; i < 8; i++) {
             preap_live_stw[i] = msg->data[i];
           }
@@ -1058,7 +1106,6 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
         tesla_preap_stock_cc_tuple_ok(msg, 1U)) {
       preap_stock_cc_cancel_sent = true;
       preap_stock_cc_cancel_sent_ts = now;
-      preap_stalk_counter_last = counter;
       tesla_preap_mark_echo(1U, counter, PREAP_CANCEL_ECHO_US);
       allowed = true;
     } else if ((lever == 16U) && preap_stock_cc_reengage_authorized &&
@@ -1069,7 +1116,6 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       preap_stock_cc_reengage_sent = true;
       preap_stock_cc_awaiting_di_rise = true;
       preap_stock_cc_expected_counter = (uint8_t)((stock_cc_reengage_counter + 1U) & 0xFFU);
-      preap_stalk_counter_last = counter;
       preap_stock_cc_deadline_ts = now;
       tesla_preap_mark_echo(16U, counter, PREAP_SPOOF_ECHO_US);
       allowed = true;
@@ -1170,6 +1216,10 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_stalk_counter_last = 0U;
   preap_live_stw_valid = false;
   preap_stock_cc_di_engaged = false;
+  preap_stock_cc_di_ts = 0U;
+  preap_stock_cc_di_seen = false;
+  preap_stock_cc_di_prior_engaged = false;
+  preap_stock_cc_di_prior_valid = false;
   tesla_preap_clear_pull_state();
 
   safety_config ret = {

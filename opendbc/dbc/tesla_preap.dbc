@@ -235,10 +235,11 @@ BO_ 872 DI_state: 8 XXX
  SG_ DI_regenLight : 8|1@1+ (1,0) [0|0] ""  XXX
  SG_ DI_state : 9|3@1+ (1,0) [0|0] ""  XXX
  SG_ DI_cruiseState : 12|4@1+ (1,0) [0|0] ""  XXX
- SG_ DI_analogSpeed : 16|12@1+ (0.1,0) [0|150] "speed"  XXX
+ SG_ DI_analogSpeed : 16|12@1+ (0.1,0) [0|250] "speed"  XXX
  SG_ DI_immobilizerState : 28|3@1+ (1,0) [0|0] ""  XXX
  SG_ DI_speedUnits : 31|1@1+ (1,0) [0|1] ""  XXX
  SG_ DI_cruiseSet : 32|9@1+ (0.5,0) [0|255.5] "speed"  XXX
+ SG_ DI_digitalSpeedPost2019 : 32|8@1+ (1,0) [0|250] ""  XXX
  SG_ DI_aebState : 41|3@1+ (1,0) [0|0] ""  XXX
  SG_ DI_stateCounter : 44|4@1+ (1,0) [0|0] ""  XXX
  SG_ DI_digitalSpeed : 48|8@1+ (1,0) [0|250] ""  XXX
@@ -1047,6 +1048,7 @@ VAL_ 872 DI_aebState 2 "ENABLED" 4 "FAULT" 7 "SNA" 1 "STANDBY" 3 "STANDSTILL" 0 
 VAL_ 872 DI_analogSpeed 4095 "SNA" ;
 VAL_ 872 DI_cruiseState 2 "ENABLED" 5 "FAULT" 0 "OFF" 4 "OVERRIDE" 7 "PRE_CANCEL" 6 "PRE_FAULT" 1 "STANDBY" 3 "STANDSTILL" ;
 VAL_ 872 DI_digitalSpeed 255 "SNA" ;
+VAL_ 872 DI_digitalSpeedPost2019 255 "SNA" ;
 VAL_ 872 DI_immobilizerState 2 "AUTHENTICATING" 3 "DISARMED" 6 "FAULT" 4 "IDLE" 0 "INIT_SNA" 1 "REQUEST" 5 "RESET" ;
 VAL_ 872 DI_speedUnits 1 "KPH" 0 "MPH" ;
 VAL_ 872 DI_state 3 "ABORT" 4 "ENABLE" 2 "FAULT" 1 "STANDBY" 0 "UNAVAILABLE" ;

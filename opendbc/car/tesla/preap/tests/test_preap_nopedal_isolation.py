@@ -3,7 +3,7 @@ import unittest
 from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.preap.boot import apply_preap_hardware_snapshot, hardware_snapshot_from_values
-from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
+from opendbc.car.tesla.preap.teslacan import BODY_ADDR, EPAS_ADDR, STEERING_ADDR, TeslaCANPreAP
 from opendbc.car.tesla.values import CANBUS, CAR, CruiseButtons
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 
@@ -59,6 +59,18 @@ def _assert_no_pedal_vdas_or_main(test, msgs):
       test.assertIn(lever, (CANCEL, SET_ACCEL))
 
 
+def _assert_disabled_lateral(test, msgs):
+  steering = [dat for addr, dat, _bus in msgs if addr == STEERING_ADDR]
+  epas = [dat for addr, dat, _bus in msgs if addr == EPAS_ADDR]
+  test.assertTrue(steering)
+  test.assertEqual(len(steering), len(epas))
+  test.assertNotIn(BODY_ADDR, {msg[0] for msg in msgs})
+  for steering_dat, epas_dat in zip(steering, epas, strict=True):
+    test.assertEqual((steering_dat[2] >> 6) & 0x3, 0)
+    test.assertEqual(epas_dat[0] & 0x7, 0)
+    test.assertEqual(steering_dat[2] & 0xF, epas_dat[1] & 0xF)
+
+
 class TestPreAPNoPedalIsolation(unittest.TestCase):
   def test_openpilot_longitudinal_false_without_pedal_even_with_stale_calib(self):
     CP, _CP_SP, CI = _preap()
@@ -81,7 +93,7 @@ class TestPreAPNoPedalIsolation(unittest.TestCase):
     self.assertFalse(bool(stale.pedal_present))
     self.assertFalse(bool(stale.pedal_calib_available))
 
-  def test_controller_never_emits_pedal_vdas_or_main(self):
+  def test_no_pedal_inactive_emits_disabled_lateral_without_pedal_vdas_or_main(self):
     _CP, _CP_SP, CI = _preap()
     CI.update([])
     CI.CS.stock_cc.update_health(blocked=False)
@@ -90,18 +102,20 @@ class TestPreAPNoPedalIsolation(unittest.TestCase):
     CI.CS.stock_cc.update_stalk(2, 1, 0)
     seen = _collect_apply(CI)
     _assert_no_pedal_vdas_or_main(self, seen)
+    _assert_disabled_lateral(self, seen)
     self.assertTrue(any(addr == STW_ADDR for addr, _dat, _bus in seen))
-    self.assertNotIn(0x214, {msg[0] for msg in seen})
-    self.assertNotIn(0x488, {msg[0] for msg in seen})
+    self.assertTrue({msg[0] for msg in seen} <= {STEERING_ADDR, EPAS_ADDR, STW_ADDR})
 
-  def test_pedal_present_controller_still_never_emits_host_551_or_main(self):
+  def test_pedal_present_inactive_emits_only_disabled_lateral(self):
     _CP, _CP_SP, CI = _preap(_pedal_snapshot())
     self.assertTrue(_CP.openpilotLongitudinalControl)
     self.assertFalse(CI.CS.stock_cc.active)
     CI.update([])
     seen = _collect_apply(CI)
     _assert_no_pedal_vdas_or_main(self, seen)
+    _assert_disabled_lateral(self, seen)
     self.assertFalse(any(addr == STW_ADDR for addr, _dat, _bus in seen))
+    self.assertEqual({msg[0] for msg in seen}, {STEERING_ADDR, EPAS_ADDR})
 
   def test_no_pedal_never_constructs_vdas_or_long_controller(self):
     CP, CP_SP, CI = _preap()

@@ -134,6 +134,8 @@ class CANParser:
     self.vl: dict[int | str, dict[str, float]] = VLDict(self)
     self.vl_all: dict[int | str, dict[str, list[float]]] = {}
     self.ts_nanos: dict[int | str, dict[str, int]] = {}
+    self.ts_nanos_all: dict[int | str, dict[str, list[int]]] = {}
+    self.source_order_all: dict[int | str, dict[str, list[int]]] = {}
     self.addresses: set[int] = set()
     self.message_states: dict[int, MessageState] = {}
 
@@ -170,6 +172,10 @@ class CANParser:
     self.vl_all[msg.name] = self.vl_all[msg.address]
     self.ts_nanos[msg.address] = {s: 0 for s in signal_names}
     self.ts_nanos[msg.name] = self.ts_nanos[msg.address]
+    self.ts_nanos_all[msg.address] = defaultdict(list)
+    self.ts_nanos_all[msg.name] = self.ts_nanos_all[msg.address]
+    self.source_order_all[msg.address] = defaultdict(list)
+    self.source_order_all[msg.name] = self.source_order_all[msg.address]
 
     state = MessageState(
       address=msg.address,
@@ -220,13 +226,20 @@ class CANParser:
     for addr in self.addresses:
       for k in self.vl_all[addr]:
         self.vl_all[addr][k].clear()
+      for timestamps in self.ts_nanos_all[addr].values():
+        timestamps.clear()
+      for source_orders in self.source_order_all[addr].values():
+        source_orders.clear()
 
     updated_addrs: set[int] = set()
+    source_order = 0
     for entry in strings:
       t = entry[0]
       frames = entry[1]
       bus_empty = True
       for address, dat, src in frames:
+        frame_source_order = source_order
+        source_order += 1
         if src != self.bus:
           continue
         bus_empty = False
@@ -239,11 +252,15 @@ class CANParser:
           vl_addr = self.vl[address]
           vl_all_addr = self.vl_all[address]
           ts_addr = self.ts_nanos[address]
+          ts_all_addr = self.ts_nanos_all[address]
+          source_order_all_addr = self.source_order_all[address]
 
           for i, sig in enumerate(state.signals):
             vl_addr[sig.name] = state.vals[i]
             vl_all_addr[sig.name] = state.all_vals[i]
             ts_addr[sig.name] = state.timestamps[-1]
+            ts_all_addr[sig.name].append(t)
+            source_order_all_addr[sig.name].append(frame_source_order)
 
       if not bus_empty:
         self.last_nonempty_nanos = t

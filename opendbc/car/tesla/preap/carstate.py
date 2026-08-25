@@ -1,16 +1,20 @@
 """Read-only Pre-AP CarState. No Params, no engagement owner, no actuation."""
 from __future__ import annotations
 
+from enum import IntEnum
 import time
 
 from opendbc.can import CANDefine, CANParser
 from opendbc.can.parser import CAN_INVALID_CNT
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp, pedal_calib_from_cp_sp, pedal_pipeline_enabled
-from opendbc.car.tesla.preap.constants import PEDAL_DI_PRESSED, PEDAL_FEEDBACK_TIMEOUT_STATE, PREAP_MODE_INVALID, PREAP_MODE_MASK
+from opendbc.car.tesla.preap.constants import (
+  DI_GENERATION_ABSOLUTE_BASE, DI_GENERATION_ORDINAL_BITS, DI_GENERATION_ORDINAL_LIMIT,
+  PEDAL_DI_PRESSED, PEDAL_FEEDBACK_TIMEOUT_STATE, PREAP_MODE_INVALID, PREAP_MODE_MASK,
+)
 from opendbc.car.tesla.preap.intent import PreAPIntentTranslator
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
 from opendbc.car.tesla.preap.stock_cc import StockCcState, StockCcTransaction
@@ -22,6 +26,41 @@ _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "D
 REQUIRED_SOURCE_KEYS = ("DI_torque2", "GTW_carState", "EPAS_sysStatus", "BrakeMessage")
 REQUIRED_SOURCE_MAX_AGE_NS = 1_000_000_000
 ESP_B_ADDR = 0x155
+DI_DIGITAL_SPEED_MAX = 250.0
+DI_ANALOG_SPEED_MAX_MPH = 150.0
+DI_ANALOG_SPEED_MAX_KPH = DI_DIGITAL_SPEED_MAX
+DISPLAY_SPEED_ROUNDING_TOLERANCE = 1.0
+DI_STATE_SPEED_MAX_AGE_NS = 250_000_000
+DI_CRUISE_ENABLED_STATES = ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
+
+
+class _DIStateSpeedLayout(IntEnum):
+  unknown = 0
+  post2019 = 1
+  legacy = 2
+
+
+@dataclass(frozen=True)
+class _DIStateSpeedValues:
+  speed_units_code: int
+  analog_speed: float
+  modern_speed: float
+  legacy_speed: float
+
+
+@dataclass(frozen=True)
+class _DIStateSpeedSample(_DIStateSpeedValues):
+  timestamp_ns: int
+  source_order: int = field(compare=False, hash=False)
+  cruise_state_code: int
+  state_counter: int
+
+
+@dataclass(frozen=True)
+class _StwSample:
+  timestamp_ns: int
+  source_order: int
+  values: dict[str, int]
 
 
 def _esp_b_quality_valid(cp) -> bool:
@@ -37,6 +76,105 @@ def _reject_esp_b(cp) -> None:
   if state is not None:
     state.timestamps.clear()
   cp.can_invalid_cnt = CAN_INVALID_CNT
+
+
+def _digital_speed_valid(digital_speed: float) -> bool:
+  return 0.0 <= digital_speed <= DI_DIGITAL_SPEED_MAX
+
+
+def _digital_speed_coherent(digital_speed: float, analog_speed: float) -> bool:
+  return _digital_speed_valid(digital_speed) and abs(digital_speed - analog_speed) <= DISPLAY_SPEED_ROUNDING_TOLERANCE
+
+
+def _di_state_speed_fresh(di_timestamp: int, bus_clock_ns: int) -> bool:
+  age_ns = bus_clock_ns - di_timestamp
+  return di_timestamp > 0 and 0 <= age_ns <= DI_STATE_SPEED_MAX_AGE_NS
+
+
+def _parser_bus_clock_ns(cp) -> int:
+  # last_nonempty_nanos follows input order; valid message histories preserve
+  # a newer timestamp that appeared earlier in an out-of-order parser update.
+  latest_valid_timestamp = max(
+    (max(state.timestamps, default=0) for state in cp.message_states.values()),
+    default=0,
+  )
+  latest_update_timestamp = int(getattr(cp, "_last_update_nanos", 0))
+  return max(cp.last_nonempty_nanos, latest_valid_timestamp, latest_update_timestamp)
+
+
+def _di_state_speed_samples(cp) -> tuple[_DIStateSpeedSample, ...]:
+  signal_names = (
+    "DI_speedUnits", "DI_analogSpeed", "DI_digitalSpeedPost2019", "DI_digitalSpeed",
+    "DI_cruiseState", "DI_stateCounter",
+  )
+  value_batch = cp.vl_all.get("DI_state", {})
+  timestamp_batch = cp.ts_nanos_all.get("DI_state", {})
+  source_order_batch = cp.source_order_all.get("DI_state", {})
+  signal_values = [value_batch.get(name, ()) for name in signal_names]
+  signal_timestamps = [timestamp_batch.get(name, ()) for name in signal_names]
+  signal_source_orders = [source_order_batch.get(name, ()) for name in signal_names]
+  batch_size = len(signal_values[0])
+  if (
+    batch_size == 0 or
+    any(len(values) != batch_size for values in signal_values[1:]) or
+    any(len(timestamps) != batch_size for timestamps in signal_timestamps) or
+    any(timestamps != signal_timestamps[0] for timestamps in signal_timestamps[1:]) or
+    any(len(source_orders) != batch_size for source_orders in signal_source_orders) or
+    any(source_orders != signal_source_orders[0] for source_orders in signal_source_orders[1:])
+  ):
+    return ()
+  return tuple(
+    _DIStateSpeedSample(
+      timestamp_ns=signal_timestamps[0][index],
+      source_order=signal_source_orders[0][index],
+      speed_units_code=int(signal_values[0][index]),
+      analog_speed=signal_values[1][index],
+      modern_speed=signal_values[2][index],
+      legacy_speed=signal_values[3][index],
+      cruise_state_code=int(signal_values[4][index]),
+      state_counter=int(signal_values[5][index]),
+    )
+    for index in range(batch_size)
+  )
+
+
+def _di_generation(timestamp_ns: int, ordinal: int) -> int:
+  """Stable tagged DI freshness token: exact source time plus arrival ordinal.
+
+  The base tags CarState-originated tokens above UInt32 synthetic test values.
+  Exact nanoseconds prevent the old half-range outage, and the low eight bits
+  retain up to 256 unique same-time samples without source-time quantization.
+  """
+  return DI_GENERATION_ABSOLUTE_BASE + (timestamp_ns << DI_GENERATION_ORDINAL_BITS) + ordinal
+
+
+def _stw_samples(cp) -> tuple[_StwSample, ...]:
+  signal_names = ("SpdCtrlLvr_Stat", "MC_STW_ACTN_RQ", *STW_DEFAULTS)
+  value_batch = cp.vl_all.get("STW_ACTN_RQ", {})
+  timestamp_batch = cp.ts_nanos_all.get("STW_ACTN_RQ", {})
+  source_order_batch = cp.source_order_all.get("STW_ACTN_RQ", {})
+  signal_values = [value_batch.get(name, ()) for name in signal_names]
+  signal_timestamps = [timestamp_batch.get(name, ()) for name in signal_names]
+  signal_source_orders = [source_order_batch.get(name, ()) for name in signal_names]
+  batch_size = len(signal_values[0])
+  if (
+    batch_size == 0 or
+    any(len(values) != batch_size for values in signal_values[1:]) or
+    any(len(timestamps) != batch_size for timestamps in signal_timestamps) or
+    any(timestamps != signal_timestamps[0] for timestamps in signal_timestamps[1:]) or
+    any(len(source_orders) != batch_size for source_orders in signal_source_orders) or
+    any(source_orders != signal_source_orders[0] for source_orders in signal_source_orders[1:])
+  ):
+    return ()
+
+  return tuple(
+    _StwSample(
+      timestamp_ns=signal_timestamps[0][index],
+      source_order=signal_source_orders[0][index],
+      values={name: int(values[index]) for name, values in zip(signal_names, signal_values, strict=True)},
+    )
+    for index in range(batch_size)
+  )
 
 
 @dataclass
@@ -80,8 +218,14 @@ class PreAPCarState(CarStateBase):
     self.stock_cc = StockCcTransaction(active=not bool(CP.openpilotLongitudinalControl))
     self.intent.stock_cc_active = self.stock_cc.active
     self.stock_cc_now_ms = 0
-    self._di_parser_ts = 0
     self._di_generation = 0
+    self._di_speed_layout = _DIStateSpeedLayout.unknown
+    self._di_speed_layout_evidence_ts: int | None = None
+    self._di_layout_evidence_samples: set[_DIStateSpeedSample] = set()
+    self._di_speed_sample: _DIStateSpeedSample | None = None
+    self._di_samples_at_timestamp: set[_DIStateSpeedSample] = set()
+    self._di_cluster_speed_ms: float | None = None
+    self._di_bus_clock_ns = 0
     self._last_ret_sp = None
     self._gear_seen = False
     self._doors_seen = False
@@ -107,6 +251,106 @@ class PreAPCarState(CarStateBase):
     self.pedal_command_di = 0.0
     self.pedal_brake_required = False
     self.vdas_limited_accel = 0.0
+
+  def _speed_unit_context(self, speed_units_code: int) -> tuple[str | None, float | None, float | None]:
+    speed_units = self.can_defines["DI_state"]["DI_speedUnits"].get(speed_units_code, None)
+    if speed_units == "KPH":
+      return speed_units, DI_ANALOG_SPEED_MAX_KPH, CV.KPH_TO_MS
+    if speed_units == "MPH":
+      return speed_units, DI_ANALOG_SPEED_MAX_MPH, CV.MPH_TO_MS
+    return None, None, None
+
+  def _di_speed_layout_evidence(self, sample: _DIStateSpeedSample) -> _DIStateSpeedLayout | None:
+    _speed_units, analog_speed_max, _speed_to_ms = self._speed_unit_context(sample.speed_units_code)
+    if analog_speed_max is None or not 0.0 <= sample.analog_speed <= analog_speed_max:
+      return None
+    modern_coherent = _digital_speed_coherent(sample.modern_speed, sample.analog_speed)
+    legacy_coherent = _digital_speed_coherent(sample.legacy_speed, sample.analog_speed)
+    if (
+      _digital_speed_valid(sample.modern_speed) and _digital_speed_valid(sample.legacy_speed) and
+      modern_coherent != legacy_coherent
+    ):
+      return _DIStateSpeedLayout.post2019 if modern_coherent else _DIStateSpeedLayout.legacy
+    return None
+
+  def _accept_di_sample(self, candidate: _DIStateSpeedSample) -> int | None:
+    current = self._di_speed_sample
+    if current is None or candidate.timestamp_ns > current.timestamp_ns:
+      self._di_samples_at_timestamp = {candidate}
+      return _di_generation(candidate.timestamp_ns, 0)
+    if candidate.timestamp_ns < current.timestamp_ns or candidate in self._di_samples_at_timestamp:
+      return None
+    if len(self._di_samples_at_timestamp) >= DI_GENERATION_ORDINAL_LIMIT:
+      return None
+
+    ordinal = len(self._di_samples_at_timestamp)
+    self._di_samples_at_timestamp.add(candidate)
+    return _di_generation(candidate.timestamp_ns, ordinal)
+
+  def _accept_di_layout_evidence(self, sample: _DIStateSpeedSample,
+                                 evidence: _DIStateSpeedLayout) -> bool:
+    evidence_timestamp = self._di_speed_layout_evidence_ts
+    if evidence_timestamp is None or sample.timestamp_ns > evidence_timestamp:
+      self._di_layout_evidence_samples = {sample}
+    elif sample.timestamp_ns < evidence_timestamp or sample in self._di_layout_evidence_samples:
+      return False
+    elif len(self._di_layout_evidence_samples) >= DI_GENERATION_ORDINAL_LIMIT:
+      return False
+    else:
+      self._di_layout_evidence_samples.add(sample)
+
+    self._di_speed_layout_evidence_ts = sample.timestamp_ns
+    self._di_speed_layout = evidence
+    return True
+
+  def _cluster_speed_ms(self, analog_speed: float, modern_speed: float, legacy_speed: float,
+                        analog_speed_max: float, speed_to_ms: float) -> float | None:
+    if not 0.0 <= analog_speed <= analog_speed_max:
+      return None
+
+    modern_coherent = _digital_speed_coherent(modern_speed, analog_speed)
+    legacy_coherent = _digital_speed_coherent(legacy_speed, analog_speed)
+    if self._di_speed_layout == _DIStateSpeedLayout.unknown:
+      if modern_coherent and legacy_coherent:
+        selected_speed = modern_speed if modern_speed == legacy_speed else analog_speed
+      elif modern_coherent:
+        selected_speed = modern_speed
+      elif legacy_coherent:
+        selected_speed = legacy_speed
+      else:
+        selected_speed = analog_speed
+      return selected_speed * speed_to_ms
+
+    selected_speed = modern_speed if self._di_speed_layout == _DIStateSpeedLayout.post2019 else legacy_speed
+    if not _digital_speed_coherent(selected_speed, analog_speed):
+      selected_speed = analog_speed
+    return selected_speed * speed_to_ms
+
+  def _recompute_di_cluster_speed(self) -> None:
+    if self._di_speed_sample is None:
+      self._di_cluster_speed_ms = None
+      return
+
+    speed_units, analog_speed_max, speed_to_ms = self._speed_unit_context(self._di_speed_sample.speed_units_code)
+    if speed_units is not None:
+      self.speed_units = speed_units
+    self._di_cluster_speed_ms = None if analog_speed_max is None or speed_to_ms is None else self._cluster_speed_ms(
+      self._di_speed_sample.analog_speed,
+      self._di_speed_sample.modern_speed,
+      self._di_speed_sample.legacy_speed,
+      analog_speed_max,
+      speed_to_ms,
+    )
+
+  def _pcm_cruise_speed_ms(self) -> float:
+    if self._di_speed_sample is None:
+      return 1e-3
+
+    # cruiseState.speed historically follows byte six; HUD layout selection is independent.
+    _speed_units, _analog_speed_max, speed_to_ms = self._speed_unit_context(self._di_speed_sample.speed_units_code)
+    if speed_to_ms is None:
+      return 1e-3
+    return max(self._di_speed_sample.legacy_speed * speed_to_ms, 1e-3)
 
   def set_long_active(self, long_active: bool) -> None:
     """Controller feeds prior-cycle logical standard-long active state. Never infer from DI cruiseState.enabled."""
@@ -140,6 +384,7 @@ class PreAPCarState(CarStateBase):
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp_chassis = can_parsers[Bus.chassis]
     cp_pt = can_parsers[Bus.pt]
+    self._di_bus_clock_ns = max(self._di_bus_clock_ns, _parser_bus_clock_ns(cp_chassis))
     ret = structs.CarState()
     ret_sp = PreAPCarStateSP()
     ret.blockPcmEnable = True
@@ -183,24 +428,44 @@ class PreAPCarState(CarStateBase):
     # Hands-on is a pause request. Only an EPAS fault exits logical control.
     ret.steeringDisengage = epas_rejecting or ret.steerFaultPermanent
 
-    cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
-    self.di_cruise_state = cruise_state or "OFF"
-    speed_units = self.can_defines["DI_state"]["DI_speedUnits"].get(int(cp_chassis.vl["DI_state"]["DI_speedUnits"]), None)
-    if speed_units is not None:
-      self.speed_units = speed_units
+    # Byte 4 is digital speed on post-2019 DI_state but overlaps DI_cruiseSet
+    # on older layouts; byte 6 has the inverse ambiguity. A frame with both
+    # candidates valid and only one coherent is timestamped layout evidence.
+    di_samples = _di_state_speed_samples(cp_chassis)
+    previous_layout = self._di_speed_layout
+    for sample in di_samples:
+      evidence = self._di_speed_layout_evidence(sample)
+      if evidence is not None:
+        self._accept_di_layout_evidence(sample, evidence)
 
-    digital_speed = cp_chassis.vl["DI_state"]["DI_digitalSpeed"]
-    if speed_units == "KPH":
-      ret.vEgoCluster = digital_speed * CV.KPH_TO_MS
-    elif speed_units == "MPH":
-      ret.vEgoCluster = digital_speed * CV.MPH_TO_MS
+    accepted_di_samples = []
+    for sample in di_samples:
+      generation = self._accept_di_sample(sample)
+      if generation is None:
+        continue
+
+      self._di_speed_sample = sample
+      accepted_di_samples.append((sample, generation))
+    layout_changed = self._di_speed_layout != previous_layout
+
+    if accepted_di_samples or layout_changed:
+      self._recompute_di_cluster_speed()
+
+    cruise_state_code = 0 if self._di_speed_sample is None else self._di_speed_sample.cruise_state_code
+    cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(cruise_state_code, None)
+    self.di_cruise_state = cruise_state or "OFF"
+
+    if (
+      self._di_speed_sample is None or self._di_cluster_speed_ms is None or
+      not _di_state_speed_fresh(self._di_speed_sample.timestamp_ns, self._di_bus_clock_ns)
+    ):
+      ret.vEgoCluster = ret.vEgo
+    else:
+      ret.vEgoCluster = self._di_cluster_speed_ms
 
     ret.cruiseState.available = True
-    ret.cruiseState.enabled = cruise_state in ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
-    if speed_units == "KPH":
-      ret.cruiseState.speed = max(digital_speed * CV.KPH_TO_MS, 1e-3)
-    elif speed_units == "MPH":
-      ret.cruiseState.speed = max(digital_speed * CV.MPH_TO_MS, 1e-3)
+    ret.cruiseState.enabled = cruise_state in DI_CRUISE_ENABLED_STATES
+    ret.cruiseState.speed = self._pcm_cruise_speed_ms()
     ret.cruiseState.standstill = False
     ret.standstill = cruise_state == "STANDSTILL"
     ret.accFaulted = cruise_state == "FAULT"
@@ -266,28 +531,32 @@ class PreAPCarState(CarStateBase):
     self.intent.update_health(blocked=blocked, epas_fault=ret.steeringDisengage, brake_pressed=ret.brakePressed)
     self.stock_cc.update_health(blocked=blocked, brake_pressed=ret.brakePressed)
 
-    levers = cp_chassis.vl_all["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"]
-    counters = cp_chassis.vl_all["STW_ACTN_RQ"]["MC_STW_ACTN_RQ"]
-    if levers and len(levers) == len(counters):
-      stw = cp_chassis.vl["STW_ACTN_RQ"]
-      for lever, counter in zip(levers, counters, strict=True):
-        lever_i, counter_i = int(lever), int(counter)
-        if self.stock_cc.is_echo(lever_i, counter_i, now_ms):
-          self.intent.sync_counter(counter_i)
-          self.stock_cc.sync_counter(counter_i)
-          continue
-        live = {key: int(stw.get(key, default)) for key, default in STW_DEFAULTS.items()}
-        live["MC_STW_ACTN_RQ"] = counter_i
-        self.stock_cc.update_live_stw(live)
-        self.intent.update_stalk(lever_i, counter_i, now_ms)
-        self.stock_cc.update_stalk(lever_i, counter_i, now_ms)
+    # Replay physical source events in source-time order, preserving the CAN
+    # frame order when timestamps are equal.
+    source_events = [
+      (sample.timestamp_ns, sample.source_order, 0, sample, generation)
+      for sample, generation in accepted_di_samples
+    ]
+    source_events.extend((stw.timestamp_ns, stw.source_order, 1, stw, None) for stw in _stw_samples(cp_chassis))
+    for _timestamp_ns, _source_order, event_kind, event, generation in sorted(source_events, key=lambda event: (event[0], event[1])):
+      if event_kind == 0:
+        self._di_generation = generation
+        sample_state = self.can_defines["DI_state"]["DI_cruiseState"].get(event.cruise_state_code, None)
+        self.stock_cc.update_di(sample_state in DI_CRUISE_ENABLED_STATES, now_ms, self._di_generation)
+        continue
 
-    di_ts_map = cp_chassis.ts_nanos.get("DI_state", {})
-    di_ts = max(di_ts_map.values(), default=0) if di_ts_map else 0
-    if di_ts and di_ts != self._di_parser_ts:
-      self._di_parser_ts = di_ts
-      self._di_generation = (self._di_generation + 1) & 0xFFFFFFFF
-      self.stock_cc.update_di(ret.cruiseState.enabled, now_ms, self._di_generation)
+      lever_i = event.values["SpdCtrlLvr_Stat"]
+      counter_i = event.values["MC_STW_ACTN_RQ"]
+      if self.stock_cc.is_echo(lever_i, counter_i, now_ms):
+        continue
+      self.stock_cc.update_live_stw(event.values)
+      self.intent.update_stalk(lever_i, counter_i, now_ms)
+      self.stock_cc.update_stalk(
+        lever_i,
+        counter_i,
+        now_ms,
+        _di_generation(event.timestamp_ns, DI_GENERATION_ORDINAL_LIMIT - 1),
+      )
     self.stock_cc.tick_timeouts(now_ms)
     self._sync_stock_cc_intent(ret_sp)
     # Epoch is stamped by card on the process incarnation.

@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from opendbc.car import structs
 from opendbc.car.tesla.preap.constants import (
+  DI_GENERATION_ABSOLUTE_BASE,
+  DI_GENERATION_ORDINAL_BITS,
   STALK_DOUBLE_PULL_MS,
   STOCK_CC_CANCEL_DELAY_FRAMES,
   STOCK_CC_CANCEL_ECHO_MS,
   STOCK_CC_CONFIRM_MS,
+  STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS,
   STOCK_CC_ENGAGE_TIMEOUT_FRAMES,
   STOCK_CC_SECOND_PULL_TIMEOUT_MS,
   STOCK_CC_SPOOF_ECHO_MS,
@@ -45,8 +48,21 @@ def _not_before(now_ms: int, origin_ms: int | None) -> bool:
 def _generation_newer(candidate: int, bound: int | None) -> bool:
   if bound is None:
     return False
-  delta = (int(candidate) - int(bound)) & _UINT32_MASK
+  candidate = int(candidate)
+  bound = int(bound)
+  if candidate < 0 or bound < 0:
+    return False
+  if candidate > _UINT32_MASK or bound > _UINT32_MASK:
+    return candidate > bound
+  delta = (candidate - bound) & _UINT32_MASK
   return 0 < delta < (1 << 31)
+
+
+def _tagged_source_time_ns(generation: int) -> int | None:
+  generation = int(generation)
+  if generation <= _UINT32_MASK:
+    return None
+  return (generation - DI_GENERATION_ABSOLUTE_BASE) >> DI_GENERATION_ORDINAL_BITS
 
 
 class StockCcTransaction:
@@ -68,6 +84,7 @@ class StockCcTransaction:
     self._prev_lever: int | None = None
     self._first_pull_ms: int | None = None
     self._pull2_latched = False
+    self._pull2_bound_generation: int | None = None
     self._cancel_request_ms: int | None = None
     self._cancel_request_frame: int | None = None
     self._cancel_sent = False
@@ -76,9 +93,13 @@ class StockCcTransaction:
     self._set_sent_ms: int | None = None
     self._set_request_ms: int | None = None
     self._post_cancel_di = False
+    self._confirmed_di_disabled_since_ms: int | None = None
     self._di_enabled = False
     self._di_generation = 0
     self._di_generation_accepted = False
+    self._di_source_time_ns: int | None = None
+    self._prior_di_enabled = False
+    self._prior_di_source_time_ns: int | None = None
     self._cancel_bound_generation = None
     self._set_bound_generation = None
     self._epoch = 0
@@ -124,9 +145,6 @@ class StockCcTransaction:
       return False
     return int(lever) == self._echo_lever and (int(counter) & 0xF) == self._echo_counter
 
-  def sync_counter(self, counter: int) -> None:
-    self._stalk_counter = int(counter) & 0xF
-
   def update_live_stw(self, values: dict[str, int]) -> None:
     self.live_stw = dict(values)
 
@@ -146,22 +164,47 @@ class StockCcTransaction:
     # Generation-less samples cannot move the accepted DI baseline.
     if generation is None:
       return
-    candidate = int(generation) & _UINT32_MASK
+    candidate = int(generation)
+    if candidate < 0:
+      return
     # First non-None generation bootstraps the accepted baseline. After that,
-    # only a strictly newer UInt32 sample may change level or drive edges.
+    # only a strictly newer UInt32 or tagged CarState sample may drive edges.
     if self._di_generation_accepted and not _generation_newer(candidate, self._di_generation):
       return
-    prev_enabled = self._di_enabled
-    prev_generation = self._di_generation
+    source_time_ns = _tagged_source_time_ns(candidate)
+    if (
+      source_time_ns is not None and
+      self._di_source_time_ns is not None and
+      source_time_ns != self._di_source_time_ns
+    ):
+      self._prior_di_enabled = self._di_enabled
+      self._prior_di_source_time_ns = self._di_source_time_ns
     self._di_enabled = bool(enabled)
     self._di_generation = candidate
     self._di_generation_accepted = True
+    if source_time_ns is not None:
+      self._di_source_time_ns = source_time_ns
     if not self.active:
       return
-    if (self.state == StockCcState.confirmed and prev_enabled and not self._di_enabled and
-        _generation_newer(self._di_generation, prev_generation)):
-      self._fail()
-      return
+    if self.state == StockCcState.confirmed:
+      # Panda revokes independently on its first observed fall. The host keeps
+      # a time-based fallback so parser grouping cannot change the result.
+      if self._di_enabled:
+        self._confirmed_di_disabled_since_ms = None
+      elif self._confirmed_di_disabled_since_ms is None:
+        self._confirmed_di_disabled_since_ms = now_ms
+    elif self._di_enabled and self._post_cancel_di:
+      if self.state == StockCcState.awaitingSecondPull:
+        self._post_cancel_di = False
+        self._pull2_latched = False
+        self._pull2_bound_generation = None
+        self.state = StockCcState.awaitingCancelConfirmation
+      elif self.state == StockCcState.reengageRequested:
+        self._fail()
+        return
+    elif not self._di_enabled and self.state == StockCcState.awaitingDiConfirmation:
+      # Host DI confirmation is provisional until Panda confirms the same SET.
+      self.host_di_confirmed = False
     if (self._cancel_sent and not self._di_enabled and not self._post_cancel_di and
         _not_before(now_ms, self._cancel_sent_ms) and
         _generation_newer(self._di_generation, self._cancel_bound_generation)):
@@ -171,10 +214,10 @@ class StockCcTransaction:
         return
       self._post_cancel_di = True
       if self.state == StockCcState.awaitingCancelConfirmation:
-        if self._pull2_latched:
-          self._enter_reengage(now_ms)
-        else:
+        if not self._pull2_latched:
           self.state = StockCcState.awaitingSecondPull
+    if self._post_cancel_di and self._pull2_latched and not self._di_enabled:
+      self._enter_reengage(now_ms, self._di_generation)
     if (self._set_sent and self._di_enabled and _not_before(now_ms, self._set_sent_ms) and
         _generation_newer(self._di_generation, self._set_bound_generation)):
       self.host_di_confirmed = True
@@ -209,7 +252,7 @@ class StockCcTransaction:
         self._panda_matched = True
         self._try_confirm()
 
-  def update_stalk(self, lever: int, counter: int, now_ms: int) -> None:
+  def update_stalk(self, lever: int, counter: int, now_ms: int, source_generation: int | None = None) -> None:
     now_ms = int(now_ms) & _UINT32_MASK
     self._now_ms = now_ms
     lever = int(lever)
@@ -254,12 +297,17 @@ class StockCcTransaction:
     if not self._stalk_armed:
       return
     self._stalk_armed = False
-    self._process_main_pull(now_ms)
+    self._process_main_pull(now_ms, self._di_generation if source_generation is None else source_generation)
 
   def tick_timeouts(self, now_ms: int) -> None:
-    if not self.active or self.state in (StockCcState.idle, StockCcState.confirmed, StockCcState.cancelledOrFailed):
+    if not self.active or self.state in (StockCcState.idle, StockCcState.cancelledOrFailed):
       return
     now_ms = int(now_ms) & _UINT32_MASK
+    if self.state == StockCcState.confirmed:
+      disabled_elapsed = _elapsed_ms(now_ms, self._confirmed_di_disabled_since_ms)
+      if disabled_elapsed is not None and disabled_elapsed >= STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS:
+        self._fail()
+      return
     limits = {
       StockCcState.cancelRequested: (_elapsed_ms(now_ms, self._cancel_request_ms), STOCK_CC_TX_TIMEOUT_MS + STOCK_CC_CANCEL_DELAY_FRAMES * 10),
       StockCcState.awaitingCancelConfirmation: (_elapsed_ms(now_ms, self._cancel_sent_ms), STOCK_CC_CONFIRM_MS),
@@ -291,7 +339,6 @@ class StockCcTransaction:
     now_ms = int(now_ms) & _UINT32_MASK
     lever = int(lever)
     counter &= 0xF
-    self._stalk_counter = counter
     if lever == CANCEL:
       self._cancel_sent = True
       self._cancel_sent_ms = now_ms
@@ -322,16 +369,32 @@ class StockCcTransaction:
     live = 0 if self.live_stw is None else int(self.live_stw.get("MC_STW_ACTN_RQ", 0))
     return (live + 1) % 16
 
-  def _process_main_pull(self, now_ms: int) -> None:
+  def _cruise_already_off_before_pull(self, source_generation: int) -> bool:
+    pull_time_ns = _tagged_source_time_ns(source_generation)
+    if pull_time_ns is None or self._di_source_time_ns is None:
+      return not self._di_enabled
+    if self._di_source_time_ns < pull_time_ns:
+      return not self._di_enabled
+    if self._di_enabled:
+      return False
+    if self._prior_di_source_time_ns is not None and self._prior_di_source_time_ns < pull_time_ns:
+      return not self._prior_di_enabled
+    return False
+
+  def _process_main_pull(self, now_ms: int, source_generation: int) -> None:
     elapsed = _elapsed_ms(now_ms, self._first_pull_ms)
     is_second = elapsed is not None and 0 < elapsed < STALK_DOUBLE_PULL_MS
     if is_second:
       if self.state in (
         StockCcState.cancelRequested, StockCcState.awaitingCancelConfirmation, StockCcState.awaitingSecondPull,
       ):
+        # Same-time DI cannot create a second-pull latch. Parser grouping
+        # would otherwise let a falling edge authorize a SET panda would
+        # refuse if the stalk arrived first.
+        if not self._cruise_already_off_before_pull(source_generation):
+          return
         self._pull2_latched = True
-        if self._cancel_sent and self._post_cancel_di:
-          self._enter_reengage(now_ms)
+        self._pull2_bound_generation = int(source_generation)
       return
     self._first_pull_ms = now_ms
     self._pull2_latched = False
@@ -344,6 +407,7 @@ class StockCcTransaction:
     self._cancel_request_frame = None
     self._cancel_sent = False
     self._post_cancel_di = False
+    self._pull2_bound_generation = None
     self._cancel_bound_generation = None
     self._set_sent = False
     self._set_sent_ms = None
@@ -351,11 +415,16 @@ class StockCcTransaction:
     self._panda_matched = False
     self._panda_counter_at_bind = self._panda_seen_counter
     self.host_di_confirmed = False
+    self._confirmed_di_disabled_since_ms = None
     self.enable_pending = False
     self.state = StockCcState.cancelRequested
 
-  def _enter_reengage(self, now_ms: int) -> None:
-    if not (self._cancel_sent and self._post_cancel_di):
+  def _enter_reengage(self, now_ms: int, di_generation: int) -> None:
+    if not (
+      self.state in (StockCcState.awaitingCancelConfirmation, StockCcState.awaitingSecondPull) and
+      self._cancel_sent and self._post_cancel_di and self._pull2_latched and
+      _generation_newer(di_generation, self._pull2_bound_generation)
+    ):
       return
     self._set_request_ms = now_ms
     self._panda_counter_at_bind = self._panda_seen_counter
@@ -367,13 +436,16 @@ class StockCcTransaction:
       return
     if self.host_di_confirmed and self._panda_matched:
       self.state = StockCcState.confirmed
+      self._confirmed_di_disabled_since_ms = None
       self.enable_pending = True
 
   def _fail(self) -> None:
     self.state = StockCcState.cancelledOrFailed
     self.enable_pending = False
     self.host_di_confirmed = False
+    self._confirmed_di_disabled_since_ms = None
     self._pull2_latched = False
+    self._pull2_bound_generation = None
     self._cancel_sent = False
     self._set_sent = False
     self._post_cancel_di = False
@@ -390,10 +462,12 @@ class StockCcTransaction:
       return
     self.state = StockCcState.idle
     self.host_di_confirmed = False
+    self._confirmed_di_disabled_since_ms = None
     self.enable_pending = False
     self._stalk_armed = False
     self._first_pull_ms = None
     self._pull2_latched = False
+    self._pull2_bound_generation = None
     self._cancel_request_ms = None
     self._cancel_request_frame = None
     self._cancel_sent = False

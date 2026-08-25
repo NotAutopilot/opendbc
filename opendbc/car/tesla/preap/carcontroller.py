@@ -390,21 +390,20 @@ class PreAPCarController(CarControllerBase):
     hands_on_level = int(getattr(CS.out, "handsOnLevel", 0) or 0)
     mads_active = bool(getattr(getattr(CC_SP, "mads", None), "active", False))
     # Panda inhibit is not a controller input. MADS keeps mads.active false on mismatch.
-    tx_allowed = bool(CC.latActive) and mads_active and hands_on_level < HANDS_ON_DISENGAGE_LEVEL
+    lateral_actuation_allowed = bool(CC.latActive) and mads_active and hands_on_level < HANDS_ON_DISENGAGE_LEVEL
 
     if self.frame % 2 == 0:
       steer_angle = float(getattr(CS.out, "steeringAngleDeg", 0.0) or 0.0)
       v_ego_raw = float(getattr(CS.out, "vEgoRaw", 0.0) or 0.0)
       self.apply_angle_last = apply_steer_angle_limits_vm(
         float(actuators.steeringAngleDeg), self.apply_angle_last, v_ego_raw, steer_angle,
-        tx_allowed, CarControllerParams, self.VM,
+        lateral_actuation_allowed, CarControllerParams, self.VM,
       )
-      if tx_allowed:
-        cntr = (self.frame // 2) % 16
-        can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, True))
-        can_sends.append(self.tesla_can.create_epas_control(cntr, 1))
+      cntr = (self.frame // 2) % 16
+      can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lateral_actuation_allowed))
+      can_sends.append(self.tesla_can.create_epas_control(cntr, int(lateral_actuation_allowed)))
 
-    if self.frame % 10 == 0 and tx_allowed:
+    if self.frame % 10 == 0 and lateral_actuation_allowed:
       turn = int(bool(CC.rightBlinker)) * 2 + int(bool(CC.leftBlinker))
       cntr = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_body_controls_message(turn, 0, CANBUS.party, cntr))

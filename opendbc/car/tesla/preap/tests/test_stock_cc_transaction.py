@@ -3,10 +3,11 @@ import unittest
 from opendbc.car import structs
 from opendbc.car.tesla.preap.constants import (
   STOCK_CC_CANCEL_DELAY_FRAMES,
+  STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS,
   STOCK_CC_TX_PERIOD_FRAMES,
 )
-from opendbc.car.tesla.preap.carstate import REQUIRED_SOURCE_KEYS, required_sources_fresh
-from opendbc.car.tesla.preap.stock_cc import PASSTHROUGH_LEVERS, StockCcTransaction
+from opendbc.car.tesla.preap.carstate import REQUIRED_SOURCE_KEYS, _di_generation, required_sources_fresh
+from opendbc.car.tesla.preap.stock_cc import PASSTHROUGH_LEVERS, StockCcTransaction, _generation_newer
 from opendbc.car.tesla.preap.teslacan import STW_DEFAULTS
 from opendbc.car.tesla.values import CruiseButtons
 
@@ -40,20 +41,20 @@ class _Txn:
     self.t.acknowledge_publication(sp)
     return sp
 
-  def stalk(self, lever, now=None):
+  def stalk(self, lever, now=None, source_generation=None):
     if now is not None:
       self.now = now
     self.t.update_live_stw(_live(self.counter))
-    self.t.update_stalk(lever, self.counter, self.now)
+    self.t.update_stalk(lever, self.counter, self.now, source_generation)
     sent = self.counter
     self.counter = (self.counter + 1) & 0xF
     return sent
 
-  def pull(self, now=None):
+  def pull(self, now=None, source_generation=None):
     if now is not None:
       self.now = now
-    self.stalk(IDLE)
-    self.stalk(MAIN)
+    self.stalk(IDLE, source_generation=source_generation)
+    self.stalk(MAIN, source_generation=source_generation)
 
   def tick(self, now=None):
     if now is not None:
@@ -81,7 +82,6 @@ class _Txn:
       if lever is not None:
         counter = self.t.tx_counter()
         self.t.note_tx(lever, counter, self.now)
-        self.counter = (counter + 1) & 0xF
         sent.append((lever, counter))
         return sent[-1]
     return None
@@ -132,6 +132,8 @@ class TestStockCcTransaction(unittest.TestCase):
     h.di(False, 30)
     self.assertEqual(h.t.state, State.awaitingSecondPull)
     h.pull(399)
+    self.assertEqual(h.t.state, State.awaitingSecondPull)
+    h.di(False, 400)
     self.assertEqual(h.t.state, State.reengageRequested)
     set_pair = h.tx()
     self.assertEqual(set_pair[0], SET_ACCEL)
@@ -145,6 +147,21 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertTrue(sp.preapStockCcEnablePending)
     self.assertTrue(sp.preapStockCcHostDiConfirmed)
     self.assertEqual(sp.preapStockCcBoundCounter, 1)
+
+  def test_spoofed_cancel_does_not_increment_physical_stalk_counter(self):
+    h = _Txn()
+    h.pull(0)
+    self.assertEqual(h.t._stalk_counter, 1)
+
+    pair = h.tx()
+    self.assertEqual(pair, (CANCEL, 2))
+    self.assertEqual(h.counter, 2)
+    self.assertEqual(h.t._stalk_counter, 1)
+
+    self.assertTrue(h.t.is_echo(CANCEL, 2, 10))
+    h.stalk(IDLE, 10)
+    self.assertEqual(h.t._stalk_counter, 2)
+    self.assertEqual(h.t.state, State.awaitingCancelConfirmation)
 
   def test_early_pull2_latches_before_cancel_and_blocks_set(self):
     h = _Txn()
@@ -161,6 +178,49 @@ class TestStockCcTransaction(unittest.TestCase):
     set_pair = h.tx()
     self.assertEqual(set_pair[0], SET_ACCEL)
 
+  def test_same_time_off_cannot_create_pull2_after_on(self):
+    for off_first in (True, False):
+      with self.subTest(off_first=off_first):
+        h = _Txn()
+        h.t.update_di(False, 0, _di_generation(0, 0))
+        h.pull(0, source_generation=_di_generation(0, 255))
+        self.assertEqual(h.tx()[0], CANCEL)
+        h.t.update_di(False, 20, _di_generation(20_000_000, 0))
+        h.t.update_di(True, 200, _di_generation(200_000_000, 0))
+        if off_first:
+          h.t.update_di(False, 250, _di_generation(250_000_000, 0))
+          h.pull(250, source_generation=_di_generation(250_000_000, 255))
+        else:
+          h.pull(250, source_generation=_di_generation(250_000_000, 255))
+          h.t.update_di(False, 250, _di_generation(250_000_000, 0))
+        self.assertFalse(h.t._pull2_latched)
+        self.assertNotEqual(h.t.state, State.reengageRequested)
+        h.t.update_di(False, 300, _di_generation(300_000_000, 0))
+        self.assertFalse(h.t._pull2_latched)
+        self.assertNotEqual(h.t.state, State.reengageRequested)
+        self.assertIsNone(h.t.poll_tx(20))
+
+  def test_earlier_off_latches_pull2_but_same_time_off_does_not_set(self):
+    for off_first in (True, False):
+      with self.subTest(off_first=off_first):
+        h = _Txn()
+        h.t.update_di(False, 0, _di_generation(0, 0))
+        h.pull(0, source_generation=_di_generation(0, 255))
+        self.assertEqual(h.tx()[0], CANCEL)
+        h.t.update_di(False, 20, _di_generation(20_000_000, 0))
+        if off_first:
+          h.t.update_di(False, 250, _di_generation(250_000_000, 0))
+          h.pull(250, source_generation=_di_generation(250_000_000, 255))
+        else:
+          h.pull(250, source_generation=_di_generation(250_000_000, 255))
+          h.t.update_di(False, 250, _di_generation(250_000_000, 0))
+        self.assertTrue(h.t._pull2_latched)
+        self.assertNotEqual(h.t.state, State.reengageRequested)
+        self.assertIsNone(h.t.poll_tx(20))
+        h.t.update_di(False, 300, _di_generation(300_000_000, 0))
+        self.assertEqual(h.t.state, State.reengageRequested)
+        self.assertEqual(h.tx()[0], SET_ACCEL)
+
   def test_strict_399_400_401_window(self):
     for delta, expect_set in ((399, True), (400, False), (401, False)):
       with self.subTest(delta=delta):
@@ -169,6 +229,7 @@ class TestStockCcTransaction(unittest.TestCase):
         self.assertEqual(h.t.state, State.awaitingSecondPull)
         h.pull(delta)
         if expect_set:
+          h.di(False, delta + 1)
           self.assertEqual(h.t.state, State.reengageRequested)
           self.assertEqual(h.tx()[0], SET_ACCEL)
         else:
@@ -181,6 +242,7 @@ class TestStockCcTransaction(unittest.TestCase):
         h = _Txn()
         h.cancel_and_wait_di(0)
         h.pull(399)
+        h.di(False, 400)
         self.assertEqual(h.tx()[0], SET_ACCEL)
         self.assertEqual(h.t.state, State.awaitingDiConfirmation)
         if panda_first:
@@ -200,6 +262,7 @@ class TestStockCcTransaction(unittest.TestCase):
     h = _Txn()
     h.cancel_and_wait_di(0)
     h.pull(399)
+    h.di(False, 400)
     h.tx()
     h.di(True, 430)
     h.panda(0, True, True)
@@ -218,6 +281,7 @@ class TestStockCcTransaction(unittest.TestCase):
     h.panda(7, True, True)
     h.cancel_and_wait_di(0)
     h.pull(399)
+    h.di(False, 400)
     h.tx()
     h.di(True, 430)
     h.panda(7, True, True)
@@ -232,9 +296,8 @@ class TestStockCcTransaction(unittest.TestCase):
     h = _Txn()
     pair = h.cancel_and_wait_di(0)
     self.assertTrue(h.t.is_echo(CANCEL, pair[1], 10))
-    h.t.sync_counter(pair[1])
-    h.counter = (pair[1] + 1) & 0xF
     h.pull(399)
+    h.di(False, 400)
     self.assertEqual(h.t.state, State.reengageRequested)
 
     h = _Txn()
@@ -256,8 +319,8 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertEqual(h.t.state, State.cancelledOrFailed)
 
     h = _Txn()
+    h.t.update_stalk(IDLE, 14, 0)
     h.counter = 15
-    h.t.sync_counter(14)
     h.stalk(IDLE, 0)
     h.stalk(MAIN)
     self.assertEqual(h.t.state, State.cancelRequested)
@@ -320,6 +383,7 @@ class TestStockCcTransaction(unittest.TestCase):
     h = _Txn()
     h.cancel_and_wait_di(0)
     h.pull(399)
+    h.di(False, 400)
     h.tx()
     h.di(True, 430)
     self.assertEqual(h.t.state, State.awaitingDiConfirmation)
@@ -368,6 +432,7 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertTrue(h.t._post_cancel_di)
     self.assertEqual(h.t.state, State.awaitingSecondPull)
     h.pull(399)
+    h.di(False, 400)
     self.assertEqual(h.tx()[0], SET_ACCEL)
     set_bound = h.t._set_bound_generation
     h.t.update_di(True, 430, set_bound)
@@ -389,6 +454,19 @@ class TestStockCcTransaction(unittest.TestCase):
     h.di(False, 30, generation=0)
     self.assertTrue(h.t._post_cancel_di)
 
+  def test_tagged_di_generation_uses_unbounded_order_and_rejects_negative(self):
+    tagged = 1 << 64
+    self.assertTrue(_generation_newer(tagged, 0xFFFFFFFF))
+    self.assertFalse(_generation_newer(0xFFFFFFFF, tagged))
+    self.assertTrue(_generation_newer(tagged + 1, tagged))
+    self.assertFalse(_generation_newer(tagged, tagged + 1))
+
+    transaction = StockCcTransaction(active=False)
+    transaction.update_di(True, 0, tagged)
+    transaction.update_di(False, 0, -1)
+    self.assertEqual(transaction._di_generation, tagged)
+    self.assertTrue(transaction._di_enabled)
+
   def test_in_flight_timeout_progresses_during_total_silence(self):
     h = _Txn()
     h.pull(0)
@@ -402,6 +480,7 @@ class TestStockCcTransaction(unittest.TestCase):
     h = _Txn()
     h.cancel_and_wait_di(0)
     h.pull(399)
+    h.di(False, 400)
     self.assertEqual(h.tx()[0], SET_ACCEL)
     h.di(True, 430)
     h.panda(1, True, True)
@@ -475,6 +554,7 @@ class TestStockCcTransaction(unittest.TestCase):
     h = _Txn()
     h.cancel_and_wait_di(0)
     h.pull(399)
+    h.di(False, 400)
     self.assertEqual(h.tx()[0], SET_ACCEL)
     self.assertEqual(h.t.state, State.awaitingDiConfirmation)
     h.panda(None, False, False)
@@ -496,9 +576,14 @@ class TestStockCcTransaction(unittest.TestCase):
     h.t.update_stalk(IDLE, (counter + 4) & 0xF, 510)
     self.assertEqual(h.t.state, State.idle)
 
-  def test_confirmed_di_fall_fails_closed(self):
+  def test_confirmed_di_fall_host_fallback_fails_at_exact_debounce_boundary(self):
     h = self._confirm()
-    h.di(False)
+    h.di(False, 1_000)
+    self.assertEqual(h.t.state, State.confirmed)
+    self.assertTrue(h.t.enable_pending)
+    h.tick(1_000 + STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS - 1)
+    self.assertEqual(h.t.state, State.confirmed)
+    h.tick(1_000 + STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS)
     self.assertEqual(h.t.state, State.cancelledOrFailed)
     self.assertFalse(h.t.enable_pending)
     self.assertFalse(h.t.host_di_confirmed)
@@ -519,7 +604,7 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertTrue(h.t._di_enabled)
     self.assertTrue(h.t.enable_pending)
 
-  def test_stale_false_then_fresh_false_revokes_confirmed_authority(self):
+  def test_stale_false_then_sustained_fresh_false_revokes_confirmed_authority(self):
     h = self._confirm()
     gen = h.t._di_generation
     self.assertTrue(h.t._di_enabled)
@@ -529,6 +614,9 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertTrue(h.t.enable_pending)
     self.assertEqual(h.t._di_generation, gen)
     h.t.update_di(False, h.now, (gen + 1) & 0xFFFFFFFF)
+    self.assertEqual(h.t.state, State.confirmed)
+    self.assertTrue(h.t.enable_pending)
+    h.tick(h.now + STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS)
     self.assertEqual(h.t.state, State.cancelledOrFailed)
     self.assertFalse(h.t.enable_pending)
     self.assertFalse(h.t.host_di_confirmed)
@@ -550,15 +638,37 @@ class TestStockCcTransaction(unittest.TestCase):
     self.assertTrue(h.t.host_di_confirmed)
     self.assertEqual(h.t._di_generation, (gen + 2) & 0xFFFFFFFF)
 
+  def test_confirmed_di_on_clears_host_fallback(self):
+    h = self._confirm()
+    h.di(False, 1_000)
+    h.di(True, 1_050)
+    h.tick(1_000 + STOCK_CC_CONFIRMED_DI_FALL_DEBOUNCE_MS)
+    self.assertEqual(h.t.state, State.confirmed)
+    self.assertTrue(h.t.enable_pending)
+
   def test_pre_confirmation_di_disengaged_is_not_confirmed_fall(self):
     h = _Txn()
     h.cancel_and_wait_di(0)
     h.pull(399)
+    h.di(False, 400)
     self.assertEqual(h.tx()[0], SET_ACCEL)
     self.assertEqual(h.t.state, State.awaitingDiConfirmation)
     h.di(False)
     self.assertEqual(h.t.state, State.awaitingDiConfirmation)
     self.assertFalse(h.t.host_di_confirmed)
+
+  def test_awaiting_panda_on_then_off_clears_host_di_proof(self):
+    h = _Txn()
+    h.cancel_and_wait_di(0)
+    h.pull(399)
+    h.di(False, 400)
+    self.assertEqual(h.tx()[0], SET_ACCEL)
+    h.di(True, 430)
+    self.assertTrue(h.t.host_di_confirmed)
+    self.assertEqual(h.t.state, State.awaitingDiConfirmation)
+    h.di(False, 440)
+    self.assertFalse(h.t.host_di_confirmed)
+    self.assertEqual(h.t.state, State.awaitingDiConfirmation)
 
   def test_post_cancel_di_499_allows_500_501_fail(self):
     for elapsed, allowed in ((499, True), (500, False), (501, False)):
@@ -630,6 +740,7 @@ class TestStockCcTransaction(unittest.TestCase):
         self.assertNotEqual(pair[0], MAIN)
         h.di(False, 30)
         h.pull(399)
+        h.di(False, 400)
         self.assertEqual(h.t.state, State.reengageRequested)
         set_pair = h.tx()
         self.assertEqual(set_pair[0], SET_ACCEL)
@@ -649,7 +760,6 @@ class TestStockCcTransaction(unittest.TestCase):
           self.assertNotEqual(lever, MAIN)
           counter = h.t.tx_counter()
           h.t.note_tx(lever, counter, h.now)
-          h.counter = (counter + 1) & 0xF
           return lever
       return None
 
@@ -665,6 +775,7 @@ class TestStockCcTransaction(unittest.TestCase):
     h.di(False, 30)
     self.assertIsNone(drain(h, 20))
     h.pull(399)
+    h.di(False, 400)
     self.assertEqual(drain(h), SET_ACCEL)
     self.assertIsNone(h.t.poll_tx(h.frame))
     h.di(True, 430)

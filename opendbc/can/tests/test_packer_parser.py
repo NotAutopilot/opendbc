@@ -79,6 +79,32 @@ class TestCanParserPacker(unittest.TestCase):
     ret = parser.update([])
     assert len(ret) == 0
 
+  def test_parser_all_values_have_aligned_per_update_timestamps(self):
+    parser = CANParser(TEST_DBC, [("CAN_FD_MESSAGE", 0)], 0)
+    packer = CANPacker(TEST_DBC)
+    updates = []
+    expected_timestamps = []
+    for index in range(501):
+      timestamp = 1_000_000 + index
+      updates.append((timestamp, [packer.make_can_msg("CAN_FD_MESSAGE", 0, {})]))
+      expected_timestamps.append(timestamp)
+
+    parser.update(updates)
+    values = parser.vl_all["CAN_FD_MESSAGE"]["COUNTER"]
+    timestamps = parser.ts_nanos_all["CAN_FD_MESSAGE"]["COUNTER"]
+    assert len(values) == 501
+    assert timestamps == expected_timestamps
+    assert list(zip(timestamps, values, strict=True)) == [
+      (timestamp, index % 256) for index, timestamp in enumerate(expected_timestamps)
+    ]
+    for signal, signal_values in parser.vl_all["CAN_FD_MESSAGE"].items():
+      assert len(parser.ts_nanos_all["CAN_FD_MESSAGE"][signal]) == len(signal_values)
+      assert parser.ts_nanos_all["CAN_FD_MESSAGE"][signal] == expected_timestamps
+
+    parser.update([])
+    assert all(not values for values in parser.vl_all["CAN_FD_MESSAGE"].values())
+    assert all(not timestamps for timestamps in parser.ts_nanos_all["CAN_FD_MESSAGE"].values())
+
   def test_parser_counter_can_valid(self):
     """
     Tests number of allowed bad counters + ensures CAN stays invalid

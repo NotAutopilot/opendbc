@@ -111,10 +111,6 @@ class PreAPIntentTranslator:
     self._coupled_deferred = False
     self._publish(LateralIntent.mainCruiseRequest, LongitudinalIntent.enable)
 
-  def sync_counter(self, counter: int) -> None:
-    """Advance the consecutive-counter tracker without treating the frame as a pull."""
-    self._stalk_counter = int(counter) & 0xF
-
   def update_stalk(self, lever: int, counter: int, now_ms: int) -> None:
     lever = int(lever)
     counter &= 0xF

@@ -46,11 +46,20 @@ class CarInterface(CarInterfaceBase):
   RadarInterface = staticmethod(RadarInterface)
 
   def __init__(self, CP, CP_SP):
-    if is_preap_platform(CP):
+    self._preap_platform = is_preap_platform(CP)
+    if self._preap_platform:
       self.CarState = PreAPCarState
       self.CarController = PreAPCarController
       self.RadarInterface = PreAPRadarInterface
     super().__init__(CP, CP_SP)
+    if self._preap_platform:
+      # Pre-AP resolves cluster speed itself, including a truthful zero on its first DI frame.
+      self.v_ego_cluster_seen = True
+
+  def update(self, can_packets):
+    if self._preap_platform:
+      can_packets = sorted(can_packets, key=lambda packet_group: packet_group[0])
+    return super().update(can_packets)
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:

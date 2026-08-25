@@ -790,6 +790,14 @@ class TestTeslaPreAPRadarTxDisabled(TeslaPreAPSafetyBase):
     self.assertFalse(self._tx(self._packet(0x219, bytes(8), 1)))
 
 
+_FIELD_CAPTURE_STOCK_CC = {
+  "physical_main_before_cancel": (20_000, bytes.fromhex("42ff0000000010aa")),
+  "cancel_tx": (124_000, bytes.fromhex("41ff000000004093")),
+  "cancel_echo": (130_000, bytes.fromhex("41ff000000004093")),
+  "physical_main_same_counter": (201_000, bytes.fromhex("42ff000000004074")),
+}
+
+
 class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
   PARAM = 0
 
@@ -837,7 +845,6 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
       next_counter = (next_counter + 1) & 0xF
     cancel = self._authorized(1, live, next_counter)
     self.assertTrue(self._tx(cancel))
-    next_counter = (next_counter + 1) & 0xF
     self.safety.set_timer(max(second_pull_us // 4, 1))
     self.assertTrue(self._rx(self._di_state(cruise=0)))
     if not early_pull2:
@@ -848,7 +855,58 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
       live = self._stw_bytes(2, next_counter, wiper=wiper)
       self.assertTrue(self._rx(self._packet(0x45, live)))
       next_counter = (next_counter + 1) & 0xF
+      # A normal second pull cannot consume the earlier post-CANCEL OFF proof.
+      # This explicit newer OFF frame grants the SET authorization.
+      self.safety.set_timer(second_pull_us + 1)
+      self.assertTrue(self._rx(self._di_state(cruise=0)))
     return live, next_counter
+
+  def _field_capture_cancel_echo(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0, wiper=0)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+
+    main_time, main = _FIELD_CAPTURE_STOCK_CC["physical_main_before_cancel"]
+    self.safety.set_timer(main_time)
+    self.assertTrue(self._rx(self._packet(0x45, main)))
+    for timestamp, counter in ((60_000, 2), (100_000, 3)):
+      self.safety.set_timer(timestamp)
+      live = self._stw_bytes(0, counter, wiper=0)
+      self.assertTrue(self._rx(self._packet(0x45, live)))
+
+    cancel_time, cancel = _FIELD_CAPTURE_STOCK_CC["cancel_tx"]
+    self.safety.set_timer(cancel_time)
+    self.assertEqual(bytes(self._authorized(1, live, 4)[0].data)[:8], cancel)
+    self.assertTrue(self._tx(self._packet(0x45, cancel)))
+
+    echo_time, echo = _FIELD_CAPTURE_STOCK_CC["cancel_echo"]
+    self.safety.set_timer(echo_time)
+    self.assertTrue(self._rx(self._packet(0x45, echo)))
+
+  def test_field_capture_cancel_echo_preserves_physical_counter(self):
+    self._field_capture_cancel_echo()
+
+    physical_time, physical = _FIELD_CAPTURE_STOCK_CC["physical_main_same_counter"]
+    self.safety.set_timer(physical_time)
+    self.assertTrue(self._rx(self._packet(0x45, physical)))
+    self.safety.set_timer(210_000)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.assertTrue(self._tx(self._authorized(16, physical, 5)))
+
+  def test_cancel_echo_does_not_accept_nonconsecutive_physical_counter(self):
+    for delta in (2, 4):
+      with self.subTest(delta=delta):
+        self.setUp()
+        self._field_capture_cancel_echo()
+        attack_counter = (3 + delta) & 0xF
+        self.safety.set_timer(201_000)
+        attack = self._stw_bytes(0, attack_counter, wiper=0)
+        self.assertTrue(self._rx(self._packet(0x45, attack)))
+        self.safety.set_timer(210_000)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertFalse(self._tx(self._authorized(16, attack, (attack_counter + 1) & 0xF)))
+        self.assertFalse(self.safety.get_controls_allowed())
 
   def test_first_cancel_requires_exact_live_tuple(self):
     self._prime_required_rx()
@@ -916,11 +974,11 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     self.assertFalse(self._tx(self._authorized(1, live, 3, wiper=1)))
     self._rx(self._di_state(cruise=0))
     self.safety.set_timer(399000)
-    live = self._stw_bytes(0, 3)
+    live = self._stw_bytes(0, 2)
     self._rx(self._packet(0x45, live))
-    live = self._stw_bytes(2, 4)
+    live = self._stw_bytes(2, 3)
     self._rx(self._packet(0x45, live))
-    set_ok = self._authorized(16, live, 5)
+    set_ok = self._authorized(16, live, 4)
     self.safety.set_timer(399000 + 500000)
     self.safety.safety_tick_current_safety_config()
     self.assertFalse(self._tx(set_ok))
@@ -1059,7 +1117,7 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     live = self._stw_bytes(2, 1)
     self.assertTrue(self._rx(self._packet(0x45, live)))
     self.assertTrue(self._tx(self._authorized(1, live, 2)))
-    next_counter = 3
+    next_counter = 2
     self.safety.set_timer((origin + 50000) & 0xFFFFFFFF)
     live = self._stw_bytes(0, next_counter)
     self.assertTrue(self._rx(self._packet(0x45, live)))
@@ -1125,6 +1183,117 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     self.safety.safety_tick_current_safety_config()
     self.assertTrue(self._tx(self._authorized(16, live, set_counter)))
 
+  def test_post_cancel_proof_withdrawn_before_second_pull_requires_fresh_off(self):
+    self._prime_required_rx()
+    self.safety.set_timer(0)
+    live = self._stw_bytes(0, 0)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 1)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.assertTrue(self._tx(self._authorized(1, live, 2)))
+
+    self.safety.set_timer(50_000)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.safety.set_timer(100_000)
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.safety.set_timer(120_000)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+
+    self.safety.set_timer(150_000)
+    live = self._stw_bytes(0, 2)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    live = self._stw_bytes(2, 3)
+    self.assertTrue(self._rx(self._packet(0x45, live)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.safety.set_timer(200_000)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.assertTrue(self._tx(self._authorized(16, live, 4)))
+
+  def test_same_time_off_after_on_cannot_latch_pull2(self):
+    for di_first in (True, False):
+      with self.subTest(di_first=di_first):
+        self.setUp()
+        self._prime_required_rx()
+        self.safety.set_timer(0)
+        live = self._stw_bytes(0, 0)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        live = self._stw_bytes(2, 1)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        self.assertTrue(self._tx(self._authorized(1, live, 2)))
+        self.safety.set_timer(50_000)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.safety.set_timer(100_000)
+        self.assertTrue(self._rx(self._di_state(cruise=2)))
+        self.safety.set_timer(150_000)
+        if di_first:
+          self.assertTrue(self._rx(self._di_state(cruise=0)))
+          live = self._stw_bytes(0, 2)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+          live = self._stw_bytes(2, 3)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+        else:
+          live = self._stw_bytes(0, 2)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+          live = self._stw_bytes(2, 3)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+          self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.safety.set_timer(200_000)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertFalse(self._tx(self._authorized(16, live, 4)))
+        self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_earlier_off_latches_pull2_but_same_time_off_does_not_set(self):
+    for di_first in (True, False):
+      with self.subTest(di_first=di_first):
+        self.setUp()
+        self._prime_required_rx()
+        self.safety.set_timer(0)
+        live = self._stw_bytes(0, 0)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        live = self._stw_bytes(2, 1)
+        self.assertTrue(self._rx(self._packet(0x45, live)))
+        self.assertTrue(self._tx(self._authorized(1, live, 2)))
+        self.safety.set_timer(50_000)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.safety.set_timer(150_000)
+        if di_first:
+          self.assertTrue(self._rx(self._di_state(cruise=0)))
+          live = self._stw_bytes(0, 2)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+          live = self._stw_bytes(2, 3)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+        else:
+          live = self._stw_bytes(0, 2)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+          live = self._stw_bytes(2, 3)
+          self.assertTrue(self._rx(self._packet(0x45, live)))
+          self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertFalse(self._tx(self._authorized(16, live, 4)))
+        self.safety.set_timer(200_000)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertTrue(self._tx(self._authorized(16, live, 4)))
+
+  def test_second_confirmed_on_does_not_revoke(self):
+    self._confirm_stock_cc()
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
+
+  def test_tick_after_confirm_does_not_revoke(self):
+    self._confirm_stock_cc()
+    self.safety.set_timer(950000)
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_stock_cc_reengage_confirmed())
+
+  def test_post_cancel_proof_withdrawn_after_second_pull_blocks_set(self):
+    live, set_counter = self._handshake_to_set_auth()
+    self.assertTrue(self._rx(self._di_state(cruise=2)))
+    self.assertFalse(self._tx(self._authorized(16, live, set_counter)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_stock_cc_reengage_confirmed())
+
   def test_tick_before_post_cancel_di_fails_and_cannot_resurrect(self):
     live, set_counter = self._handshake_to_cancel_and_early_pull2()
     self.safety.set_timer(500000)
@@ -1147,7 +1316,7 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
       with self.subTest(elapsed=elapsed):
         self.setUp()
         live, set_counter = self._handshake_to_set_auth()
-        self.safety.set_timer(399000 + elapsed)
+        self.safety.set_timer(399001 + elapsed)
         self.assertEqual(allowed, self._tx(self._authorized(16, live, set_counter)))
 
   def test_stock_cc_exact_tuple_requires_classic_can(self):
@@ -1213,11 +1382,13 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
     self.safety.set_timer(100000)
     self.assertTrue(self._rx(self._di_state(cruise=0)))
     self.safety.set_timer(399000)
-    live = self._stw_bytes(0, 1)
+    live = self._stw_bytes(0, 0)
     self.assertTrue(self._rx(self._packet(0x45, live)))
-    live = self._stw_bytes(2, 2)
+    live = self._stw_bytes(2, 1)
     self.assertTrue(self._rx(self._packet(0x45, live)))
-    self.assertTrue(self._tx(self._authorized(16, live, 3)))
+    self.safety.set_timer(399001)
+    self.assertTrue(self._rx(self._di_state(cruise=0)))
+    self.assertTrue(self._tx(self._authorized(16, live, 2)))
 
   def test_direct_adjustment_levers_preserve_set_authorization(self):
     # Host PASSTHROUGH_LEVERS: RES_ACCEL=16, RES_ACCEL_2ND=4, DECEL_SET=32, DECEL_2ND=8.
@@ -1238,12 +1409,14 @@ class TestTeslaPreAPNoPedalStockCc(TeslaPreAPSafetyBase):
         self.safety.set_timer(100000)
         self.assertTrue(self._rx(self._di_state(cruise=0)))
         self.safety.set_timer(399000)
-        live = self._stw_bytes(0, 4)
+        live = self._stw_bytes(0, 3)
         self.assertTrue(self._rx(self._packet(0x45, live)))
-        live = self._stw_bytes(2, 5)
+        live = self._stw_bytes(2, 4)
         self.assertTrue(self._rx(self._packet(0x45, live)))
-        self.assertTrue(self._tx(self._authorized(16, live, 6)))
-        self.assertFalse(self._tx(self._authorized(2, live, 7)))
+        self.safety.set_timer(399001)
+        self.assertTrue(self._rx(self._di_state(cruise=0)))
+        self.assertTrue(self._tx(self._authorized(16, live, 5)))
+        self.assertFalse(self._tx(self._authorized(2, live, 6)))
 
 
 class TestTeslaPreAPNoPedalCoupledStockCc(TestTeslaPreAPNoPedalStockCc):
