@@ -25,6 +25,22 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     address, dat, bus = CANPacker("tesla_preap").make_can_msg(message, 0, values)
     return [(1, [CanData(address, dat, bus)])]
 
+  def _engageable_packets(self):
+    # Empty CAN defaults doors to OPEN and gear to invalid, which check_can_engage
+    # treats as blocked and clears enableLongControl. Drive + closed doors keep the FSM.
+    packer = CANPacker("tesla_preap")
+    messages = []
+    for name, values in (
+      ("DI_torque2", {"DI_gear": 4}),
+      ("GTW_carState", {
+        "DOOR_STATE_FL": 0, "DOOR_STATE_FR": 0, "DOOR_STATE_RL": 0,
+        "DOOR_STATE_RR": 0, "DOOR_STATE_FrontTrunk": 0, "BOOT_STATE": 0,
+      }),
+    ):
+      address, dat, bus = packer.make_can_msg(name, 0, values)
+      messages.append(CanData(address, dat, bus))
+    return [(1, messages)]
+
   def _make_interface(self):
     CarInterface = interfaces["TESLA_MODEL_S_PREAP"]
     CP = CarInterface.get_params("TESLA_MODEL_S_PREAP",
@@ -103,17 +119,18 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
 
   def test_enable_long_control_publishes_fsm_flag_not_interceptor_authority(self):
     CI = self._make_interface()
+    packets = self._engageable_packets()
     CI.CS.engagement.cruiseEnabled = True
     CI.CS.engagement.enableLongControl = True
     CI.CS.pedal_authority_active = False
 
     with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True):
-      published = CI.update([])
+      published = CI.update(packets)
       self.assertTrue(published.enableLongControl)
       self.assertFalse(published.pedalLongActive)
 
       CI.CS.engagement.enableLongControl = False
-      published = CI.update([])
+      published = CI.update(packets)
       self.assertFalse(published.enableLongControl)
       self.assertFalse(published.pedalLongActive)
 
