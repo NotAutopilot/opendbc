@@ -183,6 +183,7 @@ def update_preap(cs, can_parsers):
     and cs.enableLongControl
     and cs.di_cruise_state not in ("STANDBY", "ENABLED")
   )
+  ret.enableLongControl = bool(cs.engagement.enableLongControl)
   ret.pedalLongActive = bool(getattr(cs, 'pedal_authority_active', False)) and nap_conf.use_pedal
   ret.pedalAuthorityRequested = bool(getattr(cs, 'pedal_authority_requested', False))
   ret.pedalAuthorityState = int(getattr(cs, 'pedal_authority_state', 0)) & 0xFF
