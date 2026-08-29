@@ -11,12 +11,50 @@ try:
 except ImportError:
   nap_conf = None
 
+try:
+  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
+except ImportError:
+  BoschTableFreezeWatch = None
+
 
 BOSCH_POINT_BASE_ADDRESS = 0x310
 BOSCH_POINT_ADDRESS_STRIDE = 3
 BOSCH_TRACK_MAX_MISSED_CYCLES = 2
 BOSCH_TRACK_MAX_DISTANCE_DELTA_M = 10.0
 BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
+
+IGNORE_HW_FAIL_PARAM = "NAPRadarIgnoreHwFail"
+IGNORE_HW_FAIL_PATH = "/data/params/d/NAPRadarIgnoreHwFail"
+
+
+def _ignore_hw_fail_from_params():
+  from openpilot.common.params import Params
+  return bool(Params().get_bool(IGNORE_HW_FAIL_PARAM))
+
+
+def _ignore_hw_fail_from_file(path=None):
+  with open(path or IGNORE_HW_FAIL_PATH, "rb") as f:
+    return f.read().strip() == b"1"
+
+
+def _resolve_ignore_hw_fail():
+  """Live NAPRadarIgnoreHwFail. Exceptions never force False if the file is 1."""
+  try:
+    if nap_conf is not None and bool(nap_conf.radar_ignore_hw_fail):
+      return True
+  except Exception:
+    pass
+  try:
+    if _ignore_hw_fail_from_params():
+      return True
+  except Exception:
+    pass
+  try:
+    if _ignore_hw_fail_from_file():
+      return True
+  except Exception:
+    pass
+  return False
 
 
 @dataclass(frozen=True)
@@ -118,12 +156,14 @@ class RadarInterface(RadarInterfaceBase):
     self.updated_messages = set()
     self.track_id = 0
     self.bosch_tracks = BoschTrackLifecycle()
+    self.table_freeze = BoschTableFreezeWatch() if BoschTableFreezeWatch is not None else None
     # Keep parity with Tinkla radar lateral alignment behavior.
     # For behind-nosecone installs, users can configure horizontal offset in meters.
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
       self.radar_offset = float(nap_conf.radar_offset)
     else:
       self.radar_offset = 0.0
+    self.ignore_hw_fail = _resolve_ignore_hw_fail()
 
   def update(self, can_msgs):
 
@@ -141,6 +181,11 @@ class RadarInterface(RadarInterfaceBase):
     if self.rcp is None:
       return ret
 
+    # Re-read every cycle: compiled params_pyx may not know the new key,
+    # and the on-disk param is the source of truth when that throws.
+    ignore_hw_fail = _resolve_ignore_hw_fail()
+    self.ignore_hw_fail = ignore_hw_fail
+
     # Errors
     if not self.rcp.can_valid:
       ret.errors.canError = True
@@ -155,8 +200,18 @@ class RadarInterface(RadarInterfaceBase):
         ret.errors.radarFault = True
     elif self.bosch_radar:
       radar_status = self.rcp.vl['TeslaRadarSguInfo']
-      if radar_status['RADC_HWFail'] or radar_status['RADC_SGUFail']:
+      # SGUFail is a summary lamp: calibration, VIN reject, dirty-behind-
+      # nosecone, and worse. Tinkla ignored it on Pre-AP. IRITable's unit
+      # raised it for the adjustment triad while tracks were still live.
+      # Driving is how that calibration clears, so do not block engage.
+      # HWFail is the dead-sensor bit and still blocks, unless
+      # NAPRadarIgnoreHwFail is set (tracks can stay live on a false HWFail).
+      # Frozen+SGUFail is stock-safe radarFault, but Ignore drops those
+      # ghost tracks instead of bricking engage.
+      if radar_status['RADC_HWFail'] and not ignore_hw_fail:
         ret.errors.radarFault = True
+        if self.table_freeze is not None:
+          self.table_freeze.reset()
       if radar_status['RADC_SensorDirty']:
         ret.errors.radarUnavailableTemporary = True
 
@@ -199,6 +254,14 @@ class RadarInterface(RadarInterfaceBase):
       self.pts[i].measured = bool(msg_a['Meas'])
 
     ret.points = self.bosch_tracks.points if self.bosch_radar else list(self.pts.values())
+    if self.bosch_radar and self.table_freeze is not None:
+      frozen = self.table_freeze.update(ret.points)
+      if frozen and bool(self.rcp.vl['TeslaRadarSguInfo']['RADC_SGUFail']):
+        if ignore_hw_fail:
+          # Stay engageable; never publish the frozen ghost table as leads.
+          ret.points = []
+        else:
+          ret.errors.radarFault = True
     self.updated_messages.clear()
     return ret
 

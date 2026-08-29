@@ -27,26 +27,27 @@ ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
 ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
 
 # The pedal controller updates at 50 Hz. Prompt when a sustained deceleration
-# request is not being delivered while the command sits deep in the regen
-# range. Available regen varies with SOC and battery temperature, so proximity
-# to the DI rail is not a reliable "at the limit" signal: on a full battery the
-# rail delivers a fraction of nominal regen, and the integrator only reaches it
-# near the end of an under-delivery event. Field capture (2026-07-22, minutes
-# after supercharging) showed the command within 0.5 DI of the rail for just
-# 0.3 s of a multi-second under-delivery, so a rail gate plus a consecutive
-# dwell can never complete. Evidence instead accumulates in a saturating
-# up/down counter, which also rides through single-update shortfall noise.
-# Trigger and clear thresholds are separated so the visible prompt cannot
-# chatter.
-REGEN_DECEL_PROMPT_DWELL_UPDATES = 40  # 0.8s of net evidence at 50Hz
+# request is not being delivered while the command is in the regen range.
+# Available regen varies with SOC and battery temperature, so proximity to
+# the DI rail is not a reliable "at the limit" signal: on a full battery the
+# rail delivers a fraction of nominal regen, and the integrator only reaches
+# it near the end of an under-delivery event. Field capture (2026-07-22,
+# minutes after supercharging) showed the command within 0.5 DI of the rail
+# for just 0.3 s of a multi-second under-delivery, so a rail gate plus a
+# consecutive dwell can never complete. Evidence instead accumulates in a
+# saturating up/down counter, which also rides through single-update
+# shortfall noise. Trigger and clear thresholds are separated so the visible
+# prompt cannot chatter. Thresholds are biased early so the driver has time
+# to add friction brake.
+REGEN_DECEL_PROMPT_DWELL_UPDATES = 25  # 0.5s of net evidence at 50Hz
 REGEN_DECEL_PROMPT_MIN_SPEED = 2.0  # m/s; do not prompt for a stopped/settling car
 REGEN_DECEL_PROMPT_CLEAR_SPEED = 1.0  # m/s
-REGEN_DECEL_SHORTFALL_TRIGGER = 0.35  # m/s²
-REGEN_DECEL_SHORTFALL_CLEAR = 0.15  # m/s²
-REGEN_COMMAND_TRIGGER_DI = -2.0  # command deep in the regen range
-REGEN_COMMAND_CLEAR_DI = -1.0
-REGEN_DECEL_REQUEST_TRIGGER = -0.5  # m/s²; a meaningful deceleration request
-REGEN_DECEL_REQUEST_CLEAR = -0.2  # m/s²
+REGEN_DECEL_SHORTFALL_TRIGGER = 0.20  # m/s²
+REGEN_DECEL_SHORTFALL_CLEAR = 0.08  # m/s²
+REGEN_COMMAND_TRIGGER_DI = -1.0  # command in the regen range
+REGEN_COMMAND_CLEAR_DI = -0.5
+REGEN_DECEL_REQUEST_TRIGGER = -0.35  # m/s²; a meaningful deceleration request
+REGEN_DECEL_REQUEST_CLEAR = -0.15  # m/s²
 
 
 class RegenDecelMonitor:

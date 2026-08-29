@@ -33,9 +33,22 @@ DEFAULT_CONFIG = {
   'pedal_calib_zero': 0.0,
   'pedal_calib_factor': 1.0,
   'radar_enabled': False,
+  'radar_ignore_hw_fail': False,
   'radar_behind_nosecone': False,
   'radar_offset': 0.0,
+  'radar_donor_vin': '',
+  'radar_epas_type': 0,
+  'radar_position': 0,
 }
+
+
+def normalize_radar_donor_vin(value):
+  """Return a 17-char donor VIN, or empty if the value is not one."""
+  text = "" if value is None else str(value)
+  if isinstance(value, bytes):
+    text = value.decode("ascii", errors="ignore")
+  vin = "".join(ch for ch in text.upper() if ch.isalnum())
+  return vin if len(vin) == 17 else ""
 
 # Pedal DI (Driver Intent) constants — internal representation before calibration
 PEDAL_DI_MIN = -5       # Max regen (coasting hard)
@@ -149,6 +162,36 @@ class NAPConf:
       _params.put(param_key, float(value))
     self._put(json_key, float(value))
 
+  def _get_param_int(self, param_key, json_key, default):
+    if _PARAMS_AVAILABLE:
+      val = _params.get(param_key, return_default=True)
+      try:
+        return int(val)
+      except (TypeError, ValueError):
+        return default
+    return int(self._get(json_key, default))
+
+  def _put_param_int(self, param_key, json_key, value):
+    if _PARAMS_AVAILABLE:
+      _params.put(param_key, int(value))
+    self._put(json_key, int(value))
+
+  def _get_param_str(self, param_key, json_key, default=""):
+    if _PARAMS_AVAILABLE:
+      val = _params.get(param_key, return_default=True)
+      if val is None:
+        return default
+      if isinstance(val, bytes):
+        return val.decode("ascii", errors="ignore")
+      return str(val)
+    return str(self._get(json_key, default))
+
+  def _put_param_str(self, param_key, json_key, value):
+    text = str(value)
+    if _PARAMS_AVAILABLE:
+      _params.put(param_key, text)
+    self._put(json_key, text)
+
   # Bool properties
 
   @property
@@ -168,12 +211,44 @@ class NAPConf:
     self._put_param_bool(NAPParamKeys.RADAR_ENABLED, 'radar_enabled', value)
 
   @property
+  def radar_ignore_hw_fail(self):
+    return self._get_param_bool(NAPParamKeys.RADAR_IGNORE_HW_FAIL, 'radar_ignore_hw_fail')
+
+  @radar_ignore_hw_fail.setter
+  def radar_ignore_hw_fail(self, value):
+    self._put_param_bool(NAPParamKeys.RADAR_IGNORE_HW_FAIL, 'radar_ignore_hw_fail', value)
+
+  @property
   def radar_behind_nosecone(self):
     return self._get_param_bool(NAPParamKeys.RADAR_BEHIND_NOSECONE, 'radar_behind_nosecone')
 
   @radar_behind_nosecone.setter
   def radar_behind_nosecone(self, value):
     self._put_param_bool(NAPParamKeys.RADAR_BEHIND_NOSECONE, 'radar_behind_nosecone', value)
+
+  @property
+  def radar_donor_vin(self):
+    return normalize_radar_donor_vin(self._get_param_str(NAPParamKeys.RADAR_DONOR_VIN, 'radar_donor_vin', ''))
+
+  @radar_donor_vin.setter
+  def radar_donor_vin(self, value):
+    self._put_param_str(NAPParamKeys.RADAR_DONOR_VIN, 'radar_donor_vin', normalize_radar_donor_vin(value))
+
+  @property
+  def radar_epas_type(self):
+    return max(0, min(4, self._get_param_int(NAPParamKeys.RADAR_EPAS_TYPE, 'radar_epas_type', 0)))
+
+  @radar_epas_type.setter
+  def radar_epas_type(self, value):
+    self._put_param_int(NAPParamKeys.RADAR_EPAS_TYPE, 'radar_epas_type', max(0, min(4, int(value))))
+
+  @property
+  def radar_position(self):
+    return max(0, min(2, self._get_param_int(NAPParamKeys.RADAR_POSITION, 'radar_position', 0)))
+
+  @radar_position.setter
+  def radar_position(self, value):
+    self._put_param_int(NAPParamKeys.RADAR_POSITION, 'radar_position', max(0, min(2, int(value))))
 
   @property
   def pedal_calibrated(self):
@@ -349,6 +424,7 @@ class NAPConf:
     print("")
     print("  [RADAR]")
     print(f"    Radar Enabled:        {'ON' if self.radar_enabled else 'OFF'}")
+    print(f"    Ignore HWFail:        {'ON' if self.radar_ignore_hw_fail else 'OFF'}")
     print(f"    Behind Nosecone:      {'YES' if self.radar_behind_nosecone else 'NO'}")
     print(f"    Radar Offset:         {self.radar_offset}m")
     print("")
@@ -369,6 +445,7 @@ class NAPConf:
       'pedal_can_bus': self.pedal_can_bus,
       'pedal_can_zero': self.pedal_can_zero,
       'radar_enabled': self.radar_enabled,
+      'radar_ignore_hw_fail': self.radar_ignore_hw_fail,
       'radar_behind_nosecone': self.radar_behind_nosecone,
       'radar_offset': self.radar_offset,
     }

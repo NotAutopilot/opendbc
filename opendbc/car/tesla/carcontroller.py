@@ -8,6 +8,7 @@ from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven
 from opendbc.car.tesla.values import CarControllerParams, CANBUS, LEGACY_CARS, CAR
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.tesla.preap.carcontroller import PreAPLongController, init_preap_can
+from opendbc.car.tesla.preap.nap_conf import nap_conf
 from opendbc.car.tesla.preap.stock_cc_spoofer import StockCCSpoofer
 
 
@@ -38,6 +39,7 @@ class CarController(CarControllerBase):
         self.preap_long = PreAPLongController()
         self.stock_cc = StockCCSpoofer()
         self.tesla_can = init_preap_can(dbc_names, self.packers)
+        self.radar_vin_idx = 0
       else:
         self.tesla_can = TeslaCANRaven(self.packers)
 
@@ -120,6 +122,17 @@ class CarController(CarControllerBase):
     can_sends.extend(self.stock_cc.update(CS, self.frame, self.tesla_can, CANBUS.party))
     if self.stock_cc.pcc_event:
       CS.pccEvent = self.stock_cc.pcc_event
+
+    # Tinkla 0.6.6 donor contract: stream VIN/position/EPAS on 0x560
+    # when radar is on. Empty VIN is 17 spaces (this-car passthrough);
+    # position and EPAS still apply. Panda stays silent until all three
+    # fragments arrive, so 10 Hz keeps that pause around 300 ms.
+    if nap_conf.radar_enabled and self.frame % 10 == 0:
+      can_sends.append(self.tesla_can.create_radar_vin_msg(
+        self.radar_vin_idx, nap_conf.radar_donor_vin, True,
+        nap_conf.radar_position, nap_conf.radar_epas_type,
+      ))
+      self.radar_vin_idx = (self.radar_vin_idx + 1) % 3
 
     # Turn-signal drive: keep the indicator flashing during the lane-change
     # arming window and maneuver. controlsd sets CC.leftBlinker/rightBlinker

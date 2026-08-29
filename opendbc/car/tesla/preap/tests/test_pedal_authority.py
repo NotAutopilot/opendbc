@@ -835,9 +835,10 @@ def test_regen_prompt_uses_hysteresis_and_clears_when_decel_recovers():
 
   # These values have crossed back over the trigger thresholds, but remain
   # inside the clear thresholds so sensor noise cannot chatter the prompt.
-  assert _update_regen_monitor(monitor, actual_accel=-1.25, v_ego=1.5, pedal_di=-4.25)
+  # shortfall 0.15 m/s²: below 0.20 trigger, above 0.08 clear.
+  assert _update_regen_monitor(monitor, actual_accel=-1.35, v_ego=1.5, pedal_di=-4.25)
 
-  assert not _update_regen_monitor(monitor, actual_accel=-1.35)
+  assert not _update_regen_monitor(monitor, actual_accel=-1.45)
   assert not monitor.active
 
 
@@ -859,19 +860,26 @@ def test_regen_prompt_survives_brief_shortfall_dropouts():
   for _ in range(3 * REGEN_DECEL_PROMPT_DWELL_UPDATES):
     for _ in range(9):
       fired = _update_regen_monitor(monitor) or fired
-    # shortfall 0.3 m/s²: below the trigger, above the clear threshold
-    fired = _update_regen_monitor(monitor, actual_accel=-1.2) or fired
+    # shortfall 0.15 m/s²: below the 0.20 trigger, above the 0.08 clear
+    fired = _update_regen_monitor(monitor, actual_accel=-1.35) or fired
     if fired:
       break
   assert fired
 
 
-def test_regen_prompt_requires_deep_regen_command():
-  # A command still in the shallow-regen range has authority left; the
+def test_regen_prompt_requires_regen_command():
+  # A command still on the gas/coast side has regen authority left; the
   # driver does not need the brake yet.
   monitor = RegenDecelMonitor()
   for _ in range(3 * REGEN_DECEL_PROMPT_DWELL_UPDATES):
+    assert not _update_regen_monitor(monitor, pedal_di=0.0)
+
+
+def test_regen_prompt_fires_in_shallow_regen_command():
+  monitor = RegenDecelMonitor()
+  for _ in range(REGEN_DECEL_PROMPT_DWELL_UPDATES - 1):
     assert not _update_regen_monitor(monitor, pedal_di=-1.5)
+  assert _update_regen_monitor(monitor, pedal_di=-1.5)
 
 
 def _replay_fixture(name):
