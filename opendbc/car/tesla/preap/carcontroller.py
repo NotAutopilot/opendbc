@@ -37,17 +37,16 @@ ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
 # consecutive dwell can never complete. Evidence instead accumulates in a
 # saturating up/down counter, which also rides through single-update
 # shortfall noise. Trigger and clear thresholds are separated so the visible
-# prompt cannot chatter. Thresholds are biased early so the driver has time
-# to add friction brake.
-REGEN_DECEL_PROMPT_DWELL_UPDATES = 25  # 0.5s of net evidence at 50Hz
+# prompt cannot chatter.
+REGEN_DECEL_PROMPT_DWELL_UPDATES = 40  # 0.8s of net evidence at 50Hz
 REGEN_DECEL_PROMPT_MIN_SPEED = 2.0  # m/s; do not prompt for a stopped/settling car
 REGEN_DECEL_PROMPT_CLEAR_SPEED = 1.0  # m/s
-REGEN_DECEL_SHORTFALL_TRIGGER = 0.20  # m/s²
-REGEN_DECEL_SHORTFALL_CLEAR = 0.08  # m/s²
-REGEN_COMMAND_TRIGGER_DI = -1.0  # command in the regen range
-REGEN_COMMAND_CLEAR_DI = -0.5
-REGEN_DECEL_REQUEST_TRIGGER = -0.35  # m/s²; a meaningful deceleration request
-REGEN_DECEL_REQUEST_CLEAR = -0.15  # m/s²
+REGEN_DECEL_SHORTFALL_TRIGGER = 0.35  # m/s²
+REGEN_DECEL_SHORTFALL_CLEAR = 0.15  # m/s²
+REGEN_COMMAND_TRIGGER_DI = -2.0  # command deep in the regen range
+REGEN_COMMAND_CLEAR_DI = -1.0
+REGEN_DECEL_REQUEST_TRIGGER = -0.5  # m/s²; a meaningful deceleration request
+REGEN_DECEL_REQUEST_CLEAR = -0.2  # m/s²
 
 
 class RegenDecelMonitor:
