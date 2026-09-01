@@ -17,6 +17,7 @@ uint8_t tesla_preap_radar_car_config_data(int index);
 bool tesla_preap_radar_vin_feed_captured(void);
 uint8_t tesla_preap_radar_vin_feed_data(int index);
 bool tesla_preap_radar_donor_active_debug(void);
+bool tesla_preap_radar_ready_debug(void);
 int tesla_preap_radar_gateway_count(void);
 uint32_t tesla_preap_radar_gateway_addr(int index);
 uint8_t tesla_preap_radar_gateway_bus(int index);
@@ -50,11 +51,38 @@ class TestTeslaPreAPRadarDonor:
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, PREAP_FLAG_RADAR_EMULATION)
     self.safety.init_tests()
 
+  def test_gtw_silent_until_vin_stream_complete(self):
+    source = bytes.fromhex("0281555300000000")
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, source))
+    assert self.safety.tesla_preap_radar_car_config_captured() is False
+    assert self.safety.tesla_preap_radar_ready_debug() is False
+
+    _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(0, "", True, 0, 0)
+    self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, source))
+    assert self.safety.tesla_preap_radar_car_config_captured() is False
+    assert self.safety.tesla_preap_radar_ready_debug() is False
+
+    _send_donor(self.safety, "", position=0, epas_type=0)
+    assert self.safety.tesla_preap_radar_ready_debug() is True
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, source))
+    assert self.safety.tesla_preap_radar_car_config_captured() is True
+
+  def test_use_radar_clear_keeps_gtw_silent(self):
+    for fragment in range(3):
+      _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, AWD_VIN, False, 0, 0)
+      self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
+    assert self.safety.tesla_preap_radar_ready_debug() is False
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0281555300000000")))
+    assert self.safety.tesla_preap_radar_car_config_captured() is False
+
   def test_empty_vin_keeps_passthrough(self):
+    _send_donor(self.safety, "", position=0, epas_type=0)
     source = bytes.fromhex("0281555300000000")
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, source))
     assert _payload(self.safety, self.safety.tesla_preap_radar_car_config_data) == bytes.fromhex("4285555300000010")
     assert self.safety.tesla_preap_radar_donor_active_debug() is False
+    assert self.safety.tesla_preap_radar_ready_debug() is True
 
   def test_empty_vin_still_applies_position(self):
     _send_donor(self.safety, "", position=1, epas_type=0)

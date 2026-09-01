@@ -110,6 +110,7 @@ static int preap_radar_epas_type = 0;
 static int preap_radar_position = 0;
 static uint8_t preap_radar_vin[17];
 static uint8_t preap_radar_vin_complete = 0;
+static bool preap_radar_should_send = false;
 
 // Host→panda donor config. 0x560 never goes on the car; tesla_preap_tx_hook
 // consumes it. Layout matches Tinkla 0.6.6 create_radar_VIN_msg.
@@ -379,6 +380,14 @@ static uint32_t preap_radar_vin_char(int pos, int shift) {
   return ((uint32_t)preap_radar_vin[pos]) << (shift * 8);
 }
 
+static bool preap_radar_ready(void) {
+  // Tinkla 0.6.6 sent no radar-bus GTW frames until the host 0x560
+  // stream was complete and useRadar was set. Talking earlier lets the
+  // radar hear this-car VIN/2WD/EPAS0, then a different contract a
+  // second later.
+  return (preap_radar_vin_complete == 7U) && preap_radar_should_send;
+}
+
 static bool preap_radar_donor_active(void) {
   if (preap_radar_vin_complete != 7U) {
     return false;
@@ -395,6 +404,7 @@ static bool preap_radar_donor_active(void) {
 static void preap_apply_radar_vin_msg(const CANPacket_t *msg) {
   const int rec = msg->data[0];
   if (rec == 0) {
+    preap_radar_should_send = (msg->data[2] & 0x01U) != 0U;
     preap_radar_position = (msg->data[2] >> 1) & 0x03;
     preap_radar_epas_type = (msg->data[2] >> 3) & 0x07;
     preap_radar_vin[0] = msg->data[5];
@@ -540,7 +550,7 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
   const uint32_t addr = to_fwd->addr;
   const uint8_t msg_len = (uint8_t)GET_LEN(to_fwd);
 
-  if ((bus_num == 0U) && preap_radar_emulation) {
+  if ((bus_num == 0U) && preap_radar_emulation && preap_radar_ready()) {
     if ((addr == 0x45U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x219); }
     else if ((addr == 0x108U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x109); }
     else if ((addr == 0x145U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x149); }
@@ -666,6 +676,10 @@ uint8_t tesla_preap_radar_vin_feed_data(int index) {
 
 bool tesla_preap_radar_donor_active_debug(void) {
   return preap_radar_donor_active();
+}
+
+bool tesla_preap_radar_ready_debug(void) {
+  return preap_radar_ready();
 }
 
 int tesla_preap_radar_gateway_count(void) {
@@ -1335,6 +1349,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_radar_status = 0;
   preap_last_radar_signal = 0;
   preap_radar_vin_complete = 0;
+  preap_radar_should_send = false;
   for (int i = 0; i < 17; i++) {
     preap_radar_vin[i] = (uint8_t)' ';
   }

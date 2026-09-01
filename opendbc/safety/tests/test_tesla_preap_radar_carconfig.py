@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from opendbc.car.structs import CarParams
 from opendbc.car.tesla.preap.radar_can import transform_car_config
+from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.safety import DLC_TO_LEN
 from opendbc.safety.tests.libsafety import libsafety_py
 
@@ -16,6 +17,7 @@ uint8_t tesla_preap_radar_car_config_data(int index);
 bool tesla_preap_radar_vin_feed_captured(void);
 uint8_t tesla_preap_radar_vin_feed_data(int index);
 bool tesla_preap_radar_donor_active_debug(void);
+bool tesla_preap_radar_ready_debug(void);
 int tesla_preap_radar_gateway_count(void);
 uint32_t tesla_preap_radar_gateway_addr(int index);
 uint8_t tesla_preap_radar_gateway_bus(int index);
@@ -54,6 +56,9 @@ class TestTeslaPreAPRadarCarConfig:
     assert not self.safety.tesla_preap_radar_car_config_captured()
 
     self._set_safety_hooks(True)
+    for fragment in range(3):
+      _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, "", True, 0, 0)
+      self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
     for source_data, expected_data in CAR_CONFIG_VECTORS:
       source = libsafety_py.make_CANPacket(0x398, 0, source_data)
       self.safety.safety_rx_hook(source)
@@ -75,6 +80,9 @@ class TestTeslaPreAPRadarCarConfig:
 
   def test_high_bit_byte3_and_byte7_match_python(self):
     self._set_safety_hooks(True)
+    for fragment in range(3):
+      _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, "", True, 0, 0)
+      self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
     payload = bytes((0x02, 0x90, 0x55, 0x80, 0x00, 0x00, 0x17, 0x80))
     frozen = bytes.fromhex("4295558000001790")
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, payload))

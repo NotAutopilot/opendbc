@@ -15,6 +15,34 @@ from opendbc.car.tesla.preap.radar_can import (
 
 BOSCH_ALERT_ADDR = 0x501
 
+IGNORE_HW_FAIL_PARAM = "NAPRadarIgnoreHwFail"
+IGNORE_HW_FAIL_PATH = "/data/params/d/NAPRadarIgnoreHwFail"
+
+
+def _ignore_hw_fail_from_params():
+  from openpilot.common.params import Params
+  return bool(Params().get_bool(IGNORE_HW_FAIL_PARAM))
+
+
+def _ignore_hw_fail_from_file(path=None):
+  with open(path or IGNORE_HW_FAIL_PATH, "rb") as f:
+    return f.read().strip() == b"1"
+
+
+def _resolve_ignore_hw_fail():
+  """Live NAPRadarIgnoreHwFail. Exceptions never force False if the file is 1."""
+  try:
+    if _ignore_hw_fail_from_params():
+      return True
+  except Exception:
+    pass
+  try:
+    if _ignore_hw_fail_from_file():
+      return True
+  except Exception:
+    pass
+  return False
+
 
 BOSCH_DBC = "tesla_radar_bosch_generated"
 BOSCH_TRACK_MAX_MISSED_CYCLES = 2
@@ -142,7 +170,10 @@ class RadarInterface(RadarInterfaceBase):
     ret.points = self.bosch_tracks.points
     frozen = self.table_freeze.update(ret.points)
     if frozen and bool(self.rcp.vl["TeslaRadarSguInfo"].get("RADC_SGUFail")):
-      ret.errors.radarFault = True
+      if _resolve_ignore_hw_fail():
+        ret.points = []
+      else:
+        ret.errors.radarFault = True
     self.updated_messages.clear()
     return ret
 
@@ -158,8 +189,9 @@ class RadarInterface(RadarInterfaceBase):
     # nosecone, and worse. Tinkla ignored it on Pre-AP. IRITable's unit
     # raised it for the adjustment triad while tracks were still live.
     # Driving is how that calibration clears, so do not block engage.
-    # HWFail is the dead-sensor bit and still blocks.
-    if hw_fail:
+    # HWFail is the dead-sensor bit and still blocks, unless
+    # NAPRadarIgnoreHwFail is set (tracks can stay live on a false HWFail).
+    if hw_fail and not _resolve_ignore_hw_fail():
       ret.errors.radarFault = True
       return False
     if dirty:

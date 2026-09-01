@@ -1,6 +1,7 @@
 from pytest import approx
 
 from opendbc.can import CANPacker, CANParser
+from opendbc.car.tesla.preap import radar_interface as radar_interface_module
 from opendbc.car import CanData, gen_empty_fingerprint
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.tesla.interface import CarInterface
@@ -266,6 +267,40 @@ class TestBoschHealth:
     assert result.errors.radarFault is True
     assert result.errors.radarUnavailableTemporary is False
     assert list(result.points) == []
+
+  def test_ignore_hw_fail_does_not_set_radar_fault(self, monkeypatch):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    monkeypatch.setattr(radar_interface_module, "_resolve_ignore_hw_fail", lambda: True)
+    result = _run_cycle(radar)
+    assert result.errors.radarFault is False
+    assert len(result.points) == 1
+
+  def test_ignore_hw_fail_drops_frozen_sgufail_tracks(self, monkeypatch):
+    radar = _make_bosch_interface()
+    monkeypatch.setattr(radar_interface_module, "_resolve_ignore_hw_fail", lambda: True)
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_SGUFail"] = 1
+    result = None
+    for _ in range(3):
+      result = _run_frozen_table(radar)
+    assert result is not None
+    assert result.errors.radarFault is False
+    assert len(result.points) == 0
+
+  def test_ignore_hw_fail_file_fallback(self, monkeypatch, tmp_path):
+    radar = _make_bosch_interface()
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    param_file = tmp_path / "NAPRadarIgnoreHwFail"
+    param_file.write_bytes(b"1")
+    monkeypatch.setattr(
+      radar_interface_module,
+      "_ignore_hw_fail_from_params",
+      lambda: (_ for _ in ()).throw(RuntimeError("params_pyx")),
+    )
+    monkeypatch.setattr(radar_interface_module, "IGNORE_HW_FAIL_PATH", str(param_file))
+    result = _run_cycle(radar)
+    assert result.errors.radarFault is False
 
   def test_sgufail_is_not_radar_fault(self):
     radar = _make_bosch_interface()

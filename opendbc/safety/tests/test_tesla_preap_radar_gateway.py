@@ -7,6 +7,7 @@ from opendbc.car.tesla.preap.radar_can import (
   transform_car_config,
   transform_stw_anglhp,
 )
+from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.safety import DLC_TO_LEN
 from opendbc.safety.tests.libsafety import libsafety_py
 
@@ -23,6 +24,7 @@ uint8_t tesla_preap_radar_car_config_data(int index);
 bool tesla_preap_radar_vin_feed_captured(void);
 uint8_t tesla_preap_radar_vin_feed_data(int index);
 bool tesla_preap_radar_donor_active_debug(void);
+bool tesla_preap_radar_ready_debug(void);
 int tesla_preap_radar_gateway_count(void);
 uint32_t tesla_preap_radar_gateway_addr(int index);
 uint8_t tesla_preap_radar_gateway_bus(int index);
@@ -148,6 +150,10 @@ class TestTeslaPreAPRadarGateway:
       flags |= PREAP_FLAG_RADAR_EMULATION
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, flags)
     self.safety.init_tests()
+    if emulation:
+      for fragment in range(3):
+        _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, "", True, 0, 0)
+        self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
 
   def test_readdr_allowlist(self):
     self._set_hooks()
