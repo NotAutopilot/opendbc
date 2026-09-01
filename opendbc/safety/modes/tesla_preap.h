@@ -10,6 +10,7 @@
 
 #define PREAP_FLAG_ENABLE_PEDAL (1U << 2)
 #define PREAP_FLAG_RADAR_EMULATION (1U << 3)
+// Leftover bit. Position comes from host 0x560, not this flag.
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE (1U << 4)
 #define PREAP_FLAG_PEDAL_BUS_ZERO (1U << 5)
 #define PREAP_FLAG_PEDAL_CALIBRATION (1U << 6)
@@ -103,16 +104,24 @@ static bool preap_stalk_counter_seen = false;
 static uint8_t preap_stalk_counter_last = 0U;
 
 static bool preap_radar_emulation = false;
-static bool preap_radar_behind_nosecone = false;
 static int preap_radar_status = 0;
 static uint32_t preap_last_radar_signal = 0;
 static int preap_radar_epas_type = 0;
 static int preap_radar_position = 0;
+static uint8_t preap_radar_vin[17];
+static uint8_t preap_radar_vin_complete = 0;
+
+// Host→panda donor config. 0x560 never goes on the car; tesla_preap_tx_hook
+// consumes it. Layout matches Tinkla 0.6.6 create_radar_VIN_msg.
+#define PREAP_RADAR_VIN_ADDR 0x560U
+#define PREAP_RADAR_UDS_ADDR 0x641U
 
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
 #define PREAP_RADAR_GTW_CAPTURE_MAX 16
 static bool preap_radar_car_config_captured = false;
 static CANPacket_t preap_radar_car_config_capture;
+static bool preap_radar_vin_feed_captured = false;
+static CANPacket_t preap_radar_vin_feed_capture;
 static int preap_radar_gtw_count = 0;
 static CANPacket_t preap_radar_gtw_capture[PREAP_RADAR_GTW_CAPTURE_MAX];
 #endif
@@ -329,6 +338,91 @@ static void preap_word_to_bytes(uint8_t *dst, uint32_t src) {
   dst[3] = (uint8_t)((src >> 24U) & 0xFFU);
 }
 
+static bool preap_f190_payload_allowed(const CANPacket_t *msg) {
+  static const uint8_t tester[8] = {0x02U, 0x3EU, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+  static const uint8_t default_session[8] = {0x02U, 0x10U, 0x01U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+  static const uint8_t extended_session[8] = {0x02U, 0x10U, 0x03U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+  static const uint8_t read_f190[8] = {0x03U, 0x22U, 0xF1U, 0x90U, 0x00U, 0x00U, 0x00U, 0x00U};
+  static const uint8_t flow_control[8] = {0x30U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+  static const uint8_t cleanup_marker[8] = {0x02U, 0x3EU, 0x80U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+  const uint8_t *allowed[] = {tester, default_session, extended_session, read_f190, flow_control, cleanup_marker};
+  if (GET_LEN(msg) != 8U) {
+    return false;
+  }
+  for (unsigned int i = 0U; i < (sizeof(allowed) / sizeof(allowed[0])); i++) {
+    bool match = true;
+    for (int b = 0; b < 8; b++) {
+      if (msg->data[b] != allowed[i][b]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool preap_f190_tx_ok(const CANPacket_t *msg) {
+  // Read-only F190 on the radar bus. Never writes, routines, or security.
+  if (!preap_radar_emulation || controls_allowed || controls_allowed_lateral) {
+    return false;
+  }
+  if (msg->fd || (msg->bus != 1U)) {
+    return false;
+  }
+  return preap_f190_payload_allowed(msg);
+}
+
+static uint32_t preap_radar_vin_char(int pos, int shift) {
+  return ((uint32_t)preap_radar_vin[pos]) << (shift * 8);
+}
+
+static bool preap_radar_donor_active(void) {
+  if (preap_radar_vin_complete != 7U) {
+    return false;
+  }
+  // 0.6.6 default was 17 spaces. Treat that as "use this car."
+  for (int i = 0; i < 17; i++) {
+    if ((preap_radar_vin[i] != 0U) && (preap_radar_vin[i] != (uint8_t)' ')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void preap_apply_radar_vin_msg(const CANPacket_t *msg) {
+  const int rec = msg->data[0];
+  if (rec == 0) {
+    preap_radar_position = (msg->data[2] >> 1) & 0x03;
+    preap_radar_epas_type = (msg->data[2] >> 3) & 0x07;
+    preap_radar_vin[0] = msg->data[5];
+    preap_radar_vin[1] = msg->data[6];
+    preap_radar_vin[2] = msg->data[7];
+    preap_radar_vin_complete |= 1U;
+  } else if (rec == 1) {
+    preap_radar_vin[3] = msg->data[1];
+    preap_radar_vin[4] = msg->data[2];
+    preap_radar_vin[5] = msg->data[3];
+    preap_radar_vin[6] = msg->data[4];
+    preap_radar_vin[7] = msg->data[5];
+    preap_radar_vin[8] = msg->data[6];
+    preap_radar_vin[9] = msg->data[7];
+    preap_radar_vin_complete |= 2U;
+  } else if (rec == 2) {
+    preap_radar_vin[10] = msg->data[1];
+    preap_radar_vin[11] = msg->data[2];
+    preap_radar_vin[12] = msg->data[3];
+    preap_radar_vin[13] = msg->data[4];
+    preap_radar_vin[14] = msg->data[5];
+    preap_radar_vin[15] = msg->data[6];
+    preap_radar_vin[16] = msg->data[7];
+    preap_radar_vin_complete |= 4U;
+  } else {
+  }
+}
+
 static const int preap_crc_lookup[256] = {
   0x00, 0x1D, 0x3A, 0x27, 0x74, 0x69, 0x4E, 0x53, 0xE8, 0xF5, 0xD2, 0xCF, 0x9C, 0x81, 0xA6, 0xBB,
   0xCD, 0xD0, 0xF7, 0xEA, 0xB9, 0xA4, 0x83, 0x9E, 0x25, 0x38, 0x1F, 0x02, 0x51, 0x4C, 0x6B, 0x76,
@@ -367,6 +461,10 @@ static void preap_radar_capture_tx(const CANPacket_t *pkt) {
     preap_radar_car_config_capture = *pkt;
     preap_radar_car_config_captured = true;
   }
+  if (pkt->addr == 0x2B9U) {
+    preap_radar_vin_feed_capture = *pkt;
+    preap_radar_vin_feed_captured = true;
+  }
 #else
   SAFETY_UNUSED(pkt);
 #endif
@@ -404,6 +502,35 @@ static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t
   uint32_t hi = PREAP_GET_BYTES_48(src);
   lo = (lo & 0xFFFFF33FU) | 0x100U | 0x440U;
   hi = (hi & 0xCFFF0F0FU) | 0x10000000U | ((uint32_t)preap_radar_position << 4) | ((uint32_t)preap_radar_epas_type << 12);
+  // Tinkla 0.6.6: VIN character 8 of '2' or '4' is dual-motor. Force 4WD
+  // on the live 0x2A9 so xWD matches the donor VIN, not this Pre-AP chassis.
+  if (preap_radar_donor_active() && ((preap_radar_vin[7] == (uint8_t)'2') ||
+                                     (preap_radar_vin[7] == (uint8_t)'4'))) {
+    lo |= 0x08U;
+  }
+  preap_word_to_bytes(&dst->data[0], lo);
+  preap_word_to_bytes(&dst->data[4], hi);
+}
+
+static void preap_transform_radar_vin_feed(const CANPacket_t *src, CANPacket_t *dst) {
+  *dst = (CANPacket_t){.returned = 0U, .rejected = 0U, .extended = src->extended,
+                       .bus = 1, .addr = 0x2B9, .data_len_code = src->data_len_code};
+  uint32_t lo = PREAP_GET_BYTES_04(src);
+  uint32_t hi = PREAP_GET_BYTES_48(src);
+  if (preap_radar_donor_active() && ((lo & 0x10U) == 0x10U)) {
+    const int rec = (int)(lo & 0xFFU);
+    if (rec == 0x10) {
+      lo = (uint32_t)rec;
+      hi = preap_radar_vin_char(0, 1) | preap_radar_vin_char(1, 2) | preap_radar_vin_char(2, 3);
+    } else if (rec == 0x11) {
+      lo = (uint32_t)rec | preap_radar_vin_char(3, 1) | preap_radar_vin_char(4, 2) | preap_radar_vin_char(5, 3);
+      hi = preap_radar_vin_char(6, 0) | preap_radar_vin_char(7, 1) | preap_radar_vin_char(8, 2) | preap_radar_vin_char(9, 3);
+    } else if (rec == 0x12) {
+      lo = (uint32_t)rec | preap_radar_vin_char(10, 1) | preap_radar_vin_char(11, 2) | preap_radar_vin_char(12, 3);
+      hi = preap_radar_vin_char(13, 0) | preap_radar_vin_char(14, 1) | preap_radar_vin_char(15, 2) | preap_radar_vin_char(16, 3);
+    } else {
+    }
+  }
   preap_word_to_bytes(&dst->data[0], lo);
   preap_word_to_bytes(&dst->data[4], hi);
 }
@@ -420,7 +547,11 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
     else if ((addr == 0x20AU) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x159); }
     else if ((addr == 0x308U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x209); }
     else if ((addr == 0x30AU) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x2D9); }
-    else if ((addr == 0x405U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x2B9); }
+    else if ((addr == 0x405U) && (msg_len == 8U)) {
+      CANPacket_t vin_pkt = {0};
+      preap_transform_radar_vin_feed(to_fwd, &vin_pkt);
+      preap_radar_send(&vin_pkt);
+    }
     else {
     }
 
@@ -522,6 +653,21 @@ uint8_t tesla_preap_radar_car_config_data(int index) {
   return preap_radar_car_config_capture.data[index];
 }
 
+bool tesla_preap_radar_vin_feed_captured(void) {
+  return preap_radar_vin_feed_captured;
+}
+
+uint8_t tesla_preap_radar_vin_feed_data(int index) {
+  if ((index < 0) || (index >= 8)) {
+    return 0U;
+  }
+  return preap_radar_vin_feed_capture.data[index];
+}
+
+bool tesla_preap_radar_donor_active_debug(void) {
+  return preap_radar_donor_active();
+}
+
 int tesla_preap_radar_gateway_count(void) {
   return preap_radar_gtw_count;
 }
@@ -564,6 +710,7 @@ uint8_t tesla_preap_radar_gateway_data(int index, int byte_index) {
 void tesla_preap_radar_gateway_reset(void) {
   preap_radar_gtw_count = 0;
   preap_radar_car_config_captured = false;
+  preap_radar_vin_feed_captured = false;
 }
 
 void tesla_preap_observe_can(const CANPacket_t *msg) {
@@ -1011,6 +1158,20 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   };
 
   bool allowed = false;
+
+  // Host→panda donor VIN/config. Intercept; do not put 0x560 on the car.
+  if (msg->addr == PREAP_RADAR_VIN_ADDR) {
+    if ((msg->bus == 0U) && !msg->fd && (GET_LEN(msg) == 8U)) {
+      preap_apply_radar_vin_msg(msg);
+    }
+    return false;
+  }
+
+  // Radar UDS on bus 1. Allow only the F190 read sequence while disengaged.
+  if (msg->addr == PREAP_RADAR_UDS_ADDR) {
+    return preap_f190_tx_ok(msg);
+  }
+
   if (msg->addr == 0x551U) {
     if ((!(preap_enable_pedal || preap_pedal_calibration)) || (msg->bus != preap_pedal_bus) || msg->fd ||
         (GET_LEN(msg) != 6U)) {
@@ -1169,16 +1330,17 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_pedal_bus = GET_FLAG(param, PREAP_FLAG_PEDAL_BUS_ZERO) ? 0U : 2U;
   preap_mode = (uint8_t)(current_safety_param_sp & PREAP_MODE_MASK);
   preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
-  preap_radar_behind_nosecone = GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE);
-  if (preap_radar_behind_nosecone && !preap_radar_emulation) {
-    preap_radar_behind_nosecone = false;
-  }
-  preap_radar_position = preap_radar_behind_nosecone ? 1 : 0;
+  preap_radar_position = 0;
   preap_radar_epas_type = 0;
   preap_radar_status = 0;
   preap_last_radar_signal = 0;
+  preap_radar_vin_complete = 0;
+  for (int i = 0; i < 17; i++) {
+    preap_radar_vin[i] = (uint8_t)' ';
+  }
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
   preap_radar_car_config_captured = false;
+  preap_radar_vin_feed_captured = false;
   preap_radar_gtw_count = 0;
 #endif
 
@@ -1248,24 +1410,30 @@ static safety_config tesla_preap_init(uint16_t param) {
       {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},
       {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},
       {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},
+      {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
+      {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
     };
     static CanMsg PREAP_TX_MSGS_PEDAL_BUS_2[] = {
       {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},
       {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},
       {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},
       {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},
+      {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
+      {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
     };
     ret.tx_msgs = preap_pedal_bus == 0U ? PREAP_TX_MSGS_PEDAL_BUS_0 : PREAP_TX_MSGS_PEDAL_BUS_2;
-    ret.tx_msgs_len = 4;
+    ret.tx_msgs_len = 6;
   } else {
     static CanMsg PREAP_TX_MSGS_STOCK_CC[] = {
       {0x45, 0, 8, .check_relay = false, .disable_static_blocking = true},
       {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},
       {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},
       {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},
+      {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
+      {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
     };
     ret.tx_msgs = PREAP_TX_MSGS_STOCK_CC;
-    ret.tx_msgs_len = 4;
+    ret.tx_msgs_len = 6;
   }
   return ret;
 }

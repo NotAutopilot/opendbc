@@ -64,19 +64,17 @@ def _crc8_j1850(lo: int, hi: int, msg_len: int) -> int:
   return crc ^ 0xFF
 
 
-def radar_config_allowed(radar_emulation: bool, behind_nosecone: bool) -> bool:
-  """Nosecone without emulation is contradictory and cannot grant gateway TX."""
-  return bool(radar_emulation) and (not behind_nosecone or radar_emulation)
+def radar_config_allowed(radar_emulation: bool) -> bool:
+  return bool(radar_emulation)
 
 
-def transform_car_config(src: bytes, *, behind_nosecone: bool, epas_type: int = 0) -> bytes | None:
+def transform_car_config(src: bytes, *, position: int = 0, epas_type: int = 0) -> bytes | None:
   if len(src) != 8:
     return None
   lo = _u32_le(src, 0)
   hi = _u32_le(src, 4)
-  position = 1 if behind_nosecone else 0
   lo = (lo & 0xFFFFF33F) | 0x100 | 0x440
-  hi = (hi & 0xCFFF0F0F) | 0x10000000 | (position << 4) | (epas_type << 12)
+  hi = (hi & 0xCFFF0F0F) | 0x10000000 | ((position & 0x03) << 4) | (epas_type << 12)
   return _pack_u32_le(lo) + _pack_u32_le(hi)
 
 
@@ -127,8 +125,8 @@ def synthesize_esp_wheel_speeds(src: bytes) -> bytes | None:
 
 
 def gateway_frames(addr: int, bus: int, data: bytes, *, radar_emulation: bool,
-                   behind_nosecone: bool) -> tuple[GatewayFrame, ...]:
-  if not radar_config_allowed(radar_emulation, behind_nosecone) or bus != 0:
+                   position: int = 0) -> tuple[GatewayFrame, ...]:
+  if not radar_config_allowed(radar_emulation) or bus != 0:
     return ()
 
   frames: list[GatewayFrame] = []
@@ -137,7 +135,7 @@ def gateway_frames(addr: int, bus: int, data: bytes, *, radar_emulation: bool,
       frames.append(GatewayFrame(dst, RADAR_BUS, bytes(data)))
 
   if addr == GTW_CAR_CONFIG_SRC:
-    payload = transform_car_config(data, behind_nosecone=behind_nosecone)
+    payload = transform_car_config(data, position=position)
     if payload is not None:
       frames.append(GatewayFrame(GTW_CAR_CONFIG_DST, RADAR_BUS, payload))
 

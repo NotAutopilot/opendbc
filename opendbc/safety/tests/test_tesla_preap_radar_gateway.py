@@ -13,7 +13,6 @@ from opendbc.safety.tests.libsafety import libsafety_py
 
 PREAP_FLAG_ENABLE_PEDAL = 1 << 2
 PREAP_FLAG_RADAR_EMULATION = 1 << 3
-PREAP_FLAG_RADAR_BEHIND_NOSECONE = 1 << 4
 
 _RADAR_CDEF = """
 bool tesla_preap_radar_car_config_captured(void);
@@ -21,6 +20,9 @@ uint32_t tesla_preap_radar_car_config_addr(void);
 uint8_t tesla_preap_radar_car_config_bus(void);
 uint8_t tesla_preap_radar_car_config_dlc(void);
 uint8_t tesla_preap_radar_car_config_data(int index);
+bool tesla_preap_radar_vin_feed_captured(void);
+uint8_t tesla_preap_radar_vin_feed_data(int index);
+bool tesla_preap_radar_donor_active_debug(void);
 int tesla_preap_radar_gateway_count(void);
 uint32_t tesla_preap_radar_gateway_addr(int index);
 uint8_t tesla_preap_radar_gateway_bus(int index);
@@ -77,7 +79,7 @@ WHEEL_SPEED_FIXTURES = (
 )
 HIGH_BIT_CAR_CONFIG = (
   bytes((0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80)),
-  bytes.fromhex("4005008010000090"),
+  bytes.fromhex("4005008000000090"),
 )
 HIGH_BIT_STW_PASSTHROUGH = bytes((0x11, 0x22, 0x33, 0x80, 0x44, 0x55, 0x66, 0x80))
 HIGH_BIT_STW_SNA = (
@@ -138,14 +140,12 @@ class TestTeslaPreAPRadarGateway:
   def setup_method(self):
     self.safety = libsafety_py.libsafety
 
-  def _set_hooks(self, *, emulation=True, nosecone=False, pedal=False):
+  def _set_hooks(self, *, emulation=True, pedal=False):
     flags = 0
     if pedal:
       flags |= PREAP_FLAG_ENABLE_PEDAL
     if emulation:
       flags |= PREAP_FLAG_RADAR_EMULATION
-    if nosecone:
-      flags |= PREAP_FLAG_RADAR_BEHIND_NOSECONE
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, flags)
     self.safety.init_tests()
 
@@ -176,11 +176,11 @@ class TestTeslaPreAPRadarGateway:
         assert frame[4] is False
 
   def test_car_config_and_stw_and_synthetics(self):
-    self._set_hooks(nosecone=True)
+    self._set_hooks()
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0290555300001700")))
     config = _captured(self.safety)
     assert config[0][0] == 0x2A9
-    assert config[0][3] == bytes.fromhex("4295555310001710")
+    assert config[0][3] == bytes.fromhex("4295555300001710")
 
     self.safety.tesla_preap_radar_gateway_reset()
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x0E, 0, bytes.fromhex("0000ffff00000000")))
@@ -202,7 +202,7 @@ class TestTeslaPreAPRadarGateway:
     assert torque[1][2] == 8
 
   def test_all_thirteen_destinations(self):
-    self._set_hooks(nosecone=True)
+    self._set_hooks()
     seen = set()
     payload8 = bytes(range(8))
     for src, _dst, dlc in READDR:
@@ -298,13 +298,13 @@ class TestTeslaPreAPRadarGateway:
     return parser.vl[msg_name]
 
   def test_unsigned_high_bit_byte_parity_matches_python(self):
-    self._set_hooks(nosecone=True)
+    self._set_hooks()
     source, expected = HIGH_BIT_CAR_CONFIG
     self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, source))
     config = _captured(self.safety)
     assert config[0][0] == 0x2A9
     assert config[0][3] == expected
-    assert config[0][3] == transform_car_config(source, behind_nosecone=True)
+    assert config[0][3] == transform_car_config(source, position=0)
     decoded = self._decode_bosch("Msg2A9_GTW_carConfig", 0x2A9, expected)
     assert decoded["Msg2A9_Always0x10"] == 0x90
     assert (expected[3] & 0x80) == 0x80
