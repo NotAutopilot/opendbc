@@ -46,7 +46,8 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CI = self._make_interface()
     CS = CI.update([])
     for field in ("teslaCCEngaged", "teslaCCDisengaged", "teslaCCNotArmed",
-                  "pedalMaxRegen", "pedalLongActive", "pedalAuthorityRequested",
+                  "pedalMaxRegen", "pedalLongActive", "enableLongControl",
+                  "pedalAuthorityRequested",
                   "pedalAuthorityState", "pedalAuthorityAction", "pedalCommandCounter",
                   "pedalFeedbackState", "pedalFeedbackCounter", "pedalFirstEnabledMonoTime",
                   "vdasLimitedAccel", "pedalCommandDi", "pedalAuthorityFailed"):
@@ -99,6 +100,20 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
 
       CI.CS.pedal_authority_active = True
       self.assertTrue(CI.update([]).pedalLongActive)
+
+  def test_enable_long_control_publishes_fsm_intent_not_authority(self):
+    CI = self._make_interface()
+    CI.CS.engagement.enableLongControl = True
+    CI.CS.pedal_authority_active = False
+
+    with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True):
+      published = CI.update([])
+      self.assertTrue(published.enableLongControl)
+      self.assertFalse(published.pedalLongActive)
+
+      CI.CS.engagement.enableLongControl = False
+      published = CI.update([])
+      self.assertFalse(published.enableLongControl)
 
   def test_hands_on_level_two_disengages(self):
     for hands_on_level, should_disengage in ((1, False), (2, True), (3, True)):

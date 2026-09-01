@@ -221,6 +221,7 @@ struct CarState {
   vdasLimitedAccel @74 :Float32;  # NAP: jerk-limited VDAS acceleration command
   pedalCommandDi @75 :Float32;  # NAP: controller DI-domain command/seed; RESET wire frames carry zero
   pedalAuthorityFailed @76 :Bool;  # NAP: bounded pedal authority acquisition failed
+  enableLongControl @77 :Bool;  # Pre-AP: FSM longitudinal intent; survives gas override
 
   # cruise state
   cruiseState @10 :CruiseState;
