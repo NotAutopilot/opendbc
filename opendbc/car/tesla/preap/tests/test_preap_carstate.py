@@ -106,6 +106,22 @@ class TestPreAPReadOnlyCarState(unittest.TestCase):
       self.assertTrue(CS.blockPcmEnable)
       self.assertEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.none)
       self.assertEqual(CS_SP.preapIntentSequence, 0)
+      self.assertFalse(CS_SP.enableLongControl)
+
+  def test_enable_long_control_publishes_fsm_intent_not_authority(self):
+    CI = _make_ci()
+    _, CS_SP = CI.update([])
+    self.assertFalse(CS_SP.enableLongControl)
+    CI.CS.intent.enable_long_control = True
+    CI.CS.pedal_authority_active = False
+    CI.CS._sync_stock_cc_intent()
+    published = CI.CS._last_ret_sp
+    self.assertTrue(published.enableLongControl)
+    self.assertFalse(published.pedalLongActive)
+
+    CI.CS.intent.enable_long_control = False
+    CI.CS._sync_stock_cc_intent()
+    self.assertFalse(CI.CS._last_ret_sp.enableLongControl)
 
   def test_vehicle_rx_checksum_vectors(self):
     CI = _make_ci()
@@ -2042,6 +2058,7 @@ class TestPreAPCarStateDirectAdjustmentCoupled(unittest.TestCase):
         self.assertTrue(CS_SP.preapStockCcHostDiConfirmed)
         self.assertEqual(CS_SP.preapLateralIntent, structs.CarStateSP.PreapLateralIntent.mainCruiseRequest)
         self.assertEqual(CS_SP.preapLongitudinalIntent, structs.CarStateSP.PreapLongitudinalIntent.enable)
+        self.assertTrue(CS_SP.enableLongControl)
         self.assertFalse(CI.CS.intent._coupled_deferred)
 
 

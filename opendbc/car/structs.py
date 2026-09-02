@@ -217,6 +217,7 @@ class CarStateSP:
   preapStockCcHostDiConfirmed: bool = auto_field()
   preapStockCcEnablePending: bool = auto_field()
   # Pre-AP pedal authority and VDAS diagnostics. Pin capnp ordinals @9-@19.
+  # enableLongControl is @20.
   pedalMaxRegen: bool = auto_field()
   pedalLongActive: bool = auto_field()
   pedalAuthorityRequested: bool = auto_field()
@@ -228,6 +229,8 @@ class CarStateSP:
   pedalCommandDi: float = auto_field()
   pedalAuthorityFailed: bool = auto_field()
   vdasLimitedAccel: float = auto_field()
+  # Pre-AP FSM longitudinal intent. Pin capnp ordinal @20. Survives gas override.
+  enableLongControl: bool = auto_field()
 
   class PreapLateralIntent(StrEnum):
     none = auto()

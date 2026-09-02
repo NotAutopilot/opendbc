@@ -190,6 +190,7 @@ class PreAPCarStateSP(structs.CarStateSP):
   pedalCommandDi: float = 0.0
   pedalAuthorityFailed: bool = False
   vdasLimitedAccel: float = 0.0
+  enableLongControl: bool = False
 
 
 def required_sources_fresh(seen_ns: dict[str, int | None], now_ns: int,
@@ -368,6 +369,7 @@ class PreAPCarState(CarStateBase):
     target.preapLateralIntent = self.intent.record.lateral
     target.preapLongitudinalIntent = self.intent.record.longitudinal
     target.preapIntentSequence = self.intent.record.sequence
+    target.enableLongControl = bool(self.intent.enable_long_control)
 
   def update_stock_cc_panda(self, panda_state) -> None:
     if panda_state is None:

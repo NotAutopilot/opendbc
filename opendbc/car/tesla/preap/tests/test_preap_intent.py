@@ -42,10 +42,12 @@ class TestPreAPIntentTranslator(unittest.TestCase):
     c = _ready(tr, 0, 0)
     tr.update_stalk(MAIN, c, 10)
     self._assert_record(tr, Lateral.mainCruiseRequest, Longitudinal.none, 1)
+    self.assertFalse(tr.enable_long_control)
     tr.update_stalk(IDLE, c + 1, 20)
     self._assert_record(tr, Lateral.mainCruiseRequest, Longitudinal.none, 1)
     tr.update_stalk(MAIN, c + 2, 10 + 399)
     self._assert_record(tr, Lateral.none, Longitudinal.enable, 2)
+    self.assertTrue(tr.enable_long_control)
 
   def test_cruise_coupled_pull1_neutral_pull2_both(self):
     tr = _translator(Mode.cruiseCoupled)
@@ -136,6 +138,21 @@ class TestPreAPIntentTranslator(unittest.TestCase):
         self._assert_record(tr, lateral, Longitudinal.disable, 1)
         tr.update_terminal_failure(True)
         self._assert_record(tr, lateral, Longitudinal.disable, 1)
+
+  def test_enable_long_control_latches_across_gas_and_drops_on_brake(self):
+    tr = _translator(Mode.independent)
+    self.assertFalse(tr.enable_long_control)
+    c = _ready(tr, 0, 0)
+    tr.update_stalk(MAIN, c, 10)
+    self.assertFalse(tr.enable_long_control)
+    tr.update_stalk(IDLE, c + 1, 20)
+    tr.update_stalk(MAIN, c + 2, 10 + 399)
+    self.assertTrue(tr.enable_long_control)
+    tr.update_stalk(IDLE, c + 3, 500)
+    self.assertTrue(tr.enable_long_control)
+    tr.set_long_active(True)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=True)
+    self.assertFalse(tr.enable_long_control)
 
   def test_hands_on_does_not_disable(self):
     tr = _translator()

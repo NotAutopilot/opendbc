@@ -57,6 +57,8 @@ class PreAPIntentTranslator:
     self._blocked = True
     self.stock_cc_active = False
     self._coupled_deferred = False
+    # Driver long intent. Survives gas override; interceptor authority does not.
+    self.enable_long_control = False
 
   def set_long_active(self, long_active: bool) -> None:
     """Controller feeds prior-cycle logical standard-long active state.
@@ -71,6 +73,10 @@ class PreAPIntentTranslator:
   def _publish(self, lateral: LateralIntent, longitudinal: LongitudinalIntent) -> None:
     sequence = (self.record.sequence + 1) & _UINT32_MASK
     self.record = PreAPIntentRecord(lateral, longitudinal, sequence)
+    if longitudinal == LongitudinalIntent.enable:
+      self.enable_long_control = True
+    elif longitudinal == LongitudinalIntent.disable:
+      self.enable_long_control = False
 
   def _clear_pending(self) -> None:
     self._first_pull_ms = None
