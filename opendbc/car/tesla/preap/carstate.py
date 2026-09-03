@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
+import math
 import time
 
 from opendbc.can import CANDefine, CANParser
@@ -13,8 +14,8 @@ from opendbc.car.interfaces import CarStateBase
 from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp, pedal_calib_from_cp_sp, pedal_pipeline_enabled
 from opendbc.car.tesla.preap.constants import (
   DI_GENERATION_ABSOLUTE_BASE, DI_GENERATION_ORDINAL_BITS, DI_GENERATION_ORDINAL_LIMIT,
-  PEDAL_DI_PRESSED, PEDAL_FEEDBACK_TIMEOUT_STATE, PREAP_MODE_INVALID, PREAP_MODE_MASK,
-  STALK_DOUBLE_PULL_MS,
+  PEDAL_DI_PRESSED, PEDAL_FEEDBACK_TIMEOUT_STATE, PEDAL_STATE_NO_FAULT, PREAP_MODE_INVALID,
+  PREAP_MODE_MASK, STALK_DOUBLE_PULL_MS,
 )
 from opendbc.car.tesla.preap.engagement import PreAPEngagement
 from opendbc.car.tesla.preap.intent import PreAPIntentTranslator
@@ -220,6 +221,7 @@ class PreAPCarState(CarStateBase):
     self.intent = PreAPIntentTranslator(mode)
     self.engagement = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=STALK_DOUBLE_PULL_MS)
     self.pedal_speed_kph = 0.0
+    self.cruise_buttons = 0
     self.stock_cc = StockCcTransaction(active=not bool(CP.openpilotLongitudinalControl))
     self.intent.stock_cc_active = self.stock_cc.active
     self.stock_cc_now_ms = 0
@@ -433,6 +435,7 @@ class PreAPCarState(CarStateBase):
     )
     # Hands-on is a pause request. Only an EPAS fault exits logical control.
     ret.steeringDisengage = epas_rejecting or ret.steerFaultPermanent
+    self.engagement.handle_steering_disengage(ret.steeringDisengage)
 
     # Byte 4 is digital speed on post-2019 DI_state but overlaps DI_cruiseSet
     # on older layouts; byte 6 has the inverse ambiguity. A frame with both
@@ -534,9 +537,14 @@ class PreAPCarState(CarStateBase):
       self._di_brake_seen and self._brake_message_seen and
       ret.gearShifter == structs.CarState.GearShifter.drive and not ret.doorOpen
     )
+    # Panda-refuse mirror: gas down or interceptor not NO_FAULT. STATE 4/5 may
+    # remain PedalFeedback.available (health) but must not arm long.
+    interceptor_no_fault = (not self.pedal_pipeline) or (
+      bool(self.pedal.available) and int(self.pedal.interceptor_state) == PEDAL_STATE_NO_FAULT
+    )
     self.intent.update_health(
       blocked=blocked, epas_fault=ret.steeringDisengage, brake_pressed=ret.brakePressed,
-      gas_pressed=ret.gasPressed,
+      gas_pressed=ret.gasPressed, interceptor_no_fault=interceptor_no_fault,
     )
     self.stock_cc.update_health(blocked=blocked, brake_pressed=ret.brakePressed)
 
@@ -547,6 +555,7 @@ class PreAPCarState(CarStateBase):
       for sample, generation in accepted_di_samples
     ]
     source_events.extend((stw.timestamp_ns, stw.source_order, 1, stw, None) for stw in _stw_samples(cp_chassis))
+    stw_seen = False
     for _timestamp_ns, _source_order, event_kind, event, generation in sorted(source_events, key=lambda event: (event[0], event[1])):
       if event_kind == 0:
         self._di_generation = generation
@@ -559,24 +568,54 @@ class PreAPCarState(CarStateBase):
       if self.stock_cc.is_echo(lever_i, counter_i, now_ms):
         continue
       self.stock_cc.update_live_stw(event.values)
+      # Dual-owner split (option a, leftover nap-faithful):
+      # process_buttons owns Pre-AP FSM (MAIN / double-pull / set-speed / brake-drop).
+      # intent.update_stalk owns the published MADS/intent outbox (PASSTHROUGH_LEVERS,
+      # Pedal Cruise Engaged). CarState drops ButtonEvents so they do not fight.
       self.intent.update_stalk(lever_i, counter_i, now_ms)
-      self.engagement.sync_long_control(
-        self.intent.enable_long_control, ret.vEgo, self.speed_units, self.pedal_pipeline,
+      prev_cruise_buttons = self.cruise_buttons
+      self.cruise_buttons = lever_i
+      # nap-faithful long_control_allowed, plus panda-refuse conditions.
+      # Do not pass True: that latches engagement.enableLongControl without NO_FAULT.
+      # Match PedalAuthority ENABLE: available AND STATE==NO_FAULT (STATE 4/5 stay
+      # available for health only).
+      use_pedal = self.pedal_pipeline
+      pedal_factor = float(self.pedal_calib.factor)
+      pedal_transform_valid = math.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
+      pedal_long_allowed = use_pedal and pedal_transform_valid
+      long_control_allowed = (not use_pedal) or pedal_transform_valid
+      if use_pedal and (ret.gasPressed or not interceptor_no_fault):
+        long_control_allowed = False
+      self.engagement.process_buttons(
+        self.cruise_buttons, prev_cruise_buttons, now_ms,
+        ret.vEgo, self.speed_units, use_pedal, pedal_long_allowed,
+        long_control_allowed, self.real_brake_pressed, self.di_cruise_state,
       )
-      self.engagement.apply_stalk_speed(lever_i, ret.vEgo, self.speed_units, self.pedal_pipeline)
+      stw_seen = True
       self.stock_cc.update_stalk(
         lever_i,
         counter_i,
         now_ms,
         _di_generation(event.timestamp_ns, DI_GENERATION_ORDINAL_LIMIT - 1),
       )
+    if not stw_seen:
+      use_pedal = self.pedal_pipeline
+      pedal_factor = float(self.pedal_calib.factor)
+      pedal_transform_valid = math.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
+      pedal_long_allowed = use_pedal and pedal_transform_valid
+      long_control_allowed = (not use_pedal) or pedal_transform_valid
+      if use_pedal and (ret.gasPressed or not interceptor_no_fault):
+        long_control_allowed = False
+      self.engagement.process_buttons(
+        self.cruise_buttons, self.cruise_buttons, now_ms,
+        ret.vEgo, self.speed_units, use_pedal, pedal_long_allowed,
+        long_control_allowed, self.real_brake_pressed, self.di_cruise_state,
+      )
+    self.engagement.check_can_engage(ret.doorOpen, ret.gearShifter, ret.seatbeltUnlatched)
     self.stock_cc.tick_timeouts(now_ms)
-    self.engagement.sync_long_control(
-      self.intent.enable_long_control, ret.vEgo, self.speed_units, self.pedal_pipeline,
-    )
     self.pedal_speed_kph = self.engagement.pedal_speed_kph
-    if self.pedal_pipeline and self.intent.enable_long_control:
-      ret.cruiseState.speed = max(self.pedal_speed_kph * CV.KPH_TO_MS, 1e-3)
+    if self.pedal_pipeline and self.engagement.enableLongControl:
+      ret.cruiseState.speed = self.pedal_speed_kph * CV.KPH_TO_MS
     self._sync_stock_cc_intent(ret_sp)
     # Epoch is stamped by card on the process incarnation.
     ret_sp.preapIntentEpoch = 0

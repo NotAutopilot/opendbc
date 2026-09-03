@@ -60,7 +60,10 @@ class PreAPIntentTranslator:
     # Driver long intent. Survives gas override; interceptor authority does not.
     self.enable_long_control = False
     self._gas_pressed = False
-    # Second pull while interceptor gas is down. Panda will not latch long.
+    # True when panda would accept ENABLE (STATE==NO_FAULT). STATE 4/5 may stay
+    # PedalFeedback.available for health but must not arm Pedal Cruise Engaged.
+    self._interceptor_no_fault = True
+    # Second pull while panda would refuse (gas down and/or not NO_FAULT).
     self._enable_blocked_by_gas = False
 
   def set_long_active(self, long_active: bool) -> None:
@@ -96,7 +99,7 @@ class PreAPIntentTranslator:
     self._clear_pending()
 
   def update_health(self, *, blocked: bool, epas_fault: bool, brake_pressed: bool,
-                    gas_pressed: bool = False) -> None:
+                    gas_pressed: bool = False, interceptor_no_fault: bool = True) -> None:
     if (epas_fault and not self._epas_fault) or (blocked and not self._blocked):
       self._disable()
     elif brake_pressed and not self._brake_pressed and self.long_active:
@@ -111,9 +114,13 @@ class PreAPIntentTranslator:
 
     gas_released = self._gas_pressed and not gas_pressed
     self._gas_pressed = bool(gas_pressed)
-    if gas_released and self._enable_blocked_by_gas:
-      self._enable_blocked_by_gas = False
-      if not (blocked or epas_fault or brake_pressed):
+    no_fault_restored = (not self._interceptor_no_fault) and bool(interceptor_no_fault)
+    self._interceptor_no_fault = bool(interceptor_no_fault)
+    # Deferred enable after a panda-refuse block: only fire when gas is up AND
+    # interceptor is NO_FAULT. Do not latch Pedal Cruise Engaged on STATE 4/5.
+    if self._enable_blocked_by_gas and (gas_released or no_fault_restored):
+      if (not self._gas_pressed) and self._interceptor_no_fault and not (blocked or epas_fault or brake_pressed):
+        self._enable_blocked_by_gas = False
         self._publish(LateralIntent.none, LongitudinalIntent.enable)
 
   def update_terminal_failure(self, failed: bool) -> None:
@@ -183,10 +190,11 @@ class PreAPIntentTranslator:
         self._coupled_deferred = True
         self._publish(LateralIntent.none, LongitudinalIntent.none)
         return
-      if self._gas_pressed:
-        # Panda will not grant controlsAllowed while interceptor gas is down.
-        # Publishing enable here marks Pedal Cruise Engaged and CC.enabled,
-        # then controlsMismatch about two seconds later.
+      if self._gas_pressed or not self._interceptor_no_fault:
+        # Panda will not grant controlsAllowed while interceptor gas is down or
+        # feedback is not NO_FAULT. STATE 4/5 may stay PedalFeedback.available
+        # (health) but must not alone arm Pedal Cruise Engaged / CC.enabled /
+        # longActive (controlsMismatch 0000000c). Do not read live ca/caLong.
         self._enable_blocked_by_gas = True
         if self.mode == EngagementMode.cruiseCoupled:
           self._publish(LateralIntent.mainCruiseRequest, LongitudinalIntent.none)

@@ -11,10 +11,10 @@ SPOOF_ECHO_WINDOW_MS = 300
 
 
 class PreAPEngagement:
-  """Pre-AP engagement FSM plus software set-speed for pedal-long.
+  """Pre-AP engagement FSM: double-pull detection, target speed, brake override, CC spoof flags.
 
-  naponsp intent.py owns live engagement. CarState must not publish ButtonEvents.
-  Pedal set-speed is update_software_speed / sync_long_control / apply_stalk_speed.
+  process_buttons still builds ButtonEvents so stalk +/- can mutate pedal_speed_kph.
+  naponsp CarState must not publish those events; intent PASSTHROUGH_LEVERS stays.
   """
 
   def __init__(self, double_pull_enabled, double_pull_window_ms):
@@ -41,9 +41,6 @@ class PreAPEngagement:
     self.preap_brake_pressed_prev = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
-
-    self._software_long_prev = False
-    self._software_lever_prev = CruiseButtons.IDLE
 
   def _drop_longitudinal_keep_lateral(self):
     was_long_active = self.enableLongControl
@@ -80,55 +77,19 @@ class PreAPEngagement:
         self.longCtrlEvent = "pccDisabled"
     self.prev_steering_disengage = steering_disengage
 
-  def sync_long_control(self, long_active, v_ego, speed_units, use_pedal):
-    """Capture or clear software set-speed from intent long state. No ButtonEvents."""
-    long_active = bool(long_active)
-    if not use_pedal:
-      self.pedal_speed_kph = 0.0
-      self._software_long_prev = long_active
-      return
-    if long_active and not self._software_long_prev:
-      self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
-    elif not long_active:
-      self.pedal_speed_kph = 0.0
-    self._software_long_prev = long_active
-
-  def apply_stalk_speed(self, lever, v_ego, speed_units, use_pedal):
-    """Stalk +/- against pedal_speed_kph while intent long is active. No ButtonEvents."""
-    lever = int(lever)
-    if not (use_pedal and self._software_long_prev):
-      self._software_lever_prev = lever
-      return
-    if lever == self._software_lever_prev:
-      return
-    self._software_lever_prev = lever
-    if lever in (CruiseButtons.IDLE, CruiseButtons.MAIN, CruiseButtons.CANCEL):
-      return
-    speed_uom_kph = CV.MPH_TO_KPH if speed_units == "MPH" else 1.0
-    if CruiseButtons.is_accel(lever):
-      actual_kph = int(v_ego * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-      if lever == CruiseButtons.RES_ACCEL:
-        self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + speed_uom_kph
-      else:
-        self.pedal_speed_kph = max(self.pedal_speed_kph, actual_kph) + 5 * speed_uom_kph
-      self.pedal_speed_kph = min(self.pedal_speed_kph, 270.0)
-    elif CruiseButtons.is_decel(lever):
-      if lever == CruiseButtons.DECEL_SET:
-        self.pedal_speed_kph -= speed_uom_kph
-      else:
-        self.pedal_speed_kph -= 5 * speed_uom_kph
-      self.pedal_speed_kph = max(self.pedal_speed_kph, 0.0)
-
   def process_buttons(self, cruise_buttons, prev_cruise_buttons, curr_time_ms,
                       v_ego, speed_units, use_pedal, pedal_long_allowed,
                       long_control_allowed, real_brake_pressed, di_cruise_state="OFF"):
-    # Kept for nap-dev FSM tests. Live naponsp must not publish these events.
     button_events = []
     long_control_allowed = long_control_allowed and (not use_pedal or not real_brake_pressed)
 
+    # Stalk-spoof intent flags are single-frame events. Clear at the top so
+    # downstream consumers (StockCCSpoofer) see them only on the frame they
+    # are produced.
     self.preap_cc_cancel_needed = False
     self.preap_cc_engage_needed = False
 
+    # MAIN button: rising edge only
     if cruise_buttons == CruiseButtons.MAIN and prev_cruise_buttons != CruiseButtons.MAIN:
       carlog.debug("STALK MAIN | cruiseEnabled=%s enableLong=%s pending=%s pedal=%s doublePull=%s",
                    self.cruiseEnabled, self.enableLongControl, self.pending_enable,
@@ -158,10 +119,14 @@ class PreAPEngagement:
                                    v_ego, speed_units, use_pedal)
       button_events.append(be)
 
+    # Double-pull window expired
     if self.pending_enable:
       if curr_time_ms - self.stalk_pull_time_ms > self.double_pull_window_ms:
         self.pending_enable = False
 
+    # Brake drops longitudinal while keeping lateral (pedal mode only).
+    # Use the level so engagement cannot acquire pedal authority under a
+    # brake that was already held before the stalk request.
     if use_pedal:
       if real_brake_pressed and self.cruiseEnabled and self.enableLongControl:
         carlog.debug("BRAKE held — dropping longitudinal")
@@ -204,6 +169,12 @@ class PreAPEngagement:
         self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
       else:
         self.pedal_speed_kph = 0.0
+        # Always fire engage_needed on a no-pedal double-pull. The first pull
+        # already fired an immediate cancel; even if di_cruise_state still
+        # reads ENABLED at this frame (CAN lag — DI hasn't observed the cancel
+        # yet), our cancel is in-flight and will land within ~100ms, dropping
+        # DI to STANDBY. The spoofer's ENGAGING phase exits cleanly if DI is
+        # observed ENABLED on any frame, so a no-op retry costs nothing.
         if not use_pedal:
           self.preap_cc_engage_needed = True
           self.preap_last_cc_spoof_ms = curr_time_ms
@@ -217,6 +188,13 @@ class PreAPEngagement:
       self.pending_enable = True
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
+      # No-pedal: the driver's physical MAIN pull engages stock CC at the DI
+      # whenever it's armed (STANDBY → ENABLED on the same pull). Fire the
+      # cancel immediately so unintended CC engagement is killed within ~100 ms
+      # (CANCEL_DELAY_FRAMES + frame slot alignment in the spoofer). A
+      # subsequent second pull within the window will set engage_needed and
+      # the spoofer will re-engage via SET_ACCEL — visible briefly as a
+      # cancel-then-engage flicker, which is the safety-favoring tradeoff.
       if not use_pedal:
         self.preap_cc_cancel_needed = True
         self.preap_last_cc_spoof_ms = curr_time_ms
@@ -233,6 +211,7 @@ class PreAPEngagement:
         self.last_stalk_non_cancel_ms = curr_time_ms
 
     elif state == CruiseButtons.CANCEL:
+      # Suppress auto-cancel echoes from our spoofed stalk messages
       is_echo = (
         (self.cruiseEnabled and (curr_time_ms - self.last_stalk_non_cancel_ms) < CANCEL_ECHO_WINDOW_MS)
         or ((curr_time_ms - self.preap_last_cc_spoof_ms) < SPOOF_ECHO_WINDOW_MS)
@@ -259,6 +238,9 @@ class PreAPEngagement:
       be.type = ButtonType.accelCruise
       if be.pressed:
         self.last_stalk_non_cancel_ms = curr_time_ms
+        # No-pedal: the DI handles speed adjust natively from the driver's
+        # direct stalk message — NAP stays out. Only mutate our target when
+        # we own longitudinal (pedal mode, long active).
         if use_pedal and self.enableLongControl:
           speed_uom_kph = CV.MPH_TO_KPH if speed_units == "MPH" else 1.0
           actual_kph = int(v_ego * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
