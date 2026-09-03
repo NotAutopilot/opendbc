@@ -51,9 +51,7 @@ PEDAL_DI_MIN = -5
 PEDAL_DI_ZERO = 0
 PEDAL_TIMEOUT_MS = 500
 # Host-only CS_SP.pedalFeedbackState sentinel when 0x552 stops arriving.
-# tesla_preap.dbc VAL_ 1362 STATE: 0 NO_FAULT .. 5 TIMEOUT. Idle silence
-# reports 5, not 0. Firmware additionally has 6 FAULT_INVALID (disabled
-# command with nonzero values), which the DBC does not name.
+# tesla_preap.dbc VAL_ 1362 STATE names 0..5 only. Idle silence reports 5.
 PEDAL_FEEDBACK_TIMEOUT_STATE = 0xFF
 PEDAL_STATE_NO_FAULT = 0
 PEDAL_STATE_FAULT_BAD_CHECKSUM = 1
@@ -61,7 +59,6 @@ PEDAL_STATE_FAULT_SEND = 2
 PEDAL_STATE_FAULT_SCE = 3
 PEDAL_STATE_FAULT_STARTUP = 4
 PEDAL_STATE_FAULT_TIMEOUT = 5
-PEDAL_STATE_FAULT_INVALID = 6
 # STARTUP/TIMEOUT are the pedal's command watchdog at rest: the driver's foot
 # passes through and a disabled zero command clears back to NO_FAULT.
 # Recoverable idle, not faults.
