@@ -158,6 +158,14 @@ class CruiseButtons:
   DECEL_SET = 32
   DECEL_2ND = 8
 
+  @classmethod
+  def is_accel(cls, btn):
+    return btn in (cls.RES_ACCEL, cls.RES_ACCEL_2ND)
+
+  @classmethod
+  def is_decel(cls, btn):
+    return btn in (cls.DECEL_SET, cls.DECEL_2ND)
+
 
 DBC = CAR.create_dbc_map()
 

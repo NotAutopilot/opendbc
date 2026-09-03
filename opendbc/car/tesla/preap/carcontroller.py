@@ -19,6 +19,7 @@ from opendbc.car.tesla.preap.constants import (
   PREAP_MODE_INVALID,
   PREAP_MODE_MASK,
   PEDAL_RAMP_RATE_UP,
+  PEDAL_STATE_NO_FAULT,
   REGEN_COMMAND_CLEAR_DI,
   REGEN_COMMAND_TRIGGER_DI,
   REGEN_DECEL_PROMPT_CLEAR_SPEED,
@@ -131,15 +132,22 @@ class PedalAuthority:
     if self.state == PedalAuthorityState.FAILED:
       return PedalCommandAction.NONE
 
-    feedback_healthy = feedback.available and feedback.interceptor_state == 0
+    # Panda mirrors this split: recoverable idle never revokes controls, but an
+    # enabled 0x551 only leaves the panda while feedback is NO_FAULT.
+    feedback_no_fault = feedback.available and feedback.interceptor_state == PEDAL_STATE_NO_FAULT
     if self.state == PedalAuthorityState.ACTIVE:
-      if feedback_healthy:
+      if feedback_no_fault:
         return PedalCommandAction.ENABLE
+      if feedback.available:
+        # Recoverable idle while active: hold authority and stream the disabled
+        # zero command that clears the firmware back to NO_FAULT. Dropping to
+        # ACQUIRING here flapped the authority-loss alert on every idle entry.
+        return PedalCommandAction.RESET
       return self._start_acquisition(feedback)
 
     if self.state == PedalAuthorityState.ACQUIRING:
       feedback_advanced = feedback.idx != self.reset_feedback_counter
-      if feedback_healthy and feedback_advanced:
+      if feedback_no_fault and feedback_advanced:
         self.state = PedalAuthorityState.ACTIVE
         self._clear_acquisition()
         return PedalCommandAction.ACQUIRE
@@ -152,7 +160,7 @@ class PedalAuthority:
       self._clear_acquisition()
       return PedalCommandAction.FAILURE
 
-    if feedback_healthy:
+    if feedback_no_fault:
       self.state = PedalAuthorityState.ACTIVE
       return PedalCommandAction.ACQUIRE
 

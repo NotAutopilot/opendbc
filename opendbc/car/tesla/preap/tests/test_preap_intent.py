@@ -154,6 +154,19 @@ class TestPreAPIntentTranslator(unittest.TestCase):
     tr.update_health(blocked=False, epas_fault=False, brake_pressed=True)
     self.assertFalse(tr.enable_long_control)
 
+  def test_second_pull_on_interceptor_gas_does_not_enable_until_gas_lifts(self):
+    tr = _translator(Mode.independent)
+    c = _ready(tr, 0, 0)
+    tr.update_stalk(MAIN, c, 10)
+    tr.update_stalk(IDLE, c + 1, 20)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False, gas_pressed=True)
+    tr.update_stalk(MAIN, c + 2, 10 + 399)
+    self.assertFalse(tr.enable_long_control)
+    self.assertEqual(tr.record.longitudinal, Longitudinal.none)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False, gas_pressed=False)
+    self.assertTrue(tr.enable_long_control)
+    self.assertEqual(tr.record.longitudinal, Longitudinal.enable)
+
   def test_hands_on_does_not_disable(self):
     tr = _translator()
     tr.set_long_active(False)

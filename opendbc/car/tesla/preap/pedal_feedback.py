@@ -1,5 +1,5 @@
 from opendbc.car.carlog import carlog
-from opendbc.car.tesla.preap.constants import PEDAL_DI_PRESSED, PEDAL_TIMEOUT_MS
+from opendbc.car.tesla.preap.constants import PEDAL_DI_PRESSED, PEDAL_TIMEOUT_MS, PEDAL_USABLE_STATES
 
 
 class PedalFeedback:
@@ -37,7 +37,9 @@ class PedalFeedback:
         self.observed = True
 
       self.timeout = not self.observed or (curr_time_ms - self.last_seen_ms) > PEDAL_TIMEOUT_MS
-      self.available = self.observed and (not self.timeout) and (self.interceptor_state == 0)
+      # STARTUP/TIMEOUT are the command watchdog at rest, not faults: the pedal
+      # still reports driver gas and clears to NO_FAULT on a disabled zero command.
+      self.available = self.observed and (not self.timeout) and (self.interceptor_state in PEDAL_USABLE_STATES)
       return observed
 
     except Exception:

@@ -14,7 +14,9 @@ from opendbc.car.tesla.preap.boot import pedal_bus_from_cp_sp, pedal_calib_from_
 from opendbc.car.tesla.preap.constants import (
   DI_GENERATION_ABSOLUTE_BASE, DI_GENERATION_ORDINAL_BITS, DI_GENERATION_ORDINAL_LIMIT,
   PEDAL_DI_PRESSED, PEDAL_FEEDBACK_TIMEOUT_STATE, PREAP_MODE_INVALID, PREAP_MODE_MASK,
+  STALK_DOUBLE_PULL_MS,
 )
+from opendbc.car.tesla.preap.engagement import PreAPEngagement
 from opendbc.car.tesla.preap.intent import PreAPIntentTranslator
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
 from opendbc.car.tesla.preap.stock_cc import StockCcState, StockCcTransaction
@@ -216,6 +218,8 @@ class PreAPCarState(CarStateBase):
     if (int(CP_SP.safetyParam) & PREAP_MODE_MASK) == PREAP_MODE_INVALID:
       mode = None
     self.intent = PreAPIntentTranslator(mode)
+    self.engagement = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=STALK_DOUBLE_PULL_MS)
+    self.pedal_speed_kph = 0.0
     self.stock_cc = StockCcTransaction(active=not bool(CP.openpilotLongitudinalControl))
     self.intent.stock_cc_active = self.stock_cc.active
     self.stock_cc_now_ms = 0
@@ -530,7 +534,10 @@ class PreAPCarState(CarStateBase):
       self._di_brake_seen and self._brake_message_seen and
       ret.gearShifter == structs.CarState.GearShifter.drive and not ret.doorOpen
     )
-    self.intent.update_health(blocked=blocked, epas_fault=ret.steeringDisengage, brake_pressed=ret.brakePressed)
+    self.intent.update_health(
+      blocked=blocked, epas_fault=ret.steeringDisengage, brake_pressed=ret.brakePressed,
+      gas_pressed=ret.gasPressed,
+    )
     self.stock_cc.update_health(blocked=blocked, brake_pressed=ret.brakePressed)
 
     # Replay physical source events in source-time order, preserving the CAN
@@ -553,6 +560,10 @@ class PreAPCarState(CarStateBase):
         continue
       self.stock_cc.update_live_stw(event.values)
       self.intent.update_stalk(lever_i, counter_i, now_ms)
+      self.engagement.sync_long_control(
+        self.intent.enable_long_control, ret.vEgo, self.speed_units, self.pedal_pipeline,
+      )
+      self.engagement.apply_stalk_speed(lever_i, ret.vEgo, self.speed_units, self.pedal_pipeline)
       self.stock_cc.update_stalk(
         lever_i,
         counter_i,
@@ -560,6 +571,12 @@ class PreAPCarState(CarStateBase):
         _di_generation(event.timestamp_ns, DI_GENERATION_ORDINAL_LIMIT - 1),
       )
     self.stock_cc.tick_timeouts(now_ms)
+    self.engagement.sync_long_control(
+      self.intent.enable_long_control, ret.vEgo, self.speed_units, self.pedal_pipeline,
+    )
+    self.pedal_speed_kph = self.engagement.pedal_speed_kph
+    if self.pedal_pipeline and self.intent.enable_long_control:
+      ret.cruiseState.speed = max(self.pedal_speed_kph * CV.KPH_TO_MS, 1e-3)
     self._sync_stock_cc_intent(ret_sp)
     # Epoch is stamped by card on the process incarnation.
     ret_sp.preapIntentEpoch = 0

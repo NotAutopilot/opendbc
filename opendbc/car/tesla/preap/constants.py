@@ -63,6 +63,9 @@ PEDAL_STATE_FAULT_TIMEOUT = 5
 # passes through and a disabled zero command clears back to NO_FAULT.
 # Recoverable idle, not faults.
 PEDAL_RECOVERABLE_IDLE_STATES = (PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT)
+# States the host may command against: NO_FAULT plus recoverable idle.
+# Checksum/send/SCE (1/2/3) and unnamed nibbles stay hard faults.
+PEDAL_USABLE_STATES = (PEDAL_STATE_NO_FAULT, *PEDAL_RECOVERABLE_IDLE_STATES)
 
 ACCEL_MAX = 2.5  # m/s^2
 REGEN_MAX = -1.5  # m/s^2

@@ -59,6 +59,9 @@ class PreAPIntentTranslator:
     self._coupled_deferred = False
     # Driver long intent. Survives gas override; interceptor authority does not.
     self.enable_long_control = False
+    self._gas_pressed = False
+    # Second pull while interceptor gas is down. Panda will not latch long.
+    self._enable_blocked_by_gas = False
 
   def set_long_active(self, long_active: bool) -> None:
     """Controller feeds prior-cycle logical standard-long active state.
@@ -82,6 +85,7 @@ class PreAPIntentTranslator:
     self._first_pull_ms = None
     self._stalk_armed = False
     self._coupled_deferred = False
+    self._enable_blocked_by_gas = False
 
   def _disable(self, *, coupled_only: bool = False) -> None:
     if coupled_only:
@@ -91,7 +95,8 @@ class PreAPIntentTranslator:
     self._publish(lateral, LongitudinalIntent.disable)
     self._clear_pending()
 
-  def update_health(self, *, blocked: bool, epas_fault: bool, brake_pressed: bool) -> None:
+  def update_health(self, *, blocked: bool, epas_fault: bool, brake_pressed: bool,
+                    gas_pressed: bool = False) -> None:
     if (epas_fault and not self._epas_fault) or (blocked and not self._blocked):
       self._disable()
     elif brake_pressed and not self._brake_pressed and self.long_active:
@@ -102,6 +107,14 @@ class PreAPIntentTranslator:
     self._blocked = blocked
     if blocked or epas_fault:
       self._stalk_armed = False
+      self._enable_blocked_by_gas = False
+
+    gas_released = self._gas_pressed and not gas_pressed
+    self._gas_pressed = bool(gas_pressed)
+    if gas_released and self._enable_blocked_by_gas:
+      self._enable_blocked_by_gas = False
+      if not (blocked or epas_fault or brake_pressed):
+        self._publish(LateralIntent.none, LongitudinalIntent.enable)
 
   def update_terminal_failure(self, failed: bool) -> None:
     """Publish an attributable long terminal exit once per failure edge."""
@@ -169,6 +182,14 @@ class PreAPIntentTranslator:
       if self.stock_cc_active and self.mode == EngagementMode.cruiseCoupled:
         self._coupled_deferred = True
         self._publish(LateralIntent.none, LongitudinalIntent.none)
+        return
+      if self._gas_pressed:
+        # Panda will not grant controlsAllowed while interceptor gas is down.
+        # Publishing enable here marks Pedal Cruise Engaged and CC.enabled,
+        # then controlsMismatch about two seconds later.
+        self._enable_blocked_by_gas = True
+        if self.mode == EngagementMode.cruiseCoupled:
+          self._publish(LateralIntent.mainCruiseRequest, LongitudinalIntent.none)
         return
       lateral = LateralIntent.mainCruiseRequest if self.mode == EngagementMode.cruiseCoupled else LateralIntent.none
       self._publish(lateral, LongitudinalIntent.enable)
