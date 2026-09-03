@@ -105,3 +105,20 @@ def test_nonzero_wire_state_marks_feedback_unavailable():
 
   assert feedback.interceptor_state == 5
   assert not feedback.available
+
+
+def test_fault_timeout_is_not_the_host_missing_frame_sentinel():
+  from opendbc.car.tesla.preap.constants import (
+    PEDAL_FEEDBACK_TIMEOUT_STATE, PEDAL_STATE_FAULT_TIMEOUT, PEDAL_STATE_NO_FAULT,
+  )
+
+  parser = make_parser()
+  feedback = PedalFeedback()
+  feedback.update(decode(parser, state=PEDAL_STATE_FAULT_TIMEOUT, idx=3), curr_time_ms=0)
+
+  assert PEDAL_STATE_FAULT_TIMEOUT == 5
+  assert PEDAL_STATE_NO_FAULT == 0
+  assert feedback.interceptor_state == PEDAL_STATE_FAULT_TIMEOUT
+  assert feedback.interceptor_state != PEDAL_FEEDBACK_TIMEOUT_STATE
+  assert not feedback.timeout
+  assert not feedback.available

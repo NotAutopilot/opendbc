@@ -13,7 +13,10 @@ from opendbc.car.tesla.preap.carcontroller import (
   PreAPLongController,
   RegenDecelMonitor,
 )
-from opendbc.car.tesla.preap.constants import GAS_COMMAND_ID, PEDAL_D, PEDAL_DI_ZERO, PEDAL_M1, PEDAL_MAX_VALUES, PEDAL_RAMP_RATE_UP, PEDAL_TIMEOUT_MS
+from opendbc.car.tesla.preap.constants import (
+  GAS_COMMAND_ID, PEDAL_D, PEDAL_DI_ZERO, PEDAL_M1, PEDAL_MAX_VALUES,
+  PEDAL_RAMP_RATE_UP, PEDAL_STATE_FAULT_TIMEOUT, PEDAL_TIMEOUT_MS,
+)
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.car.tesla.preap.virtual_das import PedalZeroTorque
@@ -499,7 +502,7 @@ def test_timeout_rearm_requires_reset_then_advancing_healthy_feedback(controller
   controller, cc, cs, tesla_can = controller_env
   _activate_longitudinal(cc, cs)
 
-  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 7}, 20)
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": PEDAL_STATE_FAULT_TIMEOUT, "IDX": 7}, 20)
   cs.pedal_timeout = cs.pedal.timeout
   reset = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
   assert len(reset) == 1
@@ -521,6 +524,23 @@ def test_timeout_rearm_requires_reset_then_advancing_healthy_feedback(controller
   enabled = controller.update(cc, cs, frame=6, tesla_can=tesla_can, can_bus_party=0)
   assert len(enabled) == 1
   assert _decode_pedal_command(enabled[0]).enabled
+
+
+def test_fault_timeout_never_emits_enabled_command(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  _activate_longitudinal(cc, cs)
+
+  for frame, idx in enumerate(range(7, 12)):
+    cs.pedal.update(
+      {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": PEDAL_STATE_FAULT_TIMEOUT, "IDX": idx},
+      20 + frame * 20,
+    )
+    sent = controller.update(cc, cs, frame=frame * 2, tesla_can=tesla_can, can_bus_party=0)
+    if sent:
+      assert not _decode_pedal_command(sent[0]).enabled
+      assert _decode_pedal_command(sent[0]).raw_command == 0
+
+  assert controller.pedal_authority.state == PedalAuthorityState.FAILED
 
 
 def _start_gas_override(cc, cs):

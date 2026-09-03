@@ -26,6 +26,15 @@
 #define PREAP_HANDS_ON_RESUME_US 1000000U
 #define PREAP_PEDAL_GAS_THRESHOLD 650
 #define PREAP_PEDAL_FEEDBACK_TIMEOUT_US 500000U
+// Comma Pedal GAS_SENSOR STATE nibble. tesla_preap.dbc VAL_ 1362 names
+// 0..5 only. TIMEOUT/STARTUP are passthrough idle after silence or boot,
+// not driver gas and not an enabled interceptor.
+#define PREAP_PEDAL_NO_FAULT 0U
+#define PREAP_PEDAL_FAULT_BAD_CHECKSUM 1U
+#define PREAP_PEDAL_FAULT_SEND 2U
+#define PREAP_PEDAL_FAULT_SCE 3U
+#define PREAP_PEDAL_FAULT_STARTUP 4U
+#define PREAP_PEDAL_FAULT_TIMEOUT 5U
 #define PREAP_CANCEL_ECHO_US 600000U
 #define PREAP_SPOOF_ECHO_US 300000U
 #define PREAP_STALK_RES_ACCEL_2ND 4U
@@ -48,6 +57,7 @@ static bool preap_pedal_feedback_counter_seen = false;
 static uint8_t preap_pedal_feedback_counter = 0U;
 static uint32_t preap_pedal_feedback_advance_ts = 0U;
 static bool preap_pedal_feedback_healthy = false;
+static bool preap_pedal_feedback_recoverable_idle = false;
 static bool preap_pedal_tx_counter_seen = false;
 static uint8_t preap_pedal_tx_counter = 0U;
 static uint8_t preap_mode = PREAP_MODE_INVALID;
@@ -854,10 +864,16 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
         preap_pedal_feedback_counter = pedal_counter;
         preap_pedal_feedback_advance_ts = now;
       }
-      preap_pedal_feedback_healthy = pedal_state == 0U;
-      preap_gas_seen = preap_pedal_feedback_healthy;
+      preap_pedal_feedback_healthy = pedal_state == PREAP_PEDAL_NO_FAULT;
+      preap_pedal_feedback_recoverable_idle =
+        (pedal_state == PREAP_PEDAL_FAULT_STARTUP) ||
+        (pedal_state == PREAP_PEDAL_FAULT_TIMEOUT);
+      // Live 0x552 with an advancing counter is a gas source. FAULT_TIMEOUT is
+      // the expected idle after NAP's one-release-then-silence policy; it is
+      // not driver gas and must not block the second-pull long latch.
+      preap_gas_seen = preap_pedal_feedback_counter_seen;
       preap_gas_ts = preap_pedal_feedback_advance_ts;
-      gas_pressed = !preap_pedal_feedback_healthy || (pedal_raw > PREAP_PEDAL_GAS_THRESHOLD);
+      gas_pressed = pedal_raw > PREAP_PEDAL_GAS_THRESHOLD;
     }
     if (!is_pedal_sensor && (msg->bus == 0U)) {
       if (msg->addr == 0x370U) {
@@ -1098,9 +1114,9 @@ static void tesla_preap_tick(bool rx_checks_invalid) {
     tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
   }
   if (preap_enable_pedal &&
-      (!preap_pedal_feedback_healthy ||
-       !preap_pedal_feedback_counter_seen ||
-       (safety_get_ts_elapsed(now, preap_pedal_feedback_advance_ts) > PREAP_PEDAL_FEEDBACK_TIMEOUT_US))) {
+      (!preap_pedal_feedback_counter_seen ||
+       (safety_get_ts_elapsed(now, preap_pedal_feedback_advance_ts) > PREAP_PEDAL_FEEDBACK_TIMEOUT_US) ||
+       (!preap_pedal_feedback_healthy && !preap_pedal_feedback_recoverable_idle))) {
     if ((preap_mode == PREAP_MODE_CRUISE_COUPLED) && controls_allowed) {
       tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
     } else {
@@ -1381,6 +1397,7 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_pedal_feedback_counter = 0U;
   preap_pedal_feedback_advance_ts = 0U;
   preap_pedal_feedback_healthy = false;
+  preap_pedal_feedback_recoverable_idle = false;
   preap_pedal_tx_counter_seen = false;
   preap_pedal_tx_counter = 0U;
   preap_brake_paused_lateral = false;

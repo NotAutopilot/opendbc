@@ -318,6 +318,54 @@ class TestTeslaPreAPIndependent(TeslaPreAPSafetyBase, MomentaryMadsSafetyTestBas
     self.assertTrue(self.safety.get_controls_allowed_lateral())
     self.assertTrue(self._tx(self._steering_command(enabled=True)))
 
+  def test_fault_timeout_is_not_gas_and_blocks_enable(self):
+    # Firmware STATE=5 is FAULT_TIMEOUT (watchdog idle), not driver gas and not NO_FAULT.
+    self._prime_required_rx()
+    self._rx(self._pedal_sensor(raw=450, state=5))
+    self.assertFalse(self.safety.get_gas_pressed_prev())
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=0, raw2=0, counter=0)))
+
+  def test_fault_timeout_second_pull_reset_then_enable(self):
+    # Route 7: idle STATE=5 made panda treat the interceptor as gas_pressed, so
+    # the second pull never latched long and ENABLE 0x551 was denied even after
+    # RESET briefly produced STATE=0. Recovery: live TIMEOUT is not gas, RESET
+    # is allowed, ENABLE stays blocked until NO_FAULT.
+    self._prime_required_rx()
+    self._rx(self._pedal_sensor(raw=450, state=5))
+    self._first_pull(0)
+    self._second_pull(399000)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_gas_pressed_prev())
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, raw1=0, raw2=0, counter=0)))
+    self._rx(self._pedal_sensor(raw=450, state=0))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, raw1=450, raw2=225, counter=1)))
+
+  def test_fault_timeout_tick_keeps_long_while_counter_advances(self):
+    self._engage_pedal()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._pedal_sensor(raw=450, state=5))
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, counter=0)))
+    self._rx(self._pedal_sensor(raw=450, state=0))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=1)))
+
+  def test_fault_startup_matches_timeout_idle_policy(self):
+    self._prime_required_rx()
+    self._rx(self._pedal_sensor(raw=450, state=4))
+    self._first_pull(0)
+    self._second_pull(399000)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_gas_pressed_prev())
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, counter=0)))
+    self._rx(self._pedal_sensor(raw=450, state=0))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=1)))
+
   def test_double_pull_boundaries_and_release(self):
     for delta, expected_long in ((0, False), (399000, True), (400000, False), (401000, False)):
       with self.subTest(delta=delta):
@@ -621,6 +669,23 @@ class TestTeslaPreAPCruiseCoupled(TeslaPreAPSafetyBase):
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
     self.assertFalse(self._tx(self._steering_command(enabled=True)))
+
+  def test_fault_timeout_tick_retains_coupled_lateral_and_long(self):
+    # Mid-drive FAULT_TIMEOUT (host command silence) is recoverable idle: it
+    # must not tear down an engaged coupled drive. ENABLE stays blocked until
+    # NO_FAULT returns.
+    self._engage_pedal()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._rx(self._pedal_sensor(raw=450, state=5))
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._steering_command(enabled=True)))
+    self.assertFalse(self._tx(self._pedal_command(enabled=True, counter=0)))
+    self.assertTrue(self._tx(self._pedal_command(enabled=False, counter=0)))
+    self._rx(self._pedal_sensor(raw=450, state=0))
+    self.assertTrue(self._tx(self._pedal_command(enabled=True, counter=1)))
 
   def test_idle_pedal_timeout_retains_coupled_lateral(self):
     self._engage_pedal()
