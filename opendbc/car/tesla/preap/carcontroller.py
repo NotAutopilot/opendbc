@@ -19,6 +19,7 @@ from opendbc.car.tesla.preap.constants import (
   PREAP_MODE_INVALID,
   PREAP_MODE_MASK,
   PEDAL_RAMP_RATE_UP,
+  PEDAL_RECOVERABLE_IDLE_STATES,
   PEDAL_STATE_NO_FAULT,
   REGEN_COMMAND_CLEAR_DI,
   REGEN_COMMAND_TRIGGER_DI,
@@ -193,6 +194,18 @@ class PreAPLongController:
     can_sends.append(command)
     CS.pedal_command_counter = command[1][4] & 0x0F
 
+  def _idle_needs_clear(self, CS):
+    """True when 0x552 shows recoverable idle (STATE 4/5) that clears on disabled-zero."""
+    pedal = getattr(CS, "pedal", None)
+    if pedal is None or not bool(getattr(pedal, "available", False)):
+      return False
+    return int(getattr(pedal, "interceptor_state", -1)) in PEDAL_RECOVERABLE_IDLE_STATES
+
+  def _append_idle_disabled_zero(self, can_sends, CS, tesla_can):
+    """Health-only 0x551: never enable; clears sticky FAULT_TIMEOUT/STARTUP to NO_FAULT."""
+    self._append_pedal_command(
+      can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
+
   def update(self, CC, CS, frame, tesla_can, now_nanos=0, **_unused):
     can_sends = []
     actuators = CC.actuators
@@ -349,8 +362,17 @@ class PreAPLongController:
         CS.pedal_authority_failed = True
         self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
+        # Stay FAILED, but keep streaming idle disabled-zero so sticky STATE 4/5
+        # can return to NO_FAULT (health only — ENABLE still requires NO_FAULT).
+        if self._idle_needs_clear(CS):
+          self._append_idle_disabled_zero(can_sends, CS, tesla_can)
 
       else:
+        # Disengaged / no authority action: if interceptor is stuck in watchdog
+        # idle (STATE 4/5), stream disabled-zero on 0x551 so it can leave STATE=5.
+        # Idle stays PedalFeedback.available health-only; never enable here.
+        if self._idle_needs_clear(CS):
+          self._append_idle_disabled_zero(can_sends, CS, tesla_can)
         self.regen_decel_monitor.reset()
 
       CS.pedal_authority_requested = authority_requested

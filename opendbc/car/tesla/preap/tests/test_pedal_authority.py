@@ -15,7 +15,7 @@ from opendbc.car.tesla.preap.carcontroller import (
 )
 from opendbc.car.tesla.preap.constants import (
   GAS_COMMAND_ID, PEDAL_D, PEDAL_DI_ZERO, PEDAL_M1, PEDAL_MAX_VALUES,
-  PEDAL_RAMP_RATE_UP, PEDAL_STATE_FAULT_TIMEOUT, PEDAL_STATE_NO_FAULT,
+  PEDAL_RAMP_RATE_UP, PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT, PEDAL_STATE_NO_FAULT,
   PEDAL_TIMEOUT_MS, PEDAL_USABLE_STATES,
 )
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
@@ -436,14 +436,20 @@ def test_controller_failure_drops_only_longitudinal_and_latches_unavailable(cont
   for frame in range(0, 10, 2):
     sent.append(controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0))
 
-  assert [len(commands) for commands in sent] == [1, 1, 1, 1, 0]
+  # Four RESET attempts, then FAILURE still streams idle disabled-zero while STATE=5.
+  assert [len(commands) for commands in sent] == [1, 1, 1, 1, 1]
+  assert all(not _decode_pedal_command(commands[0]).enabled for commands in sent if commands)
   assert cs.pedal_authority_failed
   assert controller.pedal_authority.state == PedalAuthorityState.FAILED
   assert cs.pedal_authority_state == int(PedalAuthorityState.FAILED)
 
-  controller.update(cc, cs, frame=10, tesla_can=tesla_can, can_bus_party=0)
+  held = controller.update(cc, cs, frame=10, tesla_can=tesla_can, can_bus_party=0)
   assert controller.pedal_authority.state == PedalAuthorityState.FAILED
   assert cs.pedal_authority_action == int(PedalCommandAction.NONE)
+  # Health keepalive: sticky STATE=5 still gets disabled-zero after FAILED latch.
+  assert len(held) == 1
+  assert not _decode_pedal_command(held[0]).enabled
+  assert _decode_pedal_command(held[0]).raw_command == 0
 
 
 def test_pedal_unavailable_condition_latches_until_fresh_request_or_full_disengage():
@@ -463,6 +469,38 @@ def test_fully_disengaged_pedal_is_silent(controller_env):
   controller, cc, cs, tesla_can = controller_env
 
   assert controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0) == []
+  assert controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0) == []
+
+
+@pytest.mark.parametrize("idle_state", (PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT))
+def test_disengaged_recoverable_idle_streams_disabled_zero(controller_env, idle_state):
+  """FINDINGS 0000000d: STATE=5 can stick for an entire route while available.
+  While disengaged, stream idle disabled-zero on 0x551 so firmware can return to
+  NO_FAULT. Never enable from this health path."""
+  controller, cc, cs, tesla_can = controller_env
+  # Default fixture is disengaged / NO_FAULT. Flip to sticky idle.
+  for frame, idx in enumerate((3, 4, 5), start=0):
+    cs.pedal.update(
+      {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": idle_state, "IDX": idx},
+      20 + frame * 20,
+    )
+    sent = controller.update(cc, cs, frame=frame * 2, tesla_can=tesla_can, can_bus_party=0)
+    assert len(sent) == 1
+    decoded = _decode_pedal_command(sent[0])
+    assert not decoded.enabled
+    assert decoded.raw_command == 0
+    assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
+    assert cs.pedal_authority_action == int(PedalCommandAction.NONE)
+
+
+def test_disengaged_idle_clear_stops_once_no_fault(controller_env):
+  controller, cc, cs, tesla_can = controller_env
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 2}, 20)
+  clearing = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
+  assert len(clearing) == 1
+  assert not _decode_pedal_command(clearing[0]).enabled
+
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 3}, 40)
   assert controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0) == []
 
 
