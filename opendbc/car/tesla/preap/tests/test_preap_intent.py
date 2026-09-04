@@ -367,5 +367,73 @@ class TestPreAPIntentTranslator(unittest.TestCase):
     self.assertEqual(tr._first_pull_ms, 399)
 
 
+
+  def test_second_pull_while_not_no_fault_silent_refuse(self):
+    """FINDINGS 0000000c / 0000000d: interceptor STATE!=NO_FAULT must not arm
+    Pedal Cruise Engaged / enable_long_control — even when PedalFeedback.available
+    still includes recoverable idle 4/5. Silent refuse is intentional under the
+    NO_FAULT gate (0000000d). Do not invent a refuse event here."""
+    tr = _translator(Mode.independent)
+    c = _ready(tr, 0, 0)
+    tr.update_stalk(MAIN, c, 10)
+    tr.update_stalk(IDLE, c + 1, 20)
+    # Mirror panda refuse: available health OK, but not NO_FAULT (STATE 4/5 idle).
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False,
+                     gas_pressed=False, interceptor_no_fault=False)
+    seq_before = tr.record.sequence
+    long_before = tr.record.longitudinal
+    tr.update_stalk(MAIN, c + 2, 10 + 399)
+    self.assertFalse(tr.enable_long_control,
+                     "STATE!=NO_FAULT must not latch Pedal Cruise Engaged")
+    self.assertEqual(tr.record.longitudinal, Longitudinal.none)
+    self.assertEqual(tr.record.longitudinal, long_before)
+    # independent mode: silent — no new intent record published
+    self.assertEqual(tr.record.sequence, seq_before)
+    self.assertTrue(tr._enable_blocked_by_gas,
+                    "deferred panda-refuse block must latch for later NO_FAULT restore")
+
+  def test_second_pull_not_no_fault_coupled_requests_lat_only(self):
+    """cruiseCoupled second pull while not NO_FAULT: lat request only, no long enable."""
+    tr = _translator(Mode.cruiseCoupled)
+    c = _ready(tr, 0, 0)
+    tr.update_stalk(MAIN, c, 10)
+    tr.update_stalk(IDLE, c + 1, 20)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False,
+                     gas_pressed=False, interceptor_no_fault=False)
+    tr.update_stalk(MAIN, c + 2, 10 + 399)
+    self.assertFalse(tr.enable_long_control)
+    self._assert_record(tr, Lateral.mainCruiseRequest, Longitudinal.none, 2)
+
+  def test_deferred_enable_when_no_fault_restored(self):
+    """After silent refuse on STATE!=NO_FAULT, restoring NO_FAULT may fire deferred enable."""
+    tr = _translator(Mode.independent)
+    c = _ready(tr, 0, 0)
+    tr.update_stalk(MAIN, c, 10)
+    tr.update_stalk(IDLE, c + 1, 20)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False,
+                     gas_pressed=False, interceptor_no_fault=False)
+    tr.update_stalk(MAIN, c + 2, 10 + 399)
+    self.assertFalse(tr.enable_long_control)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False,
+                     gas_pressed=False, interceptor_no_fault=True)
+    self.assertTrue(tr.enable_long_control)
+    self.assertEqual(tr.record.longitudinal, Longitudinal.enable)
+
+  def test_no_fault_gate_does_not_read_live_controls_allowed(self):
+    """Host/panda mismatch contract (0000000c): refuse via interceptor_no_fault
+    mirror — do not latch enable by reading live controlsAllowed/caLong."""
+    tr = _translator(Mode.independent)
+    c = _ready(tr, 0, 0)
+    tr.update_stalk(MAIN, c, 10)
+    tr.update_stalk(IDLE, c + 1, 20)
+    tr.update_health(blocked=False, epas_fault=False, brake_pressed=False,
+                     gas_pressed=False, interceptor_no_fault=False)
+    tr.update_stalk(MAIN, c + 2, 10 + 399)
+    self.assertFalse(tr.enable_long_control)
+    # Translator must not expose or depend on a live ca/caLong attribute.
+    self.assertFalse(hasattr(tr, "controlsAllowed"))
+    self.assertFalse(hasattr(tr, "controls_allowed"))
+    self.assertFalse(hasattr(tr, "controlsAllowedLongitudinal"))
+
 if __name__ == "__main__":
   unittest.main()

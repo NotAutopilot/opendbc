@@ -348,6 +348,19 @@ class TestPedalSoftwareSpeed(unittest.TestCase):
     eng.process_buttons(RES_ACCEL, IDLE, 1000, v_ego, "KPH", True, True, True, False)
     self.assertEqual(eng.pedal_speed_kph, 0.0)
 
+  def test_double_pull_long_control_disallowed_keeps_enable_false(self):
+    """CarState NO_FAULT gate passes long_control_allowed=False into process_buttons.
+    Engagement must not latch enableLongControl (host/panda mismatch contract)."""
+    eng = PreAPEngagement(double_pull_enabled=True, double_pull_window_ms=400)
+    v_ego = 25.0 * CV.KPH_TO_MS
+    eng.process_buttons(MAIN, IDLE, 1000, v_ego, "KPH", True, True, False, False)
+    eng.process_buttons(IDLE, MAIN, 1050, v_ego, "KPH", True, True, False, False)
+    eng.process_buttons(MAIN, IDLE, 1399, v_ego, "KPH", True, True, False, False)
+    self.assertTrue(eng.cruiseEnabled)
+    self.assertFalse(eng.enableLongControl)
+    self.assertEqual(eng.pedal_speed_kph, 0.0)
+
+
 
 def _packet(name, values, bus=0, ts=1):
   addr, dat, bus = CANPacker("tesla_preap").make_can_msg(name, bus, values)
@@ -372,7 +385,7 @@ def _make_ci(*, pedal=False):
 class TestPreAPCarStatePedalSpeed(unittest.TestCase):
   """CarState publishes pedal_speed_kph through cruiseState.speed, not buttonEvents."""
 
-  def _prime(self, CI, ts=1_000_000):
+  def _prime(self, CI, ts=1_000_000, interceptor_state=0):
     packets = []
     packets += _packet("ESP_B", {"ESP_vehicleSpeed": 36.0, "ESP_vehicleSpeedQF": 3}, ts=ts)
     packets += _packet("DI_torque2", {"DI_brakePedal": 0, "DI_gear": 4, "DI_brakePedalState": 0}, ts=ts)
@@ -391,7 +404,7 @@ class TestPreAPCarStatePedalSpeed(unittest.TestCase):
     if CI.CS.pedal_pipeline:
       packets += _packet(
         "GAS_SENSOR",
-        {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 1},
+        {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": interceptor_state, "IDX": 1},
         bus=2, ts=ts,
       )
     CI.update(packets)
@@ -458,6 +471,51 @@ class TestPreAPCarStatePedalSpeed(unittest.TestCase):
     self.assertAlmostEqual(CS.cruiseState.speed, 20 * CV.KPH_TO_MS, places=5)
     self.assertEqual(list(CS.buttonEvents), [])
 
+
+
+  def test_state5_available_double_pull_silent_refuse(self):
+    """FINDINGS 0000000d: STATE=5 entire route; PedalFeedback.available True,
+    but host must NOT Pedal Cruise Engaged / enableLongControl (NO_FAULT gate).
+    Silent refuse — enable stays false. Locks 0000000c fake-engage regression."""
+    CI = _make_ci(pedal=True)
+    frozen = [0]
+    CI.CS._clock_ns = lambda frozen=frozen: frozen[0]
+    self._prime(CI, interceptor_state=5)
+    self.assertTrue(CI.CS.pedal.available, "STATE=5 must remain PedalFeedback.available (health)")
+    self.assertEqual(CI.CS.pedal.interceptor_state, 5)
+    CS, CS_SP = self._double_pull(CI, frozen)
+    self.assertTrue(CI.CS.pedal.available)
+    self.assertEqual(CI.CS.pedal.interceptor_state, 5)
+    self.assertFalse(CI.CS.engagement.enableLongControl,
+                     "engagement must not arm long on STATE=5")
+    self.assertFalse(CS_SP.enableLongControl,
+                     "intent/CS_SP must not Pedal Cruise Engaged on STATE=5")
+    self.assertNotEqual(CS_SP.preapLongitudinalIntent,
+                        structs.CarStateSP.PreapLongitudinalIntent.enable)
+    self.assertEqual(list(CS.buttonEvents), [])
+
+  def test_state4_available_double_pull_silent_refuse(self):
+    """Same NO_FAULT gate for recoverable idle STATE=4 (STARTUP)."""
+    CI = _make_ci(pedal=True)
+    frozen = [0]
+    CI.CS._clock_ns = lambda frozen=frozen: frozen[0]
+    self._prime(CI, interceptor_state=4)
+    self.assertTrue(CI.CS.pedal.available)
+    CS, CS_SP = self._double_pull(CI, frozen)
+    self.assertFalse(CI.CS.engagement.enableLongControl)
+    self.assertFalse(CS_SP.enableLongControl)
+    self.assertNotEqual(CS_SP.preapLongitudinalIntent,
+                        structs.CarStateSP.PreapLongitudinalIntent.enable)
+
+  def test_no_apply_stalk_speed_hybrid_reintroduced(self):
+    """FINDINGS 0000000c: apply_stalk_speed runaway must not return.
+    Set-speed stays on process_buttons (TestPedalSoftwareSpeed)."""
+    import inspect
+    from opendbc.car.tesla.preap import engagement as engagement_mod
+    self.assertFalse(hasattr(PreAPEngagement, "apply_stalk_speed"))
+    src = inspect.getsource(engagement_mod)
+    self.assertNotIn("def apply_stalk_speed", src)
+    self.assertIn("def process_buttons", src)
 
 if __name__ == "__main__":
   unittest.main()
