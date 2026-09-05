@@ -3,7 +3,7 @@ import unittest
 from opendbc.car.fw_versions import match_fw_to_car, match_fw_to_car_exact, build_fw_dict
 from opendbc.car.structs import CarParams
 from opendbc.car.tesla.fingerprints import FW_VERSIONS
-from opendbc.car.tesla.preap.boot import PREAP_PLATFORM
+from opendbc.car.tesla.preap.sp.interface import PREAP_PLATFORM
 from opendbc.car.tesla.values import CAR
 
 CarFw = CarParams.CarFw

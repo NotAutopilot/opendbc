@@ -1,119 +1,126 @@
 #pragma once
 
+// ============================================
+// SAFETY_TESLA_PREAP — Pre-Autopilot Tesla Model S (2012-2014)
+// ============================================
+//
+// Standalone safety mode for Pre-AP Tesla Model S. These cars have NO
+// Autopilot ECU, NO harness relay, and a different EPAS/CAN layout than
+// HW1+ Teslas. This is the spiritual successor to Tinkla (Boggyver's
+// Pre-AP openpilot fork, tesla_unity_betaC3 branch).
+//
+// WHY check_relay=false AND disable_static_blocking=true:
+//
+//   Pre-AP has no harness relay hardware. Standard openpilot uses a relay
+//   on the harness to switch between stock AP ECU and openpilot — when
+//   openpilot is not active, the relay routes CAN to the stock ECU. On
+//   Pre-AP there is no AP ECU and no relay; the panda connects directly
+//   to the car's CAN bus. Setting check_relay=true would cause the panda
+//   to falsely detect a "relay malfunction" and block ALL TX permanently.
+//   disable_static_blocking=true is required for the same reason — without
+//   a relay, the panda's static blocking logic (which assumes relay state)
+//   would incorrectly block messages.
+//
+//   Tinkla handled this identically via generic_rx_checks(false) in the
+//   older panda API, with the comment "PreAP has no relay" (safety_tesla.h
+//   line 1071, tesla_unity_betaC3 branch). The modern API added check_relay
+//   and disable_static_blocking with restrictive defaults, so we explicitly
+//   set them to get the same behavior Tinkla had implicitly.
+//
+// WHY ignore_checksum=true AND ignore_counter=true on RX:
+//
+//   Pre-AP EPAS firmware uses a byte-sum checksum, but the exact algorithm
+//   has not been fully verified against all firmware versions. A checksum
+//   mismatch caused a silent 21-second steering dropout during testing.
+//   Tinkla's RX checks also had no checksum/counter validation (frequency
+//   set to 0 for all messages). Once the checksum algorithm is verified
+//   across all Pre-AP EPAS firmware versions, these can be re-enabled.
+//
+// ALL ACTUAL SAFETY CHECKS REMAIN FULLY ACTIVE:
+//   - Steering angle + rate limits via steer_angle_cmd_checks_vm()
+//   - controls_allowed gating on all TX
+//   - Disengage on hands-on override (level >= 2)
+//   - Disengage on EPAS error codes 6-9
+//   - Disengage on door open, gear out of Drive
+//   - Disengage on stalk cancel (with 600ms echo filter)
+//   - AEB events blocked from openpilot
+//   - EPB_epasControl mode validation
+//   - Pedal TX gated by PREAP_FLAG_ENABLE_PEDAL + get_longitudinal_allowed()
+//
+// Completely independent from tesla_legacy.h — has its own hooks struct,
+// counter/checksum functions, init, RX/TX/fwd hooks, and GTW emulation.
+// Registered as SAFETY_TESLA_PREAP in declarations.h.
+
 #include "opendbc/safety/declarations.h"
 
-#define PREAP_MODE_MASK 0x3U
-#define PREAP_MODE_INDEPENDENT 0U
-#define PREAP_MODE_CRUISE_COUPLED 1U
-#define PREAP_MODE_LONGITUDINAL_ONLY 2U
-#define PREAP_MODE_INVALID 3U
-
-#define PREAP_FLAG_ENABLE_PEDAL (1U << 2)
-#define PREAP_FLAG_RADAR_EMULATION (1U << 3)
-// Leftover bit. Position comes from host 0x560, not this flag.
-#define PREAP_FLAG_RADAR_BEHIND_NOSECONE (1U << 4)
-#define PREAP_FLAG_PEDAL_BUS_ZERO (1U << 5)
-#define PREAP_FLAG_PEDAL_CALIBRATION (1U << 6)
-#define PREAP_GEAR_NEUTRAL 3U
-
-#define PREAP_STALK_DOUBLE_PULL_US 400000U
-#define PREAP_STOCK_CC_CANCEL_US 100000U
-#define PREAP_STOCK_CC_OBSERVATION_US 10000U
-#define PREAP_STOCK_CC_DELIVERY_US 10000U
-#define PREAP_STOCK_CC_CANCEL_AUTH_US (PREAP_STOCK_CC_CANCEL_US + PREAP_STOCK_CC_OBSERVATION_US + PREAP_STOCK_CC_DELIVERY_US)
-#define PREAP_STOCK_CC_CONFIRM_US 500000U
-#define PREAP_REQUIRED_SOURCE_MAX_AGE_US 1000000U
-#define PREAP_HANDS_ON_RESUME_US 1000000U
-#define PREAP_PEDAL_GAS_THRESHOLD 650
-#define PREAP_PEDAL_FEEDBACK_TIMEOUT_US 500000U
-// Comma Pedal GAS_SENSOR STATE nibble. tesla_preap.dbc VAL_ 1362 names
-// 0..5 only. TIMEOUT/STARTUP are passthrough idle after silence or boot,
-// not driver gas and not an enabled interceptor.
-#define PREAP_PEDAL_NO_FAULT 0U
-#define PREAP_PEDAL_FAULT_BAD_CHECKSUM 1U
-#define PREAP_PEDAL_FAULT_SEND 2U
-#define PREAP_PEDAL_FAULT_SCE 3U
-#define PREAP_PEDAL_FAULT_STARTUP 4U
-#define PREAP_PEDAL_FAULT_TIMEOUT 5U
-#define PREAP_CANCEL_ECHO_US 600000U
-#define PREAP_SPOOF_ECHO_US 300000U
-#define PREAP_STALK_RES_ACCEL_2ND 4U
-#define PREAP_STALK_DECEL_2ND 8U
-#define PREAP_STALK_RES_ACCEL 16U
-#define PREAP_STALK_DECEL_SET 32U
-
-#define PREAP_GET_BYTES_04(msg) GET_BYTES((msg), 0, 4)
-#define PREAP_GET_BYTES_48(msg) GET_BYTES((msg), 4, 4)
-
+// Forward declarations for panda firmware CAN send (defined in can_common.h)
 #if defined(STM32H7) || defined(STM32F4)
 void can_send(CANPacket_t *to_push, uint8_t bus_number, bool skip_tx_hook);
 void can_set_checksum(CANPacket_t *packet);
 #endif
 
+// ============================================
+// Byte manipulation macros
+// ============================================
+
+#define PREAP_GET_BYTES_04(msg) ((msg)->data[0] | ((msg)->data[1] << 8) | ((msg)->data[2] << 16) | ((msg)->data[3] << 24))
+#define PREAP_GET_BYTES_48(msg) ((msg)->data[4] | ((msg)->data[5] << 8) | ((msg)->data[6] << 16) | ((msg)->data[7] << 24))
+#define PREAP_WORD_TO_BYTES(dst8, src32) 0[dst8] = ((src32) & 0xFFU); 1[dst8] = (((src32) >> 8U) & 0xFFU); 2[dst8] = (((src32) >> 16U) & 0xFFU); 3[dst8] = (((src32) >> 24U) & 0xFFU)
+
+// ============================================
+// Safety param flags
+// ============================================
+// Longitudinal is gated by PREAP_FLAG_ENABLE_PEDAL + get_longitudinal_allowed().
+// There is no separate LONG_CONTROL flag — the framework's get_longitudinal_allowed()
+// is a derived check (controls_allowed && !gas_pressed_prev), not a settable flag.
+// This matches how tesla.h, honda.h, and hyundai.h handle longitudinal gating.
+
+#define PREAP_FLAG_ENABLE_PEDAL         1U
+#define PREAP_FLAG_RADAR_EMULATION      2U
+// Leftover bit. Position comes from host 0x560, not this flag.
+#define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
+#define PREAP_FLAG_HANDS_ON_PAUSE        8U
+#define PREAP_FLAG_PEDAL_BUS_ZERO       (1U << 5)
+#define PREAP_FLAG_PEDAL_CALIBRATION    (1U << 6)
+#define PREAP_HANDS_ON_DISENGAGE_LEVEL  2
+#define PREAP_CALIBRATION_SOURCE_TIMEOUT_US 1000000U
+#define PREAP_HANDS_ON_RESUME_US        1000000U
+
+// ============================================
+// State variables
+// ============================================
+
 static bool preap_enable_pedal = false;
+static bool preap_radar_emulation = false;
 static bool preap_pedal_calibration = false;
+static bool preap_hands_on_pause = false;
 static uint8_t preap_pedal_bus = 2U;
-static bool preap_pedal_feedback_counter_seen = false;
-static uint8_t preap_pedal_feedback_counter = 0U;
-static uint32_t preap_pedal_feedback_advance_ts = 0U;
-static bool preap_pedal_feedback_healthy = false;
-static bool preap_pedal_feedback_recoverable_idle = false;
-static bool preap_pedal_tx_counter_seen = false;
-static uint8_t preap_pedal_tx_counter = 0U;
-static uint8_t preap_mode = PREAP_MODE_INVALID;
-
-static bool preap_gear_seen = false;
-static bool preap_gear_drive = false;
-static bool preap_gear_neutral = false;
-static uint32_t preap_gear_ts = 0U;
-static bool preap_doors_seen = false;
-static bool preap_doors_closed = false;
-static uint32_t preap_doors_ts = 0U;
-static bool preap_epas_seen = false;
-static bool preap_epas_healthy = false;
-static uint32_t preap_epas_ts = 0U;
-static bool preap_di_brake_seen = false;
-static bool preap_di_brake_pressed = false;
-static uint32_t preap_di_brake_ts = 0U;
-static bool preap_brake_message_seen = false;
-static bool preap_brake_message_pressed = false;
-static uint32_t preap_brake_message_ts = 0U;
-static bool preap_gas_seen = false;
-static uint32_t preap_gas_ts = 0U;
-
-static bool preap_stalk_armed = false;
-static bool preap_pull_pending = false;
-static uint32_t preap_first_pull_ts = 0U;
-static bool preap_brake_paused_lateral = false;
-static bool preap_stock_cc_reengage_authorized = false;
-static bool preap_stock_cc_reengage_sent = false;
-static uint32_t preap_stock_cc_deadline_ts = 0U;
-static bool preap_stock_cc_cancel_authorized = false;
-static bool preap_stock_cc_cancel_sent = false;
-static uint32_t preap_stock_cc_cancel_sent_ts = 0U;
-static bool preap_stock_cc_post_cancel_di = false;
-static bool preap_stock_cc_pull2_latched = false;
-static uint32_t preap_stock_cc_pull2_ts = 0U;
-static bool preap_stock_cc_awaiting_di_rise = false;
-static uint8_t preap_stock_cc_expected_counter = 0U;
-static bool preap_stock_cc_di_engaged = false;
-static uint32_t preap_stock_cc_di_ts = 0U;
-static bool preap_stock_cc_di_seen = false;
-static bool preap_stock_cc_di_prior_engaged = false;
-static bool preap_stock_cc_di_prior_valid = false;
-static uint8_t preap_live_stw[8] = {0};
-static bool preap_live_stw_valid = false;
-static bool preap_echo_active = false;
-static uint8_t preap_echo_lever = 0U;
-static uint8_t preap_echo_counter = 0U;
-static uint32_t preap_echo_ts = 0U;
-static uint32_t preap_echo_window_us = 0U;
+static int preap_hands_on_level = 0;
 static bool preap_hands_on_clear_timing = false;
 static uint32_t preap_hands_on_clear_ts = 0U;
-static bool preap_stalk_counter_seen = false;
-static uint8_t preap_stalk_counter_last = 0U;
 
-static bool preap_radar_emulation = false;
+static int preap_pedal_can = -1;
+
+// Gear and door checks
+static int preap_gear = 4;        // init to Drive to avoid false disables on startup
+static int preap_gear_prev = 4;
+static bool preap_doors_open = false;
+static bool preap_di_brake_pressed = false;
+static bool preap_brake_message_pressed = false;
+static bool preap_gear_seen = false;
+static uint32_t preap_gear_ts = 0U;
+static bool preap_di_brake_seen = false;
+static uint32_t preap_di_brake_ts = 0U;
+static bool preap_brake_message_seen = false;
+static uint32_t preap_brake_message_ts = 0U;
+static bool preap_pedal_tx_counter_seen = false;
+static uint8_t preap_pedal_tx_counter = 0U;
+
+// Stalk echo filter
+static uint32_t preap_last_stalk_engage_us = 0;
+#define PREAP_CANCEL_ECHO_WINDOW_US 600000U  // 600ms
+
+// Radar emulation state
 static int preap_radar_status = 0;
 static uint32_t preap_last_radar_signal = 0;
 static int preap_radar_epas_type = 0;
@@ -126,228 +133,6 @@ static bool preap_radar_should_send = false;
 // consumes it. Layout matches Tinkla 0.6.6 create_radar_VIN_msg.
 #define PREAP_RADAR_VIN_ADDR 0x560U
 #define PREAP_RADAR_UDS_ADDR 0x641U
-
-#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
-#define PREAP_RADAR_GTW_CAPTURE_MAX 16
-static bool preap_radar_car_config_captured = false;
-static CANPacket_t preap_radar_car_config_capture;
-static bool preap_radar_vin_feed_captured = false;
-static CANPacket_t preap_radar_vin_feed_capture;
-static int preap_radar_gtw_count = 0;
-static CANPacket_t preap_radar_gtw_capture[PREAP_RADAR_GTW_CAPTURE_MAX];
-#endif
-
-static bool tesla_preap_source_fresh(bool seen, uint32_t timestamp, uint32_t now) {
-  const uint32_t elapsed = safety_get_ts_elapsed(now, timestamp);
-  return seen && (elapsed <= PREAP_REQUIRED_SOURCE_MAX_AGE_US);
-}
-
-static void tesla_preap_clear_stock_cc_tx_state(void) {
-  preap_stock_cc_reengage_authorized = false;
-  preap_stock_cc_reengage_sent = false;
-  preap_stock_cc_deadline_ts = 0U;
-  preap_stock_cc_cancel_authorized = false;
-  preap_stock_cc_cancel_sent = false;
-  preap_stock_cc_cancel_sent_ts = 0U;
-  preap_stock_cc_post_cancel_di = false;
-  preap_stock_cc_pull2_latched = false;
-  preap_stock_cc_pull2_ts = 0U;
-  preap_stock_cc_awaiting_di_rise = false;
-  preap_stock_cc_expected_counter = 0U;
-  preap_echo_active = false;
-}
-
-static void tesla_preap_retire_confirmed_stock_cc_handshake(void) {
-  preap_stock_cc_reengage_authorized = false;
-  preap_stock_cc_reengage_sent = false;
-  preap_stock_cc_deadline_ts = 0U;
-  preap_stock_cc_cancel_authorized = false;
-  preap_stock_cc_cancel_sent = false;
-  preap_stock_cc_cancel_sent_ts = 0U;
-  preap_stock_cc_post_cancel_di = false;
-  preap_stock_cc_pull2_latched = false;
-  preap_stock_cc_pull2_ts = 0U;
-  preap_stock_cc_awaiting_di_rise = false;
-  preap_stock_cc_expected_counter = 0U;
-  // Keep preap_echo_active: the just-sent SET may still return on the bus.
-}
-
-static bool tesla_preap_cancel_window_open(uint32_t now) {
-  const uint32_t elapsed = safety_get_ts_elapsed(now, preap_first_pull_ts);
-  return preap_stock_cc_cancel_authorized && !preap_stock_cc_cancel_sent &&
-         (elapsed <= PREAP_STOCK_CC_CANCEL_AUTH_US);
-}
-
-static void tesla_preap_expire_unsent_cancel(uint32_t now) {
-  if (preap_stock_cc_cancel_authorized && !preap_stock_cc_cancel_sent &&
-      (safety_get_ts_elapsed(now, preap_first_pull_ts) > PREAP_STOCK_CC_CANCEL_AUTH_US)) {
-    tesla_preap_clear_stock_cc_tx_state();
-  }
-}
-
-static void tesla_preap_clear_pull_state(void) {
-  preap_stalk_armed = false;
-  preap_pull_pending = false;
-  preap_first_pull_ts = 0U;
-  tesla_preap_clear_stock_cc_tx_state();
-}
-
-static void tesla_preap_clear_stock_cc_confirmation(void) {
-  stock_cc_reengage_confirmed = false;
-  tesla_preap_clear_stock_cc_tx_state();
-}
-
-static void tesla_preap_exit(DisengageReason reason) {
-  controls_allowed = false;
-  mads_exit_controls(reason);
-  controls_allowed_lateral = false;
-  m_mads_state.controls_requested_lateral = false;
-  tesla_preap_clear_pull_state();
-  tesla_preap_clear_stock_cc_confirmation();
-  preap_brake_paused_lateral = false;
-}
-
-static bool tesla_preap_required_sources_valid(uint32_t now) {
-  const bool gear_fresh = tesla_preap_source_fresh(preap_gear_seen, preap_gear_ts, now);
-  const bool doors_fresh = tesla_preap_source_fresh(preap_doors_seen, preap_doors_ts, now);
-  const bool epas_fresh = tesla_preap_source_fresh(preap_epas_seen, preap_epas_ts, now);
-  const bool di_brake_fresh = tesla_preap_source_fresh(preap_di_brake_seen, preap_di_brake_ts, now);
-  const bool brake_message_fresh = tesla_preap_source_fresh(preap_brake_message_seen, preap_brake_message_ts, now);
-  const bool sources_fresh = gear_fresh && doors_fresh && epas_fresh && di_brake_fresh && brake_message_fresh;
-  return (preap_mode != PREAP_MODE_INVALID) && sources_fresh && preap_gear_drive && preap_doors_closed &&
-         preap_epas_healthy;
-}
-
-static bool tesla_preap_required_sources_ready(uint32_t now) {
-  const bool sources_valid = tesla_preap_required_sources_valid(now);
-  return sources_valid && !preap_di_brake_pressed && !preap_brake_message_pressed;
-}
-
-static bool tesla_preap_calibration_window_open(uint32_t now) {
-  const bool gear_fresh = tesla_preap_source_fresh(preap_gear_seen, preap_gear_ts, now);
-  const bool di_brake_fresh = tesla_preap_source_fresh(preap_di_brake_seen, preap_di_brake_ts, now);
-  const bool brake_message_fresh = tesla_preap_source_fresh(preap_brake_message_seen, preap_brake_message_ts, now);
-  return preap_pedal_calibration && gear_fresh && di_brake_fresh && brake_message_fresh &&
-         preap_gear_neutral && (preap_di_brake_pressed || preap_brake_message_pressed);
-}
-
-static void tesla_preap_revoke_calibration_authority(void) {
-  controls_allowed = false;
-  controls_allowed_lateral = false;
-}
-
-static void tesla_preap_request_lateral(void) {
-  if (preap_pedal_calibration) {
-    return;
-  }
-  if ((preap_mode != PREAP_MODE_LONGITUDINAL_ONLY) && m_mads_state.system_enabled) {
-    m_mads_state.controls_requested_lateral = false;
-    controls_allowed_lateral = true;
-    m_mads_state.current_disengage.active_reason = MADS_DISENGAGE_REASON_NONE;
-    m_mads_state.current_disengage.pending_reasons = MADS_DISENGAGE_REASON_NONE;
-  }
-}
-
-static uint8_t tesla_preap_get_counter(const CANPacket_t *msg) {
-  uint8_t counter = 0U;
-  if (msg->addr == 0x370U) {
-    counter = msg->data[6] & 0xFU;
-  } else if (msg->addr == 0x108U) {
-    counter = msg->data[1] >> 5;
-  } else if (msg->addr == 0x118U) {
-    counter = msg->data[4] & 0xFU;
-  } else if (msg->addr == 0x368U) {
-    counter = msg->data[5] >> 4;
-  } else if (msg->addr == 0x155U) {
-    counter = (msg->data[7] >> 3) & 0xFU;
-  } else if (msg->addr == 0x45U) {
-    counter = msg->data[6] >> 4;
-  } else if (msg->addr == 0x552U) {
-    counter = msg->data[4] & 0xFU;
-  } else {
-  }
-  return counter;
-}
-
-static int tesla_preap_checksum_byte(uint32_t addr) {
-  int checksum_byte = -1;
-  if ((addr == 0x370U) || (addr == 0x108U) || (addr == 0x368U) || (addr == 0x45U) || (addr == 0x3E9U)) {
-    checksum_byte = 7;
-  } else if ((addr == 0x118U) || (addr == 0x551U) || (addr == 0x552U)) {
-    checksum_byte = 5;
-  } else if (addr == 0x155U) {
-    checksum_byte = 4;
-  } else if (addr == 0x488U) {
-    checksum_byte = 3;
-  } else if (addr == 0x214U) {
-    checksum_byte = 2;
-  } else {
-  }
-  return checksum_byte;
-}
-
-static uint32_t tesla_preap_get_checksum(const CANPacket_t *msg) {
-  const int checksum_byte = tesla_preap_checksum_byte(msg->addr);
-  return (checksum_byte >= 0) ? msg->data[checksum_byte] : 0U;
-}
-
-static uint8_t tesla_preap_crc8(const uint8_t *data, int len) {
-  uint8_t crc = 0xFFU;
-  for (int i = 0; i < len; i++) {
-    crc ^= data[i];
-    for (int bit = 0; bit < 8; bit++) {
-      crc = ((crc & 0x80U) != 0U) ? (uint8_t)((crc << 1) ^ 0x1DU) : (uint8_t)(crc << 1);
-    }
-  }
-  return crc ^ 0xFFU;
-}
-
-static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
-  const int checksum_byte = tesla_preap_checksum_byte(msg->addr);
-  uint8_t checksum = 0U;
-  if (msg->addr == 0x45U) {
-    checksum = tesla_preap_crc8(msg->data, 7);
-  } else if (msg->addr == 0x155U) {
-    // ESP_B protects its speed and counter fields with an inverted sum.
-    const uint8_t counter = tesla_preap_get_counter(msg);
-    checksum = (uint8_t)(0xFFU - (0x0CU + ((uint32_t)counter << 4U) + msg->data[5] + msg->data[6]));
-  } else if (checksum_byte >= 0) {
-    // The gateway remaps these messages without changing their checksum seed.
-    uint32_t checksum_address = msg->addr;
-    if (msg->addr == 0x108U) {
-      checksum_address = 0x106U;
-    } else if (msg->addr == 0x118U) {
-      checksum_address = 0x116U;
-    } else if (msg->addr == 0x368U) {
-      checksum_address = 0x256U;
-    } else {
-    }
-    checksum = (uint8_t)((checksum_address & 0xFFU) + ((checksum_address >> 8) & 0xFFU));
-    const int msg_len = (int)GET_LEN(msg);
-    for (int i = 0; i < msg_len; i++) {
-      if (i != checksum_byte) {
-        checksum += msg->data[i];
-      }
-    }
-  } else {
-  }
-  return checksum;
-}
-
-static bool tesla_preap_get_quality_flag_valid(const CANPacket_t *msg) {
-  bool valid = true;
-  if (msg->addr == 0x155U) {
-    valid = (msg->data[7] & 0x3U) == 0x3U;
-  }
-  return valid;
-}
-
-static void preap_word_to_bytes(uint8_t *dst, uint32_t src) {
-  dst[0] = (uint8_t)(src & 0xFFU);
-  dst[1] = (uint8_t)((src >> 8U) & 0xFFU);
-  dst[2] = (uint8_t)((src >> 16U) & 0xFFU);
-  dst[3] = (uint8_t)((src >> 24U) & 0xFFU);
-}
 
 static bool preap_f190_payload_allowed(const CANPacket_t *msg) {
   static const uint8_t tester[8] = {0x02U, 0x3EU, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
@@ -380,7 +165,7 @@ static bool preap_f190_tx_ok(const CANPacket_t *msg) {
   if (!preap_radar_emulation || controls_allowed || controls_allowed_lateral) {
     return false;
   }
-  if (msg->fd || (msg->bus != 1U)) {
+  if (GET_BUS(msg) != 1U) {
     return false;
   }
   return preap_f190_payload_allowed(msg);
@@ -439,10 +224,73 @@ static void preap_apply_radar_vin_msg(const CANPacket_t *msg) {
     preap_radar_vin[15] = msg->data[6];
     preap_radar_vin[16] = msg->data[7];
     preap_radar_vin_complete |= 4U;
-  } else {
   }
 }
 
+// ============================================
+// Checksum and counter (for EPAS validation)
+// ============================================
+
+static uint8_t tesla_preap_get_counter(const CANPacket_t *msg) {
+  if (msg->addr == 0x370U) {
+    return msg->data[6] & 0x0FU;  // EPAS_sysStatusCounter
+  }
+  return 0U;
+}
+
+static uint32_t tesla_preap_get_checksum(const CANPacket_t *msg) {
+  if (msg->addr == 0x370U) {
+    return msg->data[7];  // EPAS_sysStatusChecksum at byte 7
+  }
+  if (msg->addr == 0x488U) {
+    return msg->data[3];  // DAS_steeringControlChecksum at byte 3
+  }
+  return 0U;
+}
+
+static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
+  // Tesla byte-sum checksum: sum of address bytes + all data bytes except checksum byte
+  int checksum_byte = -1;
+  if (msg->addr == 0x370U) {
+    checksum_byte = 7;
+  } else if (msg->addr == 0x488U) {
+    checksum_byte = 3;
+  }
+  if (checksum_byte == -1) {
+    return 0U;
+  }
+
+  uint8_t chksum = (uint8_t)(msg->addr & 0xFFU) + (uint8_t)((msg->addr >> 8) & 0xFFU);
+  int len = GET_LEN(msg);
+  for (int i = 0; i < len; i++) {
+    if (i != checksum_byte) {
+      chksum += msg->data[i];
+    }
+  }
+  return chksum;
+}
+
+static bool tesla_preap_source_fresh(bool seen, uint32_t ts, uint32_t now) {
+  return seen && (safety_get_ts_elapsed(now, ts) <= PREAP_CALIBRATION_SOURCE_TIMEOUT_US);
+}
+
+static bool tesla_preap_calibration_window_open(uint32_t now) {
+  return preap_pedal_calibration &&
+         tesla_preap_source_fresh(preap_gear_seen, preap_gear_ts, now) &&
+         tesla_preap_source_fresh(preap_di_brake_seen, preap_di_brake_ts, now) &&
+         tesla_preap_source_fresh(preap_brake_message_seen, preap_brake_message_ts, now) &&
+         (preap_gear == 3) &&
+         (preap_di_brake_pressed || preap_brake_message_pressed);
+}
+
+static void tesla_preap_mads_exit(const DisengageReason reason) {
+  steering_control_inhibited = false;
+  preap_hands_on_clear_timing = false;
+  mads_exit_controls(reason);
+}
+
+
+// CRC-8 lookup table (polynomial 0x1D) for steering angle re-addressing
 static const int preap_crc_lookup[256] = {
   0x00, 0x1D, 0x3A, 0x27, 0x74, 0x69, 0x4E, 0x53, 0xE8, 0xF5, 0xD2, 0xCF, 0x9C, 0x81, 0xA6, 0xBB,
   0xCD, 0xD0, 0xF7, 0xEA, 0xB9, 0xA4, 0x83, 0x9E, 0x25, 0x38, 0x1F, 0x02, 0x51, 0x4C, 0x6B, 0x76,
@@ -465,54 +313,34 @@ static const int preap_crc_lookup[256] = {
 static int preap_compute_crc8(uint32_t lo, uint32_t hi, int msg_len) {
   int crc = 0xFF;
   for (int x = 0; x < msg_len; x++) {
-    int v = (x <= 3) ? ((int)((lo >> (x * 8)) & 0xFFU)) : ((int)((hi >> ((x - 4) * 8)) & 0xFFU));
+    int v = (x <= 3) ? ((lo >> (x * 8)) & 0xFF) : ((hi >> ((x - 4) * 8)) & 0xFF);
     crc = preap_crc_lookup[crc ^ v];
   }
   return crc ^ 0xFF;
 }
 
-static void preap_radar_capture_tx(const CANPacket_t *pkt) {
-#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
-  if (preap_radar_gtw_count < PREAP_RADAR_GTW_CAPTURE_MAX) {
-    preap_radar_gtw_capture[preap_radar_gtw_count] = *pkt;
-    preap_radar_gtw_count++;
-  }
-  if (pkt->addr == 0x2A9U) {
-    preap_radar_car_config_capture = *pkt;
-    preap_radar_car_config_captured = true;
-  }
-  if (pkt->addr == 0x2B9U) {
-    preap_radar_vin_feed_capture = *pkt;
-    preap_radar_vin_feed_captured = true;
-  }
-#else
-  SAFETY_UNUSED(pkt);
-#endif
-}
-
-static void preap_radar_send(CANPacket_t *pkt) {
-  preap_radar_capture_tx(pkt);
-#if defined(STM32H7) || defined(STM32F4)
-  can_set_checksum(pkt);
-  can_send(pkt, 1, true);
-#else
-  SAFETY_UNUSED(pkt);
-#endif
-}
+// ============================================
+// GTW Emulation helpers
+// ============================================
 
 static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
-  CANPacket_t pkt = {0};
+#if defined(STM32H7) || defined(STM32F4)
+  CANPacket_t pkt;
   pkt.returned = 0U;
   pkt.rejected = 0U;
   pkt.extended = src->extended;
-  pkt.bus = 1U;
+  pkt.bus = 1;
   pkt.addr = new_addr;
   pkt.data_len_code = src->data_len_code;
-  const int msg_len = (int)GET_LEN(src);
-  for (int i = 0; i < msg_len; i++) {
+  for (int i = 0; i < GET_LEN(src); i++) {
     pkt.data[i] = src->data[i];
   }
-  preap_radar_send(&pkt);
+  can_set_checksum(&pkt);
+  can_send(&pkt, 1, true);
+#else
+  (void)src;
+  (void)new_addr;
+#endif
 }
 
 static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t *dst) {
@@ -520,16 +348,22 @@ static void preap_transform_radar_car_config(const CANPacket_t *src, CANPacket_t
                        .bus = 1, .addr = 0x2A9, .data_len_code = src->data_len_code};
   uint32_t lo = PREAP_GET_BYTES_04(src);
   uint32_t hi = PREAP_GET_BYTES_48(src);
-  lo = (lo & 0xFFFFF33FU) | 0x100U | 0x440U;
-  hi = (hi & 0xCFFF0F0FU) | 0x10000000U | ((uint32_t)preap_radar_position << 4) | ((uint32_t)preap_radar_epas_type << 12);
-  // Tinkla 0.6.6: VIN character 8 of '2' or '4' is dual-motor. Force 4WD
-  // on the live 0x2A9 so xWD matches the donor VIN, not this Pre-AP chassis.
-  if (preap_radar_donor_active() && ((preap_radar_vin[7] == (uint8_t)'2') ||
-                                     (preap_radar_vin[7] == (uint8_t)'4'))) {
-    lo |= 0x08U;
+  lo = (lo & 0xFFFFF33F) | 0x100 | 0x440;  // country=US, radar_type=Bosch
+  hi = (hi & 0xCFFF0F0F) | 0x10000000 | (preap_radar_position << 4) | (preap_radar_epas_type << 12);
+  // Bosch xWD checks 0x2A9 against the VIN on 0x2B9, not chassis 0x398.
+  // Tesla char 8 '2'/'4' is dual motor. This car VIN 5YJSA1E25FF106153 is
+  // '2'; GTW still declares 2WD. Honest 2WD then latches xwdValidity and
+  // freezes the object table (~12 s). Tinkla 0.6.6 ORed 4WD from that char.
+  // Routes 8/9 with the OR kept a live table. Empty donor leaves 0x398 xWD
+  // (old A, char 8 '1', 2WD, rock-solid).
+  if (preap_radar_donor_active()) {
+    const uint8_t drive = preap_radar_vin[7];
+    if ((drive == (uint8_t)'2') || (drive == (uint8_t)'4')) {
+      lo |= 0x08U;
+    }
   }
-  preap_word_to_bytes(&dst->data[0], lo);
-  preap_word_to_bytes(&dst->data[4], hi);
+  PREAP_WORD_TO_BYTES(&dst->data[0], lo);
+  PREAP_WORD_TO_BYTES(&dst->data[4], hi);
 }
 
 static void preap_transform_radar_vin_feed(const CANPacket_t *src, CANPacket_t *dst) {
@@ -548,101 +382,141 @@ static void preap_transform_radar_vin_feed(const CANPacket_t *src, CANPacket_t *
     } else if (rec == 0x12) {
       lo = (uint32_t)rec | preap_radar_vin_char(10, 1) | preap_radar_vin_char(11, 2) | preap_radar_vin_char(12, 3);
       hi = preap_radar_vin_char(13, 0) | preap_radar_vin_char(14, 1) | preap_radar_vin_char(15, 2) | preap_radar_vin_char(16, 3);
-    } else {
     }
   }
-  preap_word_to_bytes(&dst->data[0], lo);
-  preap_word_to_bytes(&dst->data[4], hi);
+  PREAP_WORD_TO_BYTES(&dst->data[0], lo);
+  PREAP_WORD_TO_BYTES(&dst->data[4], hi);
 }
 
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+static bool preap_radar_car_config_captured = false;
+static CANPacket_t preap_radar_car_config_capture;
+static bool preap_radar_vin_feed_captured = false;
+static CANPacket_t preap_radar_vin_feed_capture;
+#endif
+
+// ============================================
+// GTW Emulation: CAN0 → CAN1 for Bosch radar
+// ============================================
+
 static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
-  const uint8_t bus_num = to_fwd->bus;
-  const uint32_t addr = to_fwd->addr;
-  const uint8_t msg_len = (uint8_t)GET_LEN(to_fwd);
+  int bus_num = GET_BUS(to_fwd);
+  int addr = GET_ADDR(to_fwd);
 
-  if ((bus_num == 0U) && preap_radar_emulation && preap_radar_ready()) {
-    if ((addr == 0x45U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x219); }
-    else if ((addr == 0x108U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x109); }
-    else if ((addr == 0x145U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x149); }
-    else if ((addr == 0x20AU) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x159); }
-    else if ((addr == 0x308U) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x209); }
-    else if ((addr == 0x30AU) && (msg_len == 8U)) { preap_radar_readdr(to_fwd, 0x2D9); }
-    else if ((addr == 0x405U) && (msg_len == 8U)) {
-      CANPacket_t vin_pkt = {0};
+  if (bus_num == 0 && preap_radar_emulation && preap_radar_ready()) {
+    // Group A: Simple re-addresses
+    switch (addr) {
+      case 0x45:   preap_radar_readdr(to_fwd, 0x219); break;  // STW_ACTN_RQ
+      case 0x108:  preap_radar_readdr(to_fwd, 0x109); break;  // DI_torque1
+      case 0x145:  preap_radar_readdr(to_fwd, 0x149); break;  // ESP_145h
+      case 0x20A:  preap_radar_readdr(to_fwd, 0x159); break;  // BrakeMessage -> ESP_C
+      case 0x308:  preap_radar_readdr(to_fwd, 0x209); break;  // GTW_odo
+      case 0x30A:  preap_radar_readdr(to_fwd, 0x2D9); break;  // BC_status
+      default: break;
+    }
+
+    if (addr == 0x405) {
+      CANPacket_t vin_pkt;
       preap_transform_radar_vin_feed(to_fwd, &vin_pkt);
-      preap_radar_send(&vin_pkt);
-    }
-    else {
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+      preap_radar_vin_feed_capture = vin_pkt;
+      preap_radar_vin_feed_captured = true;
+#endif
+#if defined(STM32H7) || defined(STM32F4)
+      can_set_checksum(&vin_pkt);
+      can_send(&vin_pkt, 1, true);
+#endif
     }
 
-    if ((addr == 0x398U) && (msg_len == 8U)) {
-      CANPacket_t pkt = {0};
+    // Group B: GTW_carConfig (0x398) → 0x2A9 with bitfield patching
+    if (addr == 0x398) {
+      CANPacket_t pkt;
       preap_transform_radar_car_config(to_fwd, &pkt);
-      preap_radar_send(&pkt);
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+      preap_radar_car_config_capture = pkt;
+      preap_radar_car_config_captured = true;
+#endif
+#if defined(STM32H7) || defined(STM32F4)
+      can_set_checksum(&pkt);
+      can_send(&pkt, 1, true);
+#endif
     }
 
-    if ((addr == 0x0EU) && (msg_len == 8U)) {
+    // Group B: STW_ANGLHP_STAT (0x0E) → 0x199 with SNA replacement
+    if (addr == 0x0E) {
       CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = to_fwd->extended,
                          .bus = 1, .addr = 0x199, .data_len_code = to_fwd->data_len_code};
       uint32_t lo = PREAP_GET_BYTES_04(to_fwd);
       uint32_t hi = PREAP_GET_BYTES_48(to_fwd);
-      if (((lo >> 16) & 0xFF3FU) == 0xFF3FU) {
-        lo = (lo & 0x0000FFFFU) | (0x0020U << 16);
-        hi = (hi & 0x00FFFFF0U) | 0x00000004U;
+      if (((lo >> 16) & 0xFF3F) == 0xFF3F) {
+        lo = (lo & 0x00C0FFFF) | (0x0020 << 16);
+        hi = (hi & 0x00FFFFF0) | 0x00000004;  // force DELPHI sensor ID
         int crc = preap_compute_crc8(lo, hi, 7);
         hi = hi | ((uint32_t)crc << 24);
       }
-      preap_word_to_bytes(&pkt.data[0], lo);
-      preap_word_to_bytes(&pkt.data[4], hi);
-      preap_radar_send(&pkt);
+      PREAP_WORD_TO_BYTES(&pkt.data[0], lo);
+      PREAP_WORD_TO_BYTES(&pkt.data[4], hi);
+#if defined(STM32H7) || defined(STM32F4)
+      can_set_checksum(&pkt);
+      can_send(&pkt, 1, true);
+#endif
     }
 
-    if ((addr == 0x115U) && (msg_len == 6U)) {
+    // Group C: ESP_115h (0x115) → 0x129 + synthetic DI_espControl (0x1A9)
+    if (addr == 0x115) {
       preap_radar_readdr(to_fwd, 0x129);
       uint32_t hi_src = PREAP_GET_BYTES_48(to_fwd);
-      int counter = ((int)(hi_src & 0xF0U) >> 4) & 0x0F;
+      int counter = ((hi_src & 0xF0) >> 4) & 0x0F;
       uint32_t syn_lo = 0x000C0000U | ((uint32_t)counter << 28);
       int cksm = (0x38 + 0x0C + (counter << 4)) & 0xFF;
       CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = 0,
                          .bus = 1, .addr = 0x1A9, .data_len_code = 5};
-      preap_word_to_bytes(&pkt.data[0], syn_lo);
-      pkt.data[4] = (uint8_t)cksm;
-      preap_radar_send(&pkt);
+      PREAP_WORD_TO_BYTES(&pkt.data[0], syn_lo);
+      PREAP_WORD_TO_BYTES(&pkt.data[4], (uint32_t)cksm);
+#if defined(STM32H7) || defined(STM32F4)
+      can_set_checksum(&pkt);
+      can_send(&pkt, 1, true);
+#endif
     }
 
-    if ((addr == 0x118U) && (msg_len == 6U)) {
+    // Group C: DI_torque2 (0x118) → 0x119 + synthetic ESP_wheelSpeeds (0x169)
+    if (addr == 0x118) {
       preap_radar_readdr(to_fwd, 0x119);
       uint32_t lo = PREAP_GET_BYTES_04(to_fwd);
-      uint32_t ws_counter = PREAP_GET_BYTES_48(to_fwd) & 0x0FU;
-      uint32_t raw_speed = (0xFFF0000U & lo) >> 16U;
-      uint32_t speed;
-      if (raw_speed == 0xFFFU) {
-        speed = 0x1FFFU;
+      int ws_counter = PREAP_GET_BYTES_48(to_fwd) & 0x0F;
+      int raw_speed = (int)((0xFFF0000U & lo) >> 16);
+      int speed;
+      if (raw_speed == 0xFFF) {
+        speed = 0x1FFF;
       } else {
-        int mph_x100 = ((int)raw_speed * 5) - 2500;
+        int mph_x100 = raw_speed * 5 - 2500;
         int kph_x100 = mph_x100 * 1609 / 1000;
-        speed = (kph_x100 < 0) ? 0U : (((uint32_t)kph_x100 / 4U) & 0x1FFFU);
+        speed = (kph_x100 < 0) ? 0 : ((kph_x100 / 4) & 0x1FFF);
       }
-      uint32_t ws_lo = speed | (speed << 13U) | (speed << 26U);
-      uint32_t ws_hi = ((speed >> 6U) | (speed << 7U) | (ws_counter << 20U)) & 0x00FFFFFFU;
+      uint32_t ws_lo = (uint32_t)(speed | (speed << 13) | (speed << 26));
+      uint32_t ws_hi = (uint32_t)((speed >> 6) | (speed << 7) | (ws_counter << 20)) & 0x00FFFFFFU;
       int ws_cksm = 0x76;
-      ws_cksm = (ws_cksm + (int)(ws_lo & 0xFFU) + (int)((ws_lo >> 8) & 0xFFU) + (int)((ws_lo >> 16) & 0xFFU) + (int)((ws_lo >> 24) & 0xFFU)) & 0xFF;
-      ws_cksm = (ws_cksm + (int)(ws_hi & 0xFFU) + (int)((ws_hi >> 8) & 0xFFU) + (int)((ws_hi >> 16) & 0xFFU)) & 0xFF;
+      ws_cksm = (ws_cksm + (int)(ws_lo & 0xFF) + (int)((ws_lo >> 8) & 0xFF) + (int)((ws_lo >> 16) & 0xFF) + (int)((ws_lo >> 24) & 0xFF)) & 0xFF;
+      ws_cksm = (ws_cksm + (int)(ws_hi & 0xFF) + (int)((ws_hi >> 8) & 0xFF) + (int)((ws_hi >> 16) & 0xFF)) & 0xFF;
       ws_hi = ws_hi | ((uint32_t)ws_cksm << 24);
       CANPacket_t pkt = {.returned = 0U, .rejected = 0U, .extended = 0,
                          .bus = 1, .addr = 0x169, .data_len_code = 8};
-      preap_word_to_bytes(&pkt.data[0], ws_lo);
-      preap_word_to_bytes(&pkt.data[4], ws_hi);
-      preap_radar_send(&pkt);
+      PREAP_WORD_TO_BYTES(&pkt.data[0], ws_lo);
+      PREAP_WORD_TO_BYTES(&pkt.data[4], ws_hi);
+#if defined(STM32H7) || defined(STM32F4)
+      can_set_checksum(&pkt);
+      can_send(&pkt, 1, true);
+#endif
     }
   }
 
-  if ((bus_num == 1U) && preap_radar_emulation) {
-    if ((addr == 0x631U) && (preap_radar_status == 0)) {
+  // Radar status tracking (CAN1 → informational only)
+  if (bus_num == 1 && preap_radar_emulation) {
+    if (addr == 0x631 && preap_radar_status == 0) {
       preap_radar_status = 1;
       preap_last_radar_signal = microsecond_timer_get();
     }
-    if ((addr == 0x300U) && (preap_radar_status == 1)) {
+    if (addr == 0x300 && preap_radar_status == 1) {
       preap_radar_status = 2;
       preap_last_radar_signal = microsecond_timer_get();
     }
@@ -691,488 +565,178 @@ bool tesla_preap_radar_donor_active_debug(void) {
 bool tesla_preap_radar_ready_debug(void) {
   return preap_radar_ready();
 }
-
-int tesla_preap_radar_gateway_count(void) {
-  return preap_radar_gtw_count;
-}
-
-uint32_t tesla_preap_radar_gateway_addr(int index) {
-  if ((index < 0) || (index >= preap_radar_gtw_count)) {
-    return 0U;
-  }
-  return preap_radar_gtw_capture[index].addr;
-}
-
-uint8_t tesla_preap_radar_gateway_bus(int index) {
-  if ((index < 0) || (index >= preap_radar_gtw_count)) {
-    return 0U;
-  }
-  return preap_radar_gtw_capture[index].bus;
-}
-
-uint8_t tesla_preap_radar_gateway_dlc(int index) {
-  if ((index < 0) || (index >= preap_radar_gtw_count)) {
-    return 0U;
-  }
-  return preap_radar_gtw_capture[index].data_len_code;
-}
-
-bool tesla_preap_radar_gateway_fd(int index) {
-  if ((index < 0) || (index >= preap_radar_gtw_count)) {
-    return false;
-  }
-  return preap_radar_gtw_capture[index].fd;
-}
-
-uint8_t tesla_preap_radar_gateway_data(int index, int byte_index) {
-  if ((index < 0) || (index >= preap_radar_gtw_count) || (byte_index < 0) || (byte_index >= 8)) {
-    return 0U;
-  }
-  return preap_radar_gtw_capture[index].data[byte_index];
-}
-
-void tesla_preap_radar_gateway_reset(void) {
-  preap_radar_gtw_count = 0;
-  preap_radar_car_config_captured = false;
-  preap_radar_vin_feed_captured = false;
-}
-
-void tesla_preap_observe_can(const CANPacket_t *msg) {
-  tesla_preap_gtw_emulation(msg);
-}
 #endif
 
-static bool tesla_preap_stock_cc_off_before_pull(uint32_t now) {
-  if (preap_stock_cc_di_ts != now) {
-    return !preap_stock_cc_di_engaged;
-  }
-  if (preap_stock_cc_di_engaged) {
-    return false;
-  }
-  return preap_stock_cc_di_prior_valid && !preap_stock_cc_di_prior_engaged;
-}
-
-static void tesla_preap_process_first_pull(uint32_t now) {
-  if (controls_allowed) {
-    controls_allowed = false;
-    tesla_preap_clear_stock_cc_confirmation();
-    if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-      mads_exit_controls(MADS_DISENGAGE_REASON_BUTTON);
-    }
-  } else if (preap_mode == PREAP_MODE_INDEPENDENT) {
-    tesla_preap_request_lateral();
-  } else {
-  }
-  preap_pull_pending = true;
-  preap_first_pull_ts = now;
-  if (!preap_enable_pedal) {
-    preap_stock_cc_cancel_authorized = true;
-    preap_stock_cc_cancel_sent = false;
-    preap_stock_cc_cancel_sent_ts = 0U;
-    preap_stock_cc_post_cancel_di = false;
-    preap_stock_cc_pull2_latched = false;
-    preap_stock_cc_pull2_ts = 0U;
-    preap_stock_cc_awaiting_di_rise = false;
-    preap_stock_cc_expected_counter = 0U;
-    preap_stock_cc_reengage_authorized = false;
-    preap_stock_cc_reengage_sent = false;
-    stock_cc_reengage_confirmed = false;
-  }
-}
-
-static void tesla_preap_process_second_pull(uint32_t now) {
-  preap_pull_pending = false;
-  if (preap_pedal_calibration) {
-    tesla_preap_clear_pull_state();
-    tesla_preap_revoke_calibration_authority();
-    return;
-  }
-  const bool sources_ready = tesla_preap_required_sources_ready(now);
-  const bool gas_fresh = tesla_preap_source_fresh(preap_gas_seen, preap_gas_ts, now);
-  const bool engagement_ready = sources_ready && !gas_pressed && preap_gas_seen && gas_fresh;
-  if (engagement_ready) {
-    if (preap_enable_pedal) {
-      controls_allowed = true;
-      if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-        tesla_preap_request_lateral();
-      }
-    } else {
-      if (tesla_preap_stock_cc_off_before_pull(now)) {
-        preap_stock_cc_pull2_latched = true;
-        preap_stock_cc_pull2_ts = now;
-        stock_cc_reengage_confirmed = false;
-      }
-    }
-  } else {
-    tesla_preap_clear_pull_state();
-  }
-}
-
-static void tesla_preap_process_main_pull(uint32_t now) {
-  const uint32_t elapsed = safety_get_ts_elapsed(now, preap_first_pull_ts);
-  if (preap_pull_pending && (elapsed > 0U) && (elapsed < PREAP_STALK_DOUBLE_PULL_US)) {
-    tesla_preap_process_second_pull(now);
-  } else {
-    tesla_preap_process_first_pull(now);
-  }
-}
-
-static void tesla_preap_revoke_stock_cc_longitudinal(void) {
-  controls_allowed = false;
-  tesla_preap_clear_stock_cc_confirmation();
-  if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-    mads_exit_controls(MADS_DISENGAGE_REASON_LAG);
-  } else {
-  }
-}
-
-static void tesla_preap_apply_brake_policy(bool brake_rising, bool brake_released) {
-  if (brake_rising) {
-    controls_allowed = false;
-    tesla_preap_clear_stock_cc_confirmation();
-    preap_pull_pending = false;
-    preap_stalk_armed = false;
-
-    if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-      mads_exit_controls(MADS_DISENGAGE_REASON_BRAKE);
-    } else if ((preap_mode == PREAP_MODE_INDEPENDENT) && m_mads_state.disengage_lateral_on_brake) {
-      mads_exit_controls(MADS_DISENGAGE_REASON_BRAKE);
-    } else if ((preap_mode == PREAP_MODE_INDEPENDENT) && m_mads_state.pause_lateral_on_brake && controls_allowed_lateral) {
-      controls_allowed_lateral = false;
-      preap_brake_paused_lateral = true;
-    } else {
-    }
-  }
-
-  const bool sources_ready = tesla_preap_required_sources_ready(microsecond_timer_get());
-  if (brake_released && preap_brake_paused_lateral && sources_ready) {
-    preap_brake_paused_lateral = false;
-    tesla_preap_request_lateral();
-  }
-}
+// ============================================
+// RX Hook
+// ============================================
 
 static void tesla_preap_rx_hook(const CANPacket_t *msg) {
-  const uint32_t now = microsecond_timer_get();
-  if (msg->returned == 0U) {
-    const bool is_pedal_sensor = (preap_enable_pedal || preap_pedal_calibration) && (msg->addr == 0x552U) && (msg->bus == preap_pedal_bus);
-    if (is_pedal_sensor) {
-      const int pedal_raw = (msg->data[0] << 8) | msg->data[1];
-      const uint8_t pedal_state = msg->data[4] >> 4;
-      const uint8_t pedal_counter = msg->data[4] & 0xFU;
-      if (!preap_pedal_feedback_counter_seen || (pedal_counter != preap_pedal_feedback_counter)) {
-        preap_pedal_feedback_counter_seen = true;
-        preap_pedal_feedback_counter = pedal_counter;
-        preap_pedal_feedback_advance_ts = now;
-      }
-      preap_pedal_feedback_healthy = pedal_state == PREAP_PEDAL_NO_FAULT;
-      preap_pedal_feedback_recoverable_idle =
-        (pedal_state == PREAP_PEDAL_FAULT_STARTUP) ||
-        (pedal_state == PREAP_PEDAL_FAULT_TIMEOUT);
-      // Live 0x552 with an advancing counter is a gas source. FAULT_TIMEOUT is
-      // the expected idle after NAP's one-release-then-silence policy; it is
-      // not driver gas and must not block the second-pull long latch.
-      preap_gas_seen = preap_pedal_feedback_counter_seen;
-      preap_gas_ts = preap_pedal_feedback_advance_ts;
-      gas_pressed = pedal_raw > PREAP_PEDAL_GAS_THRESHOLD;
+  // Pedal interceptor (0x552) — may arrive on bus 0 OR bus 2 depending on wiring.
+  // Must be handled BEFORE the bus-0-only bailout below.
+  // Whitelisted on both bus 0 and bus 2 in preap_rx_checks; the framework has
+  // already verified the message matches one of them, so accept either here.
+  //
+  // Gas-press threshold: 650 raw, chosen from real Pre-AP drive data:
+  //   - At-rest noise (driver not pressing): raw range 424-633, mean 470 (p99.9=602)
+  //   - Actual gas press: raw range 441-1246, mean 799 (p10=607, p50=802)
+  // The original threshold of 450 was inside the resting noise distribution and
+  // caused false gas_pressed readings that blocked pedal TX → pedal wouldn't engage.
+  // 650 gives zero false positives on rest noise while still catching the vast
+  // majority of real driver presses. Python-layer DI_pedalPos is the primary
+  // gas-override detection; the panda threshold here is a safety backstop.
+  if (preap_enable_pedal && (msg->addr == 0x552U)) {
+    int pedal_val = ((msg->data[0] << 8) | msg->data[1]);
+    gas_pressed = (pedal_val > 650);
+    if (preap_pedal_can == -1) {
+      preap_pedal_can = msg->bus;
     }
-    if (!is_pedal_sensor && (msg->bus == 0U)) {
-      if (msg->addr == 0x370U) {
-        const int angle_meas_new = (((msg->data[4] & 0x3FU) << 8) | msg->data[5]) - 8192U;
-        const uint8_t hands_on_level = msg->data[4] >> 6;
-        const uint8_t eac_status = msg->data[6] >> 5;
-        const uint8_t eac_error_code = msg->data[2] >> 4;
-        const bool epas_fault = (eac_status == 0U) && (eac_error_code >= 6U) && (eac_error_code <= 9U);
-        const uint32_t hands_on_elapsed = safety_get_ts_elapsed(now, preap_hands_on_clear_ts);
+    return;
+  }
 
-        update_sample(&angle_meas, angle_meas_new);
-        preap_epas_seen = true;
-        preap_epas_healthy = !epas_fault;
-        preap_epas_ts = now;
+  // All other RX handlers are bus 0 only.
+  if (msg->bus != 0U) return;
 
-        if (epas_fault) {
+  // EPAS (0x370): steering angle, hands-on level, disengage detection
+  if (msg->addr == 0x370U) {
+    const int angle_meas_new = (((msg->data[4] & 0x3FU) << 8) | msg->data[5]) - 8192U;
+    update_sample(&angle_meas, angle_meas_new);
+
+    const int hands_on_level = msg->data[4] >> 6;
+    const int eac_status = msg->data[6] >> 5;
+    const int eac_error_code = msg->data[2] >> 4;
+
+    bool epas_rejecting = (eac_status == 0) && (eac_error_code >= 6) && (eac_error_code <= 9);
+    const bool eac_fault = (eac_status == 3);
+    preap_hands_on_level = hands_on_level;
+    const bool hands_on = hands_on_level >= PREAP_HANDS_ON_DISENGAGE_LEVEL;
+    if (preap_hands_on_pause && !eac_fault && !epas_rejecting && hands_on && controls_allowed_lateral) {
+      steering_control_inhibited = true;
+      preap_hands_on_clear_timing = false;
+      pcm_cruise_check(false);
+      steering_disengage = false;
+    } else if (epas_rejecting || eac_fault || (hands_on && !preap_hands_on_pause)) {
+      steering_disengage = true;
+      tesla_preap_mads_exit(MADS_DISENGAGE_REASON_STEERING_DISENGAGE);
+      pcm_cruise_check(false);
+    } else if (preap_hands_on_pause && steering_control_inhibited) {
+      steering_disengage = false;
+      const bool clear_ok = (hands_on_level < PREAP_HANDS_ON_DISENGAGE_LEVEL) &&
+                            (preap_gear == 4) && !preap_doors_open &&
+                            controls_allowed_lateral;
+      if (!clear_ok) {
+        preap_hands_on_clear_timing = false;
+      } else {
+        const uint32_t now = microsecond_timer_get();
+        if (!preap_hands_on_clear_timing) {
+          preap_hands_on_clear_timing = true;
+          preap_hands_on_clear_ts = now;
+        } else if (safety_get_ts_elapsed(now, preap_hands_on_clear_ts) >= PREAP_HANDS_ON_RESUME_US) {
           steering_control_inhibited = false;
           preap_hands_on_clear_timing = false;
-          tesla_preap_exit(MADS_DISENGAGE_REASON_STEERING_DISENGAGE);
-        } else if (hands_on_level >= 2U) {
-          steering_control_inhibited = true;
-          preap_hands_on_clear_timing = false;
-        } else if (steering_control_inhibited) {
-          if (!preap_hands_on_clear_timing) {
-            preap_hands_on_clear_timing = true;
-            preap_hands_on_clear_ts = now;
-          } else if (hands_on_elapsed >= PREAP_HANDS_ON_RESUME_US) {
-            steering_control_inhibited = false;
-            preap_hands_on_clear_timing = false;
-          } else {
-          }
-        } else {
-          preap_hands_on_clear_timing = false;
         }
       }
-
-      if (msg->addr == 0x155U) {
-        const float speed = (((msg->data[5] << 8) | msg->data[6]) * 0.01F) * KPH_TO_MS;
-        UPDATE_VEHICLE_SPEED(speed);
-        vehicle_moving = speed > (0.5F * KPH_TO_MS);
-      }
-
-      if (msg->addr == 0x108U) {
-        preap_gas_seen = true;
-        preap_gas_ts = now;
-        if (!preap_enable_pedal) {
-          gas_pressed = msg->data[6] != 0U;
-        }
-      }
-
-      if (msg->addr == 0x20AU) {
-        const bool brake_was_pressed = preap_brake_message_pressed || preap_di_brake_pressed;
-        const uint8_t brake_status = (msg->data[0] >> 2) & 0x3U;
-        preap_brake_message_seen = (brake_status == 1U) || (brake_status == 2U);
-        preap_brake_message_pressed = brake_status == 2U;
-        preap_brake_message_ts = now;
-        const bool brake_now = preap_brake_message_pressed || preap_di_brake_pressed;
-        brake_pressed = brake_now;
-        tesla_preap_apply_brake_policy(!brake_was_pressed && brake_now, brake_was_pressed && !brake_now);
-        if (!preap_brake_message_seen) {
-          tesla_preap_exit(MADS_DISENGAGE_REASON_BRAKE);
-        }
-      }
-
-      if (msg->addr == 0x118U) {
-        const bool brake_was_pressed = preap_brake_message_pressed || preap_di_brake_pressed;
-        const uint8_t gear = (msg->data[1] >> 4) & 0x7U;
-        const uint8_t brake_state = (msg->data[4] >> 4) & 0x3U;
-        preap_gear_seen = true;
-        preap_gear_drive = gear == 4U;
-        preap_gear_neutral = gear == PREAP_GEAR_NEUTRAL;
-        preap_gear_ts = now;
-        preap_di_brake_seen = brake_state <= 1U;
-        preap_di_brake_pressed = ((msg->data[1] & 0x80U) != 0U) || (brake_state == 1U);
-        preap_di_brake_ts = now;
-        const bool brake_now = preap_brake_message_pressed || preap_di_brake_pressed;
-        brake_pressed = brake_now;
-        tesla_preap_apply_brake_policy(!brake_was_pressed && brake_now, brake_was_pressed && !brake_now);
-        if (!preap_pedal_calibration && (!preap_gear_drive || !preap_di_brake_seen)) {
-          tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-        }
-      }
-
-      if (msg->addr == 0x318U) {
-        const uint8_t door_fl = (msg->data[1] >> 4) & 0x3U;
-        const uint8_t door_fr = (msg->data[1] >> 6) & 0x3U;
-        const uint8_t door_rl = (msg->data[2] >> 6) & 0x3U;
-        const uint8_t door_rr = (msg->data[3] >> 5) & 0x3U;
-        const uint8_t front_trunk = (msg->data[6] >> 2) & 0x3U;
-        const uint8_t boot_state = (msg->data[5] >> 6) & 0x3U;
-        preap_doors_seen = true;
-        preap_doors_closed = (door_fl == 0U) && (door_fr == 0U) && (door_rl == 0U) && (door_rr == 0U) &&
-                             (front_trunk == 0U) && (boot_state == 0U);
-        preap_doors_ts = now;
-        if (!preap_doors_closed) {
-          tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-        }
-      }
-
-      if (msg->addr == 0x368U) {
-        const uint8_t cruise_state = (msg->data[1] >> 4) & 0x7U;
-        const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) || (cruise_state == 4U) ||
-                                    (cruise_state == 6U) || (cruise_state == 7U);
-        const bool cruise_rising = cruise_engaged && !preap_stock_cc_di_engaged;
-        const bool cruise_falling = !cruise_engaged && preap_stock_cc_di_engaged;
-        if (preap_stock_cc_di_seen && (now != preap_stock_cc_di_ts)) {
-          preap_stock_cc_di_prior_engaged = preap_stock_cc_di_engaged;
-          preap_stock_cc_di_prior_valid = true;
-        }
-        preap_stock_cc_di_engaged = cruise_engaged;
-        preap_stock_cc_di_ts = now;
-        preap_stock_cc_di_seen = true;
-        const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
-        const uint32_t cancel_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_cancel_sent_ts);
-        const bool sources_ready = tesla_preap_required_sources_ready(now);
-        if (!preap_enable_pedal) {
-          if (stock_cc_reengage_confirmed && cruise_falling) {
-            tesla_preap_revoke_stock_cc_longitudinal();
-          } else if (preap_stock_cc_cancel_sent && preap_stock_cc_post_cancel_di && cruise_engaged &&
-                     !preap_stock_cc_reengage_sent) {
-            if (preap_stock_cc_pull2_latched || preap_stock_cc_reengage_authorized) {
-              tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-            } else {
-              // A post-CANCEL OFF sample is no longer current. Do not let it
-              // authorize a later SET after cruise has re-engaged.
-              preap_stock_cc_post_cancel_di = false;
-              preap_stock_cc_reengage_authorized = false;
-            }
-          } else if (preap_stock_cc_cancel_sent && !cruise_engaged && !preap_stock_cc_post_cancel_di) {
-            if (cancel_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
-              tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-            } else {
-              preap_stock_cc_post_cancel_di = true;
-            }
-          } else {
-          }
-          if (preap_stock_cc_cancel_sent && !cruise_engaged && preap_stock_cc_post_cancel_di &&
-              preap_stock_cc_pull2_latched && !preap_stock_cc_reengage_authorized &&
-              (safety_get_ts_elapsed(now, preap_stock_cc_pull2_ts) > 0U)) {
-            preap_stock_cc_reengage_authorized = true;
-            preap_stock_cc_deadline_ts = now;
-          }
-          if (preap_stock_cc_reengage_sent) {
-            if ((confirmation_elapsed < PREAP_STOCK_CC_CONFIRM_US) && cruise_rising && sources_ready &&
-                preap_stock_cc_awaiting_di_rise) {
-              controls_allowed = true;
-              stock_cc_reengage_confirmed = true;
-              stock_cc_reengage_counter = preap_stock_cc_expected_counter;
-              tesla_preap_retire_confirmed_stock_cc_handshake();
-              if (preap_mode == PREAP_MODE_CRUISE_COUPLED) {
-                tesla_preap_request_lateral();
-              }
-            } else if (confirmation_elapsed >= PREAP_STOCK_CC_CONFIRM_US) {
-              tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-            } else {
-            }
-          }
-        }
-      }
-
-      if (msg->addr == 0x45U) {
-        const uint8_t lever = msg->data[0] & 0x3FU;
-        const uint8_t counter = tesla_preap_get_counter(msg);
-        const bool counter_consecutive = !preap_stalk_counter_seen || (counter == ((preap_stalk_counter_last + 1U) & 0xFU));
-        const bool sources_ready = tesla_preap_required_sources_ready(now);
-        bool is_echo = false;
-        if (preap_echo_active) {
-          const uint32_t echo_elapsed = safety_get_ts_elapsed(now, preap_echo_ts);
-          if (echo_elapsed > preap_echo_window_us) {
-            preap_echo_active = false;
-          } else if ((lever == preap_echo_lever) && (counter == preap_echo_counter)) {
-            is_echo = true;
-          } else {
-          }
-        }
-        if (is_echo) {
-          // Authorized TX echoes do not participate in the physical stalk sequence.
-        } else {
-          preap_stalk_counter_seen = true;
-          preap_stalk_counter_last = counter;
-          for (int i = 0; i < 8; i++) {
-            preap_live_stw[i] = msg->data[i];
-          }
-          preap_live_stw_valid = true;
-          if (lever == 1U) {
-            tesla_preap_exit(MADS_DISENGAGE_REASON_BUTTON);
-          } else if (!counter_consecutive) {
-            preap_stalk_armed = false;
-            preap_pull_pending = false;
-            tesla_preap_revoke_stock_cc_longitudinal();
-          } else if (lever == 0U) {
-            if (sources_ready) {
-              preap_stalk_armed = true;
-            }
-          } else if (lever == 2U) {
-            if (preap_stalk_armed && sources_ready) {
-              preap_stalk_armed = false;
-              tesla_preap_process_main_pull(now);
-            }
-          } else if ((lever == PREAP_STALK_RES_ACCEL) || (lever == PREAP_STALK_RES_ACCEL_2ND) ||
-                     (lever == PREAP_STALK_DECEL_SET) || (lever == PREAP_STALK_DECEL_2ND)) {
-            // Direct stock-cruise +/- : disarm the edge, keep pending double-pull origin.
-            preap_stalk_armed = false;
-          } else {
-            // Unknown stalk positions cannot carry engagement authority.
-            preap_stalk_armed = false;
-            preap_pull_pending = false;
-          }
-        }
-      }
-
-      const bool sources_valid = tesla_preap_required_sources_valid(now);
-      if (!sources_valid &&
-          (controls_allowed || controls_allowed_lateral || preap_pull_pending || preap_stock_cc_reengage_sent)) {
-        preap_hands_on_clear_timing = false;
-        tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-      }
-    }
-  }
-  if (preap_pedal_calibration) {
-    tesla_preap_revoke_calibration_authority();
-  }
-}
-
-static void tesla_preap_invalid_rx_hook(const CANPacket_t *msg) {
-  SAFETY_UNUSED(msg);
-  preap_hands_on_clear_timing = false;
-  tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-}
-
-static void tesla_preap_tick(bool rx_checks_invalid) {
-  const uint32_t now = microsecond_timer_get();
-  const bool sources_valid = tesla_preap_required_sources_valid(now);
-  const uint32_t confirmation_elapsed = safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts);
-  tesla_preap_expire_unsent_cancel(now);
-  if (rx_checks_invalid || !sources_valid) {
-    preap_hands_on_clear_timing = false;
-    tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-  }
-  if (preap_enable_pedal &&
-      (!preap_pedal_feedback_counter_seen ||
-       (safety_get_ts_elapsed(now, preap_pedal_feedback_advance_ts) > PREAP_PEDAL_FEEDBACK_TIMEOUT_US) ||
-       (!preap_pedal_feedback_healthy && !preap_pedal_feedback_recoverable_idle))) {
-    if ((preap_mode == PREAP_MODE_CRUISE_COUPLED) && controls_allowed) {
-      tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
     } else {
-      controls_allowed = false;
+      steering_disengage = false;
     }
   }
-  if (!preap_enable_pedal && preap_stock_cc_cancel_sent && !preap_stock_cc_post_cancel_di &&
-      (safety_get_ts_elapsed(now, preap_stock_cc_cancel_sent_ts) >= PREAP_STOCK_CC_CONFIRM_US)) {
-    tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-  }
-  if ((preap_stock_cc_reengage_authorized || preap_stock_cc_reengage_sent) &&
-      (confirmation_elapsed >= PREAP_STOCK_CC_CONFIRM_US)) {
-    tesla_preap_exit(MADS_DISENGAGE_REASON_LAG);
-  }
-  if (preap_pedal_calibration) {
-    tesla_preap_revoke_calibration_authority();
-  }
-}
 
-static bool tesla_preap_stock_cc_tuple_ok(const CANPacket_t *msg, uint8_t lever) {
-  bool ok = false;
-  if ((msg->addr == 0x45U) && (msg->bus == 0U) && (msg->fd == false) && (GET_LEN(msg) == 8U) && preap_live_stw_valid) {
-    const uint8_t counter = tesla_preap_get_counter(msg);
-    const uint32_t checksum = tesla_preap_compute_checksum(msg);
-    ok = ((msg->data[0] & 0x40U) != 0U) &&
-         ((msg->data[0] & 0x80U) == 0U) &&
-         ((msg->data[0] & 0x3FU) == lever) &&
-         (checksum == tesla_preap_get_checksum(msg)) &&
-         (counter == ((preap_stalk_counter_last + 1U) & 0xFU)) &&
-         ((msg->data[6] & 0x07U) == (preap_live_stw[6] & 0x07U)) &&
-         ((msg->data[6] & 0x08U) == 0U);
-    for (int i = 1; i < 6; i++) {
-      if (msg->data[i] != preap_live_stw[i]) {
-        ok = false;
+  // Vehicle speed (ESP_B: 0x155) — derive vehicle_moving from actual speed
+  if (msg->addr == 0x155U) {
+    float speed = (((msg->data[5] << 8) | msg->data[6]) * 0.01f) * KPH_TO_MS;
+    UPDATE_VEHICLE_SPEED(speed);
+    vehicle_moving = speed > (0.5f * KPH_TO_MS);
+  }
+
+  // Gas pressed from DI_torque1 (0x108) — only when pedal interceptor is not active.
+  // (The pedal interceptor path is handled above the bus-0-only bailout since it may
+  // arrive on bus 0 or bus 2.)
+  if (msg->addr == 0x108U) {
+    if (!preap_enable_pedal) {
+      gas_pressed = msg->data[6] != 0U;
+    }
+  }
+
+  // Brake (0x20a) — latch pedal authority separately, but keep the framework
+  // brake false so generic_rx_checks doesn't drop lateral controls_allowed.
+  if (msg->addr == 0x20aU) {
+    preap_brake_message_pressed = ((msg->data[0] >> 2) & 0x03U) == 2U;
+    brake_pressed = false;
+    preap_brake_message_seen = true;
+    preap_brake_message_ts = microsecond_timer_get();
+  }
+
+  // Cruise state (DI_state: 0x368) — vehicle_moving only, engagement via stalk
+  if (msg->addr == 0x368U) {
+    int cruise_state = (msg->data[1] >> 4) & 0x07U;
+    // Backup vehicle_moving from cruise state (standstill detection)
+    if (cruise_state == 3) {
+      vehicle_moving = false;
+    }
+  }
+
+  // DI brake closes the interval before the slower BrakeMessage arrives.
+  // The same frame also disables controls on leaving Drive.
+  if (msg->addr == 0x118U) {
+    preap_di_brake_pressed = ((msg->data[1] >> 7) & 0x01U) != 0U;
+    preap_gear = (msg->data[1] >> 4) & 0x07;
+    preap_di_brake_seen = true;
+    preap_di_brake_ts = microsecond_timer_get();
+    preap_gear_seen = true;
+    preap_gear_ts = preap_di_brake_ts;
+    if ((preap_gear_prev == 4) && (preap_gear != 4)) {
+      controls_allowed = false;
+      tesla_preap_mads_exit(MADS_DISENGAGE_REASON_ACC_MAIN_OFF);
+    }
+    preap_gear_prev = preap_gear;
+  }
+
+  // Door check (GTW_carState: 0x318)
+  if (msg->addr == 0x318U) {
+    int d_fl = (msg->data[1] >> 4) & 0x03;
+    int d_fr = (msg->data[1] >> 6) & 0x03;
+    int d_rl = (msg->data[2] >> 6) & 0x03;
+    int d_rr = (msg->data[3] >> 5) & 0x03;
+    int d_ft = (msg->data[6] >> 2) & 0x03;
+    int d_tr = (msg->data[5] >> 6) & 0x03;
+    preap_doors_open = (d_fl == 1) || (d_fr == 1) || (d_rl == 1) || (d_rr == 1) || (d_ft == 1) || (d_tr == 1);
+    if (preap_doors_open) {
+      controls_allowed = false;
+      tesla_preap_mads_exit(MADS_DISENGAGE_REASON_ACC_MAIN_OFF);
+    }
+  }
+
+  // Stalk engagement (STW_ACTN_RQ: 0x45) with echo-filtered cancel
+  if (msg->addr == 0x45U) {
+    int lever = msg->data[0] & 0x3FU;
+    if (lever == 2) {  // RWD = pull toward driver = enable
+      if ((preap_gear == 4) && !preap_doors_open &&
+          (preap_hands_on_level < PREAP_HANDS_ON_DISENGAGE_LEVEL) &&
+          !steering_control_inhibited) {
+        pcm_cruise_check(true);
+        preap_last_stalk_engage_us = microsecond_timer_get();
+      }
+    } else if (lever == 1) {  // FWD = push away = cancel
+      uint32_t elapsed = microsecond_timer_get() - preap_last_stalk_engage_us;
+      if (elapsed > PREAP_CANCEL_ECHO_WINDOW_US) {
+        pcm_cruise_check(false);
+        tesla_preap_mads_exit(MADS_DISENGAGE_REASON_BUTTON);
       }
     }
   }
-  return ok;
+
+  // No relay, so stock_ecu_check never runs. Stalk pull's controls_allowed
+  // rising edge requests MADS lateral; hands-on/EPAS steering_disengage exits it.
+  mads_state_update(vehicle_moving, acc_main_on, controls_allowed, brake_pressed || regen_braking, steering_disengage);
+  if (preap_pedal_calibration) {
+    controls_allowed = false;
+    controls_allowed_lateral = false;
+  }
 }
 
-static void tesla_preap_mark_echo(uint8_t lever, uint8_t counter, uint32_t window_us) {
-  preap_echo_active = true;
-  preap_echo_lever = lever;
-  preap_echo_counter = counter;
-  preap_echo_ts = microsecond_timer_get();
-  preap_echo_window_us = window_us;
-}
-
-static bool tesla_preap_classic_tx_tuple(const CANPacket_t *msg, uint8_t bus, uint8_t len) {
-  return (!msg->fd) && (msg->bus == bus) && (GET_LEN(msg) == len) &&
-         (tesla_preap_get_checksum(msg) == tesla_preap_compute_checksum(msg));
-}
-
-static bool tesla_preap_lateral_actuation_allowed(void) {
-  return controls_allowed_lateral && !steering_control_inhibited;
-}
+// ============================================
+// TX Hook
+// ============================================
 
 static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   const AngleSteeringLimits PREAP_STEERING_LIMITS = {
@@ -1180,20 +744,24 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     .angle_deg_to_can = 10,
     .frequency = 50U,
   };
-  // Frozen NAP Pre-AP Model S VehicleModel: mass=2100+STD_CARGO_KG, wheelbase=2.960, steerRatio=15.0.
+
+  // Pre-AP Model S is physically the same car as HW1/HW2/HW3 Model S.
+  // These values MUST match VehicleModel(TESLA_MODEL_S_HW3) in carcontroller.py.
+  // Verified: mass=2100+STD_CARGO_KG, wheelbase=2.960, steerRatio=15.0
+  //           → slip_factor = -0.0005666 (calc_slip_factor)
+  // Confirmed by Lukas (xnor-tech, former comma employee, Tesla port author).
   const AngleSteeringParams PREAP_STEERING_PARAMS = {
     .slip_factor = -0.0005666,
     .steer_ratio = 15.,
     .wheelbase = 2.96,
   };
 
-  bool allowed = false;
+  bool tx = true;
+  bool violation = false;
 
   // Host→panda donor VIN/config. Intercept; do not put 0x560 on the car.
   if (msg->addr == PREAP_RADAR_VIN_ADDR) {
-    if ((msg->bus == 0U) && !msg->fd && (GET_LEN(msg) == 8U)) {
-      preap_apply_radar_vin_msg(msg);
-    }
+    preap_apply_radar_vin_msg(msg);
     return false;
   }
 
@@ -1202,168 +770,179 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     return preap_f190_tx_ok(msg);
   }
 
+  // DAS_steeringControl (0x488)
+  if (msg->addr == 0x488U) {
+    int raw_angle_can = ((msg->data[0] & 0x7FU) << 8) | msg->data[1];
+    int desired_angle = raw_angle_can - 16384;
+    int steer_control_type = msg->data[2] >> 6;
+    bool steer_control_enabled = steer_control_type == 1;
+
+    if (steer_angle_cmd_checks_vm(desired_angle, steer_control_enabled, PREAP_STEERING_LIMITS, PREAP_STEERING_PARAMS)) {
+      violation = true;
+    }
+    if ((steer_control_type != 0) && (steer_control_type != 1)) {
+      violation = true;
+    }
+    if (steering_control_inhibited && steer_control_enabled) {
+      violation = true;
+    }
+  }
+
+  // EPB_epasControl (0x214): only allow valid EAC modes (0=disable, 1=enable)
+  if (msg->addr == 0x214U) {
+    int epas_control_type = msg->data[0] & 0x07U;  // EPB_epasEACAllow: bits 2:0 of byte 0
+    if (epas_control_type > 1) {
+      violation = true;
+    }
+  }
+
+  // DAS_control (0x2B9): no AEB events from openpilot
+  if (msg->addr == 0x2B9U) {
+    int aeb_event = msg->data[2] & 0x03U;
+    if (aeb_event != 0) {
+      violation = true;
+    }
+  }
+
+  // Pedal interceptor (0x551 GAS_COMMAND): parse ENABLE bit and GAS_COMMAND
+  // value to distinguish authoritative accel commands from release commands.
+  //   DBC: SG_ ENABLE : 39|1@0+  →  bit 7 of data[4]
+  //   DBC: SG_ GAS_COMMAND : 7|16@0+  →  bytes 0-1 big-endian (physical 0 = raw 450)
+  //
+  //   ENABLE=0: openpilot is releasing control. Comma Pedal ignores GAS_COMMAND
+  //   and passes the driver's OEM pedal voltage through. The controller sends
+  //   one disabled-zero frame when relinquishing active authority or resetting
+  //   faulted firmware, then stays silent.
+  //   Defense-in-depth: we still require the GAS_COMMAND raw value to be at or
+  //   below the zero point (raw <= 500, which is ~2.5% physical) so a bugged or
+  //   malicious ENABLE=0 + high-value message can't sneak through a potential
+  //   Comma Pedal firmware bug.
+  //
+  //   ENABLE=1: authoritative actuation command. Gated by get_longitudinal_allowed()
+  //   (controls_allowed && !gas_pressed_prev).
   if (msg->addr == 0x551U) {
-    if ((!(preap_enable_pedal || preap_pedal_calibration)) || (msg->bus != preap_pedal_bus) || msg->fd ||
-        (GET_LEN(msg) != 6U)) {
-      return false;
-    }
-    const bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
-    const uint8_t counter = msg->data[4] & 0xFU;
-    const int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
-    const int raw_gas_cmd2 = (msg->data[2] << 8) | msg->data[3];
-    const bool protocol_valid = ((msg->data[4] & 0x70U) == 0U) &&
-                                (tesla_preap_get_checksum(msg) == tesla_preap_compute_checksum(msg)) &&
-                                (raw_gas_cmd < 65535) && (raw_gas_cmd2 < 65535) &&
-                                (!preap_pedal_tx_counter_seen ||
-                                 (counter == ((preap_pedal_tx_counter + 1U) & 0xFU)));
-    if (!protocol_valid) {
-      return false;
-    }
-    if (pedal_enable) {
-      if (preap_pedal_calibration) {
+    if (preap_pedal_calibration) {
+      const bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
+      const int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
+      const int raw_gas_cmd2 = (msg->data[2] << 8) | msg->data[3];
+      const uint8_t counter = msg->data[4] & 0x0FU;
+      uint8_t chksum = (uint8_t)(msg->addr & 0xFFU) + (uint8_t)((msg->addr >> 8) & 0xFFU);
+      for (int i = 0; i < 5; i++) {
+        chksum += msg->data[i];
+      }
+      const bool protocol_valid = (GET_BUS(msg) == preap_pedal_bus) &&
+                                  (GET_LEN(msg) == 6U) &&
+                                  !msg->fd &&
+                                  ((msg->data[4] & 0x70U) == 0U) &&
+                                  (chksum == msg->data[5]) &&
+                                  (raw_gas_cmd < 65535) && (raw_gas_cmd2 < 65535) &&
+                                  (!preap_pedal_tx_counter_seen ||
+                                   (counter == (uint8_t)((preap_pedal_tx_counter + 1U) & 0x0FU)));
+      if (!protocol_valid) {
+        violation = true;
+      } else if (pedal_enable) {
         if (!tesla_preap_calibration_window_open(microsecond_timer_get())) {
-          return false;
+          violation = true;
+        }
+      } else if ((raw_gas_cmd > 500) || (raw_gas_cmd2 > 500)) {
+        violation = true;
+      }
+      if (!violation) {
+        preap_pedal_tx_counter_seen = true;
+        preap_pedal_tx_counter = counter;
+      }
+    } else if (!preap_enable_pedal) {
+      violation = true;
+    } else {
+      bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
+      int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
+      if (pedal_enable) {
+        if (!get_longitudinal_allowed() || preap_di_brake_pressed || preap_brake_message_pressed) {
+          violation = true;
         }
       } else {
-        const uint32_t feedback_age = safety_get_ts_elapsed(microsecond_timer_get(), preap_pedal_feedback_advance_ts);
-        if (!get_longitudinal_allowed() || gas_pressed || preap_di_brake_pressed || preap_brake_message_pressed ||
-            !preap_pedal_feedback_healthy || !preap_pedal_feedback_counter_seen ||
-            (feedback_age > PREAP_PEDAL_FEEDBACK_TIMEOUT_US)) {
-          return false;
+        // ENABLE=0: only allow near-zero GAS_COMMAND values (defense-in-depth).
+        // This admits the production raw-zero release and DBC physical zero.
+        if (raw_gas_cmd > 500) {
+          violation = true;
         }
       }
-    } else if ((raw_gas_cmd > 500) || (raw_gas_cmd2 > 500)) {
-      return false;
     }
-    preap_pedal_tx_counter_seen = true;
-    preap_pedal_tx_counter = counter;
-    return true;
   }
-  if (msg->addr == 0x488U) {
-    if (!tesla_preap_classic_tx_tuple(msg, 0U, 4U)) {
-      return false;
-    }
-    // DAS_steeringHapticRequest is unused. Reject nonzero regardless of control type or permission.
-    if ((msg->data[0] & 0x80U) != 0U) {
-      return false;
-    }
-    const int raw_angle_can = ((msg->data[0] & 0x7FU) << 8) | msg->data[1];
-    const int desired_angle = raw_angle_can - 16384;
-    const int steer_control_type = msg->data[2] >> 6;
-    const bool steer_control_enabled = steer_control_type == 1;
-    if ((steer_control_type != 0) && (steer_control_type != 1)) {
-      return false;
-    }
-    if (steer_control_enabled && !tesla_preap_lateral_actuation_allowed()) {
-      return false;
-    }
-    if (steer_angle_cmd_checks_vm(desired_angle, steer_control_enabled, PREAP_STEERING_LIMITS, PREAP_STEERING_PARAMS)) {
-      return false;
-    }
-    return true;
-  }
-  if (msg->addr == 0x214U) {
-    if (!tesla_preap_classic_tx_tuple(msg, 0U, 3U)) {
-      return false;
-    }
-    const int epas_control_type = msg->data[0] & 0x07U;
-    if (epas_control_type > 1) {
-      return false;
-    }
-    if ((epas_control_type == 1) && !tesla_preap_lateral_actuation_allowed()) {
-      return false;
-    }
-    return true;
-  }
+
+  // DAS_bodyControls (0x3E9): turn-signal actuation. Gate on controls_allowed
+  // (matches all other Pre-AP TX) so the indicator can only be driven while
+  // openpilot is engaged — on disengage controlsd clears the blinker anyway,
+  // and this is the defense-in-depth backstop. Also bound the turn-indicator
+  // request to valid values (0-3); the field is 2 bits (bit 8 = byte 1 bits
+  // 0-1) so it cannot exceed 3 — a guard if the field width ever changes.
   if (msg->addr == 0x3E9U) {
-    if (!tesla_preap_classic_tx_tuple(msg, 0U, 8U)) {
-      return false;
-    }
-    const int turn_req = msg->data[1] & 0x03U;
+    int turn_req = (msg->data[1] & 0x03U);  // DAS_turnIndicatorRequest at bit 8
     if (turn_req > 3) {
-      return false;
+      violation = true;
     }
-    if (!tesla_preap_lateral_actuation_allowed()) {
-      return false;
-    }
-    return true;
-  }
-  if (!preap_enable_pedal && (msg->addr == 0x45U)) {
-    const uint32_t now = microsecond_timer_get();
-    tesla_preap_expire_unsent_cancel(now);
-    const uint8_t lever = msg->data[0] & 0x3FU;
-    const uint8_t counter = tesla_preap_get_counter(msg);
-    if ((lever == 1U) && tesla_preap_cancel_window_open(now) &&
-        tesla_preap_stock_cc_tuple_ok(msg, 1U)) {
-      preap_stock_cc_cancel_sent = true;
-      preap_stock_cc_cancel_sent_ts = now;
-      tesla_preap_mark_echo(1U, counter, PREAP_CANCEL_ECHO_US);
-      allowed = true;
-    } else if ((lever == 16U) && preap_stock_cc_reengage_authorized &&
-               (safety_get_ts_elapsed(now, preap_stock_cc_deadline_ts) < PREAP_STOCK_CC_CONFIRM_US) &&
-               preap_stock_cc_cancel_sent &&
-               preap_stock_cc_post_cancel_di && !preap_stock_cc_reengage_sent &&
-               tesla_preap_stock_cc_tuple_ok(msg, 16U)) {
-      preap_stock_cc_reengage_sent = true;
-      preap_stock_cc_awaiting_di_rise = true;
-      preap_stock_cc_expected_counter = (uint8_t)((stock_cc_reengage_counter + 1U) & 0xFFU);
-      preap_stock_cc_deadline_ts = now;
-      tesla_preap_mark_echo(16U, counter, PREAP_SPOOF_ECHO_US);
-      allowed = true;
-    } else {
+    if (!(controls_allowed || controls_allowed_lateral)) {
+      violation = true;
     }
   }
-  return allowed;
+
+  if (violation) {
+    tx = false;
+  }
+  return tx;
 }
 
+// ============================================
+// Forwarding Hook
+// ============================================
+
 static bool tesla_preap_fwd_hook(int bus_num, int addr) {
-  SAFETY_UNUSED(bus_num);
-  SAFETY_UNUSED(addr);
+  (void)bus_num;
+  (void)addr;
+  // Pre-AP has no AP ECU on bus 2. Block default 0↔2 forwarding to avoid
+  // flooding a dead TX queue.
   return true;
 }
 
+// ============================================
+// Init
+// ============================================
+
 static safety_config tesla_preap_init(uint16_t param) {
-  static RxCheck preap_rx_checks[] = {
-    {.msg = {{0x370, 0, 8, 25U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x108, 0, 8, 100U, .max_counter = 7U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x118, 0, 6, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20A, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x318, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x45, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x155, 0, 8, 50U, .max_counter = 15U}, { 0 }, { 0 }}},
-  };
-  static RxCheck preap_rx_checks_with_pedal_bus_0[] = {
-    {.msg = {{0x370, 0, 8, 25U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x108, 0, 8, 100U, .max_counter = 7U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x118, 0, 6, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20A, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x318, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x45, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x155, 0, 8, 50U, .max_counter = 15U}, { 0 }, { 0 }}},
-    {.msg = {{0x552, 0, 6, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-  };
-  static RxCheck preap_rx_checks_with_pedal_bus_2[] = {
-    {.msg = {{0x370, 0, 8, 25U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x108, 0, 8, 100U, .max_counter = 7U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x118, 0, 6, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x20A, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x368, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x318, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x45, 0, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-    {.msg = {{0x155, 0, 8, 50U, .max_counter = 15U}, { 0 }, { 0 }}},
-    {.msg = {{0x552, 2, 6, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
-  };
-  preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
-  preap_pedal_calibration = GET_FLAG(param, PREAP_FLAG_PEDAL_CALIBRATION);
+  const bool calib_requested = GET_FLAG(param, PREAP_FLAG_PEDAL_CALIBRATION);
+  const bool mixed_calib = calib_requested &&
+                           (GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL) ||
+                            GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION) ||
+                            GET_FLAG(param, PREAP_FLAG_RADAR_BEHIND_NOSECONE) ||
+                            GET_FLAG(param, PREAP_FLAG_HANDS_ON_PAUSE));
+  preap_pedal_calibration = calib_requested && !mixed_calib;
+  preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL) && !preap_pedal_calibration && !mixed_calib;
+  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION) && !preap_pedal_calibration && !mixed_calib;
+  preap_hands_on_pause = GET_FLAG(param, PREAP_FLAG_HANDS_ON_PAUSE) && !preap_pedal_calibration && !mixed_calib;
   preap_pedal_bus = GET_FLAG(param, PREAP_FLAG_PEDAL_BUS_ZERO) ? 0U : 2U;
-  preap_mode = (uint8_t)(current_safety_param_sp & PREAP_MODE_MASK);
-  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
-  preap_radar_position = 0;
-  preap_radar_epas_type = 0;
+  steering_control_inhibited = false;
+  preap_hands_on_level = 0;
+  preap_hands_on_clear_timing = false;
+  preap_hands_on_clear_ts = 0U;
+  preap_gear = 4;
+  preap_gear_prev = 4;
+  preap_doors_open = false;
+  preap_di_brake_pressed = false;
+  preap_brake_message_pressed = false;
+  preap_gear_seen = false;
+  preap_gear_ts = 0U;
+  preap_di_brake_seen = false;
+  preap_di_brake_ts = 0U;
+  preap_brake_message_seen = false;
+  preap_brake_message_ts = 0U;
+  preap_pedal_tx_counter_seen = false;
+  preap_pedal_tx_counter = 0U;
+  preap_pedal_can = -1;
   preap_radar_status = 0;
   preap_last_radar_signal = 0;
+  preap_last_stalk_engage_us = 0;
+  preap_radar_position = 0;
+  preap_radar_epas_type = 0;
   preap_radar_vin_complete = 0;
   preap_radar_should_send = false;
   for (int i = 0; i < 17; i++) {
@@ -1372,114 +951,79 @@ static safety_config tesla_preap_init(uint16_t param) {
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
   preap_radar_car_config_captured = false;
   preap_radar_vin_feed_captured = false;
-  preap_radar_gtw_count = 0;
 #endif
 
-  preap_gear_seen = false;
-  preap_gear_drive = false;
-  preap_gear_neutral = false;
-  preap_gear_ts = 0U;
-  preap_doors_seen = false;
-  preap_doors_closed = false;
-  preap_doors_ts = 0U;
-  preap_epas_seen = false;
-  preap_epas_healthy = false;
-  preap_epas_ts = 0U;
-  preap_di_brake_seen = false;
-  preap_di_brake_pressed = false;
-  preap_di_brake_ts = 0U;
-  preap_brake_message_seen = false;
-  preap_brake_message_pressed = false;
-  preap_brake_message_ts = 0U;
-  preap_gas_seen = false;
-  preap_gas_ts = 0U;
-  preap_pedal_feedback_counter_seen = false;
-  preap_pedal_feedback_counter = 0U;
-  preap_pedal_feedback_advance_ts = 0U;
-  preap_pedal_feedback_healthy = false;
-  preap_pedal_feedback_recoverable_idle = false;
-  preap_pedal_tx_counter_seen = false;
-  preap_pedal_tx_counter = 0U;
-  preap_brake_paused_lateral = false;
-  preap_hands_on_clear_timing = false;
-  preap_hands_on_clear_ts = 0U;
-  steering_control_inhibited = false;
-  stock_cc_reengage_counter = 0U;
-  stock_cc_reengage_confirmed = false;
-  preap_stalk_counter_seen = false;
-  preap_stalk_counter_last = 0U;
-  preap_live_stw_valid = false;
-  preap_stock_cc_di_engaged = false;
-  preap_stock_cc_di_ts = 0U;
-  preap_stock_cc_di_seen = false;
-  preap_stock_cc_di_prior_engaged = false;
-  preap_stock_cc_di_prior_valid = false;
-  tesla_preap_clear_pull_state();
+  // TX whitelist — no harness relay on Pre-AP
+  static const CanMsg PREAP_TX_MSGS[] = {
+    {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},  // DAS_steeringControl
+    {0x2B9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_control
+    {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},  // EPB_epasControl
+    {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 0
+    {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},  // Pedal on bus 2
+    {0x45,  0, 8, .check_relay = false, .disable_static_blocking = true},  // STW_ACTN_RQ (stalk spoof)
+    {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
+    {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
+    {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
+  };
 
-  safety_config ret = {
-    .rx_checks = preap_rx_checks,
-    .rx_checks_len = 8,
-    .tx_msgs = NULL,
-    .tx_msgs_len = 0,
-    .disable_forwarding = true,
+  // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
+  // EPAS firmware's checksum matches our compute_checksum exactly.
+  // Mismatched validation caused silent 21s steering dropout.
+  static RxCheck preap_rx_checks[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque1
+    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque2
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // BrakeMessage
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // DI_state
+    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // GTW_carState
+    {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // STW_ACTN_RQ
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // ESP_B
+  };
+
+  // Pedal-enabled variant: adds 0x552 (GAS_SENSOR) to rx_checks so the
+  // framework routes it to the rx hook. Split into its own array because
+  // frequency=0 causes divide-by-zero in safety_tick (safety.h:330), which
+  // marks the check as lagging and trips safetyRxChecksInvalid → controls
+  // mismatch on cars without a pedal. 50Hz matches the Comma Pedal firmware.
+  static RxCheck preap_rx_checks_with_pedal[] = {
+    {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x118, 0, 6, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x20a, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x368, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x318, 0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x45,  0, 8, 10U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x155, 0, 8, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},
+    {.msg = {{0x552, 0, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true},
+             {0x552, 2, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR
+  };
+
+  static const CanMsg PREAP_TX_MSGS_CAL_BUS0[] = {
+    {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},
+  };
+  static const CanMsg PREAP_TX_MSGS_CAL_BUS2[] = {
+    {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},
   };
   if (preap_pedal_calibration) {
-    ret.rx_checks = preap_pedal_bus == 0U ? preap_rx_checks_with_pedal_bus_0 : preap_rx_checks_with_pedal_bus_2;
-    ret.rx_checks_len = 9;
-    static CanMsg PREAP_TX_MSGS_PEDAL_CALIBRATION_BUS_0[] = {
-      {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},
-    };
-    static CanMsg PREAP_TX_MSGS_PEDAL_CALIBRATION_BUS_2[] = {
-      {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},
-    };
-    ret.tx_msgs = preap_pedal_bus == 0U ? PREAP_TX_MSGS_PEDAL_CALIBRATION_BUS_0 : PREAP_TX_MSGS_PEDAL_CALIBRATION_BUS_2;
-    ret.tx_msgs_len = 1;
-  } else if (preap_enable_pedal) {
-    ret.rx_checks = preap_pedal_bus == 0U ? preap_rx_checks_with_pedal_bus_0 : preap_rx_checks_with_pedal_bus_2;
-    ret.rx_checks_len = 9;
-    static CanMsg PREAP_TX_MSGS_PEDAL_BUS_0[] = {
-      {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},
-      {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},
-      {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},
-      {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},
-      {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
-      {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
-    };
-    static CanMsg PREAP_TX_MSGS_PEDAL_BUS_2[] = {
-      {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},
-      {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},
-      {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},
-      {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},
-      {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
-      {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
-    };
-    ret.tx_msgs = preap_pedal_bus == 0U ? PREAP_TX_MSGS_PEDAL_BUS_0 : PREAP_TX_MSGS_PEDAL_BUS_2;
-    ret.tx_msgs_len = 6;
-  } else {
-    static CanMsg PREAP_TX_MSGS_STOCK_CC[] = {
-      {0x45, 0, 8, .check_relay = false, .disable_static_blocking = true},
-      {0x488, 0, 4, .check_relay = false, .disable_static_blocking = true},
-      {0x214, 0, 3, .check_relay = false, .disable_static_blocking = true},
-      {0x3E9, 0, 8, .check_relay = false, .disable_static_blocking = true},
-      {0x560, 0, 8, .check_relay = false, .disable_static_blocking = true},  // donor VIN/config to panda
-      {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
-    };
-    ret.tx_msgs = PREAP_TX_MSGS_STOCK_CC;
-    ret.tx_msgs_len = 6;
+    return (preap_pedal_bus == 0U) ? BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_CAL_BUS0)
+                                   : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_CAL_BUS2);
   }
-  return ret;
+  return preap_enable_pedal ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS)
+                            : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
 }
+
+// ============================================
+// Hooks struct
+// ============================================
 
 const safety_hooks tesla_preap_hooks = {
   .init = tesla_preap_init,
   .rx = tesla_preap_rx_hook,
   .rx_all = tesla_preap_gtw_emulation,  // must see ALL CAN traffic for radar GTW forwarding
-  .invalid_rx = tesla_preap_invalid_rx_hook,
   .tx = tesla_preap_tx_hook,
   .fwd = tesla_preap_fwd_hook,
-  .tick = tesla_preap_tick,
+  .get_counter = tesla_preap_get_counter,
   .get_checksum = tesla_preap_get_checksum,
   .compute_checksum = tesla_preap_compute_checksum,
-  .get_counter = tesla_preap_get_counter,
-  .get_quality_flag_valid = tesla_preap_get_quality_flag_valid,
+  .get_quality_flag_valid = NULL,
 };

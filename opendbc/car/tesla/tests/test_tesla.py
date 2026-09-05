@@ -3,9 +3,8 @@ import unittest
 
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.structs import CarParams
-from opendbc.car.tesla.interface import CarInterface
+from opendbc.car.tesla.interface import CarInterface, RADAR_START_ADDR
 from opendbc.car.tesla.fingerprints import FW_VERSIONS
-from opendbc.car.tesla.radar_interface import RADAR_START_ADDR
 from opendbc.car.tesla.values import CAR, FSD_14_FW
 
 Ecu = CarParams.Ecu

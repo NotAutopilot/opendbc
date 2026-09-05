@@ -6,13 +6,22 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from opendbc.car.tesla.preap.ff_table_default import (
+  SPEED_BP as FF_SPEED_BP,
+  ACCEL_BP as FF_ACCEL_BP,
+  DEFAULT_TABLE as FF_DEFAULT_TABLE,
+)
 from opendbc.car.tesla.preap.constants import (
-  ACCEL_MAX, FF_ACCEL_BP, FF_DEFAULT_TABLE, FF_SPEED_BP,
-  PEDAL_BP, PEDAL_DI_MIN, PEDAL_DI_ZERO, PEDAL_MAX_VALUES,
-  PEDAL_RAMP_RATE_DOWN, PEDAL_RAMP_RATE_UP, REGEN_MAX,
   VDAS_EGO_JERK_MAX, VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
 )
 from opendbc.car.tesla.preap.virtual_das import FeedforwardModel, JerkLimiter, VirtualDAS
+from opendbc.car.tesla.preap.nap_conf import (
+  PEDAL_DI_MIN, PEDAL_DI_ZERO, ACCEL_MAX, REGEN_MAX,
+  PEDAL_BP, PEDAL_MAX_VALUES,
+)
+from opendbc.car.tesla.pedal.controller import (
+  PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
+)
 
 COMFORT_SNAP_MAX = 4.0  # m/s^4
 HIGH_SPEED_FALLBACK_FIELD_SCALE = 0.65
@@ -254,8 +263,9 @@ class TestJerkLimiter:
 
 @pytest.fixture()
 def mock_nap_conf(monkeypatch):
-  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.PEDAL_MAX_VALUES', list(PEDAL_MAX_VALUES))
-  return PEDAL_MAX_VALUES
+  mock_conf = SimpleNamespace(get_pedal_profile_values=lambda: PEDAL_MAX_VALUES)
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.nap_conf', mock_conf)
+  return mock_conf
 
 
 @pytest.fixture()
@@ -778,7 +788,7 @@ class TestFeedforwardModel:
   def test_default_table_only_scales_positive_branch_above_zero_speed(self):
     """The field correction must not alter regen or the 0 m/s fallback."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
-    from opendbc.car.tesla.preap.constants import FF_SPEED_BP as SPEED_BP, FF_ACCEL_BP as ACCEL_BP
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP, ACCEL_BP
 
     ff = FeedforwardModel(table_path="/nonexistent")
 
@@ -850,7 +860,7 @@ class TestFeedforwardModel:
   def test_invalid_json_falls_back_to_default(self, tmp_path):
     """Corrupted JSON file should fall back to defaults."""
     from opendbc.car.tesla.preap.virtual_das import FeedforwardModel
-    from opendbc.car.tesla.preap.constants import FF_SPEED_BP as SPEED_BP
+    from opendbc.car.tesla.preap.ff_table_default import SPEED_BP
 
     path = tmp_path / "bad.json"
     path.write_text("{invalid json")
@@ -1438,11 +1448,11 @@ class TestVDASDomainBoundaries:
     assert vdas.inner_pid.i == pytest.approx(0.0)
 
   def test_engage_reset_starts_estimator_from_measured_acceleration(self, monkeypatch):
-    from opendbc.car.tesla.preap.boot import PedalCalib
     from opendbc.car.tesla.preap.carcontroller import PreAPLongController
+    from opendbc.car.tesla.preap.engagement import PreAPEngagement
     from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 
-    controller = PreAPLongController(calib=PedalCalib(available=True))
+    controller = PreAPLongController()
     measured_acceleration = 0.7
     cc = SimpleNamespace(
       actuators=SimpleNamespace(accel=0.0),
@@ -1453,7 +1463,7 @@ class TestVDASDomainBoundaries:
       cruiseEnabled=True,
       enableLongControl=True,
       enableJustCC=False,
-      long_active=False,
+      engagement=PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750),
       real_brake_pressed=False,
       out=SimpleNamespace(vEgo=15.0, aEgo=measured_acceleration, gasPressed=False),
       pedal_interceptor_value=0.0,
@@ -1465,6 +1475,12 @@ class TestVDASDomainBoundaries:
     )
 
     zero_torque = SimpleNamespace(get=lambda _v_ego: PEDAL_DI_ZERO, update=lambda *_args, **_kwargs: None)
+    controller_conf = SimpleNamespace(
+      use_pedal=True,
+      pedal_factor=1.0,
+      di_to_pedal=lambda pedal_di: pedal_di,
+    )
+    monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.nap_conf', controller_conf)
     monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.get_zero_torque', lambda: zero_torque)
     controller.update(cc, cs, frame=1, tesla_can=None, can_bus_party=0)
 
@@ -1472,8 +1488,7 @@ class TestVDASDomainBoundaries:
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(0.0)
 
     cc.longActive = True
-    cs.long_active = True
-    controller.update(cc, cs, frame=2, tesla_can=TeslaCANPreAP(None), can_bus_party=0)
+    controller.update(cc, cs, frame=2, tesla_can=TeslaCANPreAP({}), can_bus_party=0)
 
     assert controller.vdas.a_ego_filter.x == pytest.approx(measured_acceleration)
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration)

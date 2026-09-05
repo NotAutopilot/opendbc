@@ -1,4 +1,4 @@
-from opendbc.car.tesla.preap.radar_donor_vin import normalize_radar_donor_vin
+from opendbc.car.tesla.preap.nap_conf import normalize_radar_donor_vin
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 
 

@@ -2,7 +2,7 @@ from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 
 
-PREAP_FLAG_RADAR_EMULATION = 1 << 3
+PREAP_FLAG_RADAR_EMULATION = 2
 
 F190 = bytes([0x03, 0x22, 0xF1, 0x90, 0x00, 0x00, 0x00, 0x00])
 TESTER = bytes([0x02, 0x3E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])

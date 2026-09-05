@@ -39,7 +39,7 @@ def make_parser():
 
 
 def test_disabled_commands_are_valid_rolling_watchdog_heartbeats():
-  tesla_can = TeslaCANPreAP(None)
+  tesla_can = TeslaCANPreAP({})
 
   for idx in range(16):
     address, data, bus = tesla_can.create_pedal_command(accel_command=99, enable=0)
@@ -97,50 +97,11 @@ def test_state_changes_cannot_impersonate_a_fresh_counter():
   assert feedback.timeout
 
 
-def test_hard_fault_wire_states_mark_feedback_unavailable():
-  from opendbc.car.tesla.preap.constants import (
-    PEDAL_STATE_FAULT_BAD_CHECKSUM, PEDAL_STATE_FAULT_SCE, PEDAL_STATE_FAULT_SEND,
-  )
-
-  parser = make_parser()
-
-  # 6 is unnamed in tesla_preap.dbc VAL_ 1362 and stays a hard fault.
-  for state in (PEDAL_STATE_FAULT_BAD_CHECKSUM, PEDAL_STATE_FAULT_SEND, PEDAL_STATE_FAULT_SCE, 6):
-    feedback = PedalFeedback()
-    feedback.update(decode(parser, state=state, idx=0), curr_time_ms=0)
-
-    assert feedback.interceptor_state == state
-    assert not feedback.available
-
-
-def test_recoverable_idle_wire_states_keep_feedback_available():
-  from opendbc.car.tesla.preap.constants import (
-    PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT,
-  )
-
-  parser = make_parser()
-
-  for state in (PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT):
-    feedback = PedalFeedback()
-    feedback.update(decode(parser, state=state, idx=0), curr_time_ms=0)
-
-    assert feedback.interceptor_state == state
-    assert not feedback.timeout
-    assert feedback.available
-
-
-def test_fault_timeout_is_not_the_host_missing_frame_sentinel():
-  from opendbc.car.tesla.preap.constants import (
-    PEDAL_FEEDBACK_TIMEOUT_STATE, PEDAL_STATE_FAULT_TIMEOUT, PEDAL_STATE_NO_FAULT,
-  )
-
+def test_nonzero_wire_state_marks_feedback_unavailable():
   parser = make_parser()
   feedback = PedalFeedback()
-  feedback.update(decode(parser, state=PEDAL_STATE_FAULT_TIMEOUT, idx=3), curr_time_ms=0)
 
-  assert PEDAL_STATE_FAULT_TIMEOUT == 5
-  assert PEDAL_STATE_NO_FAULT == 0
-  assert feedback.interceptor_state == PEDAL_STATE_FAULT_TIMEOUT
-  assert feedback.interceptor_state != PEDAL_FEEDBACK_TIMEOUT_STATE
-  assert not feedback.timeout
-  assert feedback.available
+  feedback.update(decode(parser, state=5, idx=0), curr_time_ms=0)
+
+  assert feedback.interceptor_state == 5
+  assert not feedback.available

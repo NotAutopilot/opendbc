@@ -173,8 +173,8 @@ def run_route_shaped_acceleration(
   """Exercise the fallback controller against fixed, field-observed plant anchors."""
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
   monkeypatch.setattr(
     virtual_das,
@@ -241,8 +241,8 @@ def run_residual_trim_handoff(
   """Build residual road-load trim, then cross into a finite-jerk decel request."""
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
   monkeypatch.setattr(
     virtual_das,
@@ -384,8 +384,8 @@ def test_negative_command_handoff_keeps_grade_effort_separate(monkeypatch):
 def test_repeated_near_zero_crossings_preserve_learned_disturbance_trim(monkeypatch):
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
   controller = VirtualDAS(dt=CONTROL_DT_S)
   monkeypatch.setattr(
@@ -456,8 +456,8 @@ def run_full_brake_and_still_negative_recovery(
 ) -> tuple[float, list[float], list[float]]:
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
   monkeypatch.setattr(
     virtual_das,
@@ -579,8 +579,8 @@ def run_speed_ramp_acceleration(
   """Integrate speed through the fallback transition using observed plant anchors."""
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
   monkeypatch.setattr(
     virtual_das,
@@ -734,8 +734,8 @@ def run_grade_hold(*, speed_mps: float, grade_acceleration_mps2: float,
                    duration_s: float, monkeypatch) -> list[GradePlantSample]:
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
 
   controller = VirtualDAS(dt=CONTROL_DT_S)
@@ -838,8 +838,8 @@ def run_grade_step(*, speed_mps: float, uphill_load_mps2: float,
                    monkeypatch) -> list[PedalPlantSample]:
   monkeypatch.setattr(
     virtual_das,
-    "PEDAL_MAX_VALUES",
-    [50.0] * len(virtual_das.PEDAL_BP),
+    "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
   )
   monkeypatch.setattr(
     virtual_das,

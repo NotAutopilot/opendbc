@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from opendbc.car.tesla.preap.boot import PedalCalib
 from opendbc.car.tesla.preap.carcontroller import (
   REGEN_DECEL_PROMPT_DWELL_UPDATES,
   PedalAuthority,
@@ -13,14 +12,14 @@ from opendbc.car.tesla.preap.carcontroller import (
   PreAPLongController,
   RegenDecelMonitor,
 )
-from opendbc.car.tesla.preap.constants import (
-  GAS_COMMAND_ID, PEDAL_D, PEDAL_DI_ZERO, PEDAL_M1, PEDAL_MAX_VALUES,
-  PEDAL_RAMP_RATE_UP, PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT, PEDAL_STATE_NO_FAULT,
-  PEDAL_TIMEOUT_MS, PEDAL_USABLE_STATES,
-)
+from opendbc.car.tesla.preap.engagement import PreAPEngagement
+from opendbc.car.tesla.preap.nap_conf import PEDAL_DI_ZERO, PEDAL_MAX_VALUES
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
-from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
-from opendbc.car.tesla.preap.virtual_das import PedalZeroTorque
+from opendbc.car.tesla.preap.teslacan import GAS_COMMAND_ID, PEDAL_D, PEDAL_M1, TeslaCANPreAP
+from opendbc.car.tesla.pedal.controller import (
+  PEDAL_RAMP_RATE_UP,
+  PedalZeroTorque,
+)
 
 
 def _pedal_conf():
@@ -42,13 +41,19 @@ def _zero_torque():
 @pytest.fixture
 def controller_env(monkeypatch):
   zero_torque = _zero_torque()
+  monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.nap_conf', _pedal_conf())
   monkeypatch.setattr('opendbc.car.tesla.preap.carcontroller.get_zero_torque', lambda: zero_torque)
+  monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.nap_conf', _pedal_conf())
   monkeypatch.setattr('opendbc.car.tesla.preap.virtual_das.get_zero_torque', lambda: zero_torque)
 
   feedback = PedalFeedback()
   feedback.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 1}, 0)
+  engagement = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
   cs = SimpleNamespace(
-    long_active=False,
+    cruiseEnabled=False,
+    enableLongControl=False,
+    enableJustCC=False,
+    engagement=engagement,
     real_brake_pressed=False,
     out=SimpleNamespace(vEgo=15.0, aEgo=0.0, gasPressed=False),
     pedal_interceptor_value=0.0,
@@ -56,7 +61,7 @@ def controller_env(monkeypatch):
     prev_cruise_buttons=0,
     pedal=feedback,
     pedal_timeout=feedback.timeout,
-    pedal_authority_failed=False,
+    pccEvent=None,
     preap_cc_cancel_needed=False,
   )
   cc = SimpleNamespace(
@@ -64,7 +69,7 @@ def controller_env(monkeypatch):
     longActive=False,
     orientationNED=[],
   )
-  return PreAPLongController(calib=PedalCalib(available=True)), cc, cs, TeslaCANPreAP(None)
+  return PreAPLongController(), cc, cs, TeslaCANPreAP({})
 
 
 def _decode_pedal_command(command):
@@ -80,13 +85,16 @@ def _decode_pedal_command(command):
 
 
 def _activate_longitudinal(cc, cs):
-  cs.long_active = True
+  cs.engagement.cruiseEnabled = True
+  cs.engagement.enableLongControl = True
+  cs.cruiseEnabled = True
+  cs.enableLongControl = True
   cc.longActive = True
 
 
 def _feedback(*, state, idx, available=None):
   return SimpleNamespace(
-    available=state in PEDAL_USABLE_STATES if available is None else available,
+    available=state == 0 if available is None else available,
     interceptor_state=state,
     idx=idx,
   )
@@ -167,51 +175,6 @@ def test_controller_wire_counter_wraps_from_fifteen_to_zero(controller_env):
   assert [_decode_pedal_command(command[0]).idx for command in (first, second)] == [15, 0]
   assert all(_decode_pedal_command(command[0]).enabled for command in (first, second))
 
-def test_active_pedal_timeout_forces_safe_release(controller_env):
-  controller, cc, cs, tesla_can = controller_env
-  _activate_longitudinal(cc, cs)
-
-  enabled = controller.update(cc, cs, frame=0, tesla_can=tesla_can)
-  assert len(enabled) == 1
-  assert _decode_pedal_command(enabled[0]).enabled
-  assert controller.pedal_authority.state == PedalAuthorityState.ACTIVE
-
-  cs.pedal_timeout = True
-  released = controller.update(cc, cs, frame=2, tesla_can=tesla_can)
-  assert len(released) == 1
-  decoded = _decode_pedal_command(released[0])
-  assert not decoded.enabled
-  assert decoded.raw_command == 0
-  assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
-
-
-def test_active_configured_pedal_timeout_inhibits_enabled_gas_command(controller_env):
-  controller, cc, cs, tesla_can = controller_env
-  _activate_longitudinal(cc, cs)
-
-  enabled = controller.update(cc, cs, frame=0, tesla_can=tesla_can)
-  assert len(enabled) == 1
-  assert _decode_pedal_command(enabled[0]).enabled
-  assert controller.pedal_authority.state == PedalAuthorityState.ACTIVE
-  assert not cs.pedal.timeout
-
-  cs.pedal.update(
-    {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 1},
-    PEDAL_TIMEOUT_MS + 1,
-    observed=False,
-  )
-  assert not cs.pedal_timeout
-  assert cs.pedal.timeout
-  assert not cs.pedal.available
-
-  released = controller.update(cc, cs, frame=2, tesla_can=tesla_can)
-  assert len(released) == 1
-  decoded = _decode_pedal_command(released[0])
-  assert not decoded.enabled
-  assert decoded.raw_command == 0
-  assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
-  assert controller.regen_decel_monitor.active is False
-
 
 def test_pedal_authority_reachable_states_obey_transition_invariants():
   feedback_inputs = (
@@ -222,7 +185,6 @@ def test_pedal_authority_reachable_states_obey_transition_invariants():
     (True, _feedback(state=5, idx=0)),
     (True, _feedback(state=5, idx=1)),
     (True, _feedback(state=5, idx=15)),
-    (True, _feedback(state=1, idx=1)),
     (True, _feedback(state=0, idx=1, available=False)),
   )
   frontier = {(PedalAuthorityState.INACTIVE, None, 0)}
@@ -235,7 +197,7 @@ def test_pedal_authority_reachable_states_obey_transition_invariants():
         authority.state = state
         authority.reset_feedback_counter = reset_counter
         authority.reset_attempts = reset_attempts
-        feedback_no_fault = feedback.available and feedback.interceptor_state == PEDAL_STATE_NO_FAULT
+        feedback_healthy = feedback.available and feedback.interceptor_state == 0
 
         action = authority.update(requested, feedback)
 
@@ -247,19 +209,12 @@ def test_pedal_authority_reachable_states_obey_transition_invariants():
           assert action == PedalCommandAction.NONE
           assert authority.state == PedalAuthorityState.FAILED
         elif state == PedalAuthorityState.ACTIVE:
-          if feedback_no_fault:
-            assert action == PedalCommandAction.ENABLE
-            assert authority.state == PedalAuthorityState.ACTIVE
-          elif feedback.available:
-            # Recoverable idle holds ACTIVE and streams the clearing command.
-            assert action == PedalCommandAction.RESET
-            assert authority.state == PedalAuthorityState.ACTIVE
-          else:
-            assert action == PedalCommandAction.RESET
-            assert authority.state == PedalAuthorityState.ACQUIRING
+          expected_action = PedalCommandAction.ENABLE if feedback_healthy else PedalCommandAction.RESET
+          assert action == expected_action
+          assert authority.state == (PedalAuthorityState.ACTIVE if feedback_healthy else PedalAuthorityState.ACQUIRING)
         elif state == PedalAuthorityState.ACQUIRING:
           feedback_advanced = feedback.idx != reset_counter
-          if feedback_no_fault and feedback_advanced:
+          if feedback_healthy and feedback_advanced:
             assert action == PedalCommandAction.ACQUIRE
             assert authority.state == PedalAuthorityState.ACTIVE
           elif reset_attempts < PedalAuthority.MAX_RESET_ATTEMPTS:
@@ -269,7 +224,7 @@ def test_pedal_authority_reachable_states_obey_transition_invariants():
           else:
             assert action == PedalCommandAction.FAILURE
             assert authority.state == PedalAuthorityState.FAILED
-        elif feedback_no_fault:
+        elif feedback_healthy:
           assert action == PedalCommandAction.ACQUIRE
           assert authority.state == PedalAuthorityState.ACTIVE
         else:
@@ -286,7 +241,7 @@ def test_pedal_authority_reachable_states_obey_transition_invariants():
     pytest.param(
       [(5, 0), (5, 1), (5, 2), (5, 3), (5, 4)],
       [PedalCommandAction.RESET] * 4 + [PedalCommandAction.FAILURE],
-      id="advancing-idle-counter-never-arms",
+      id="advancing-counter-does-not-mask-fault",
     ),
     pytest.param(
       [(5, 7), (0, 7), (0, 8)],
@@ -369,12 +324,12 @@ def test_authority_diagnostic_values_are_stable_integers():
   }
 
 
-def test_hard_fault_while_active_uses_same_bounded_reacquisition():
+def test_feedback_loss_while_active_uses_same_bounded_reacquisition():
   authority = PedalAuthority()
   assert authority.update(True, _feedback(state=0, idx=9)) == PedalCommandAction.ACQUIRE
 
   actions = [
-    authority.update(True, _feedback(state=1, idx=idx))
+    authority.update(True, _feedback(state=5, idx=idx))
     for idx in range(10, 15)
   ]
   assert actions == [
@@ -384,34 +339,6 @@ def test_hard_fault_while_active_uses_same_bounded_reacquisition():
     PedalCommandAction.RESET,
     PedalCommandAction.FAILURE,
   ]
-  assert authority.state == PedalAuthorityState.FAILED
-
-
-@pytest.mark.parametrize("idle_state", (4, 5))
-def test_recoverable_idle_while_active_holds_authority_and_recovers(idle_state):
-  authority = PedalAuthority()
-  assert authority.update(True, _feedback(state=0, idx=9)) == PedalCommandAction.ACQUIRE
-
-  # The firmware command watchdog (4/5) is not authority loss: hold ACTIVE and
-  # stream the disabled zero command that clears the pedal back to NO_FAULT.
-  for idx in range(10, 15):
-    assert authority.update(True, _feedback(state=idle_state, idx=idx)) == PedalCommandAction.RESET
-    assert authority.state == PedalAuthorityState.ACTIVE
-
-  assert authority.update(True, _feedback(state=0, idx=15)) == PedalCommandAction.ENABLE
-  assert authority.state == PedalAuthorityState.ACTIVE
-
-
-def test_acquisition_never_arms_enabled_command_from_recoverable_idle():
-  authority = PedalAuthority()
-
-  # Idle feedback can start acquisition (RESET) but cannot arm an enabled
-  # command; arming still requires NO_FAULT with an advancing counter.
-  assert authority.update(True, _feedback(state=5, idx=3)) == PedalCommandAction.RESET
-  assert authority.update(True, _feedback(state=5, idx=4)) == PedalCommandAction.RESET
-  assert authority.state == PedalAuthorityState.ACQUIRING
-  assert authority.update(True, _feedback(state=0, idx=5)) == PedalCommandAction.ACQUIRE
-  assert authority.state == PedalAuthorityState.ACTIVE
 
 
 def test_reset_frames_preserve_coast_seed(controller_env):
@@ -436,71 +363,62 @@ def test_controller_failure_drops_only_longitudinal_and_latches_unavailable(cont
   for frame in range(0, 10, 2):
     sent.append(controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0))
 
-  # Four RESET attempts, then FAILURE still streams idle disabled-zero while STATE=5.
-  assert [len(commands) for commands in sent] == [1, 1, 1, 1, 1]
-  assert all(not _decode_pedal_command(commands[0]).enabled for commands in sent if commands)
-  assert cs.pedal_authority_failed
-  assert controller.pedal_authority.state == PedalAuthorityState.FAILED
-  assert cs.pedal_authority_state == int(PedalAuthorityState.FAILED)
+  assert [len(commands) for commands in sent] == [1, 1, 1, 1, 0]
+  assert cs.engagement.cruiseEnabled
+  assert not cs.engagement.enableLongControl
+  assert cs.engagement.enableJustCC
+  assert cs.engagement.pedal_unavailable
 
-  held = controller.update(cc, cs, frame=10, tesla_can=tesla_can, can_bus_party=0)
-  assert controller.pedal_authority.state == PedalAuthorityState.FAILED
+  controller.update(cc, cs, frame=10, tesla_can=tesla_can, can_bus_party=0)
+  assert cs.pedal_authority_state == int(PedalAuthorityState.INACTIVE)
   assert cs.pedal_authority_action == int(PedalCommandAction.NONE)
-  # Health keepalive: sticky STATE=5 still gets disabled-zero after FAILED latch.
-  assert len(held) == 1
-  assert not _decode_pedal_command(held[0]).enabled
-  assert _decode_pedal_command(held[0]).raw_command == 0
 
 
 def test_pedal_unavailable_condition_latches_until_fresh_request_or_full_disengage():
-  authority = PedalAuthority()
-  for idx in range(5):
-    authority.update(True, _feedback(state=5, idx=idx))
-  assert authority.state == PedalAuthorityState.FAILED
-  assert authority.update(True, _feedback(state=0, idx=8)) == PedalCommandAction.NONE
-  assert authority.state == PedalAuthorityState.FAILED
-  assert authority.update(False, _feedback(state=0, idx=9)) == PedalCommandAction.NONE
-  assert authority.state == PedalAuthorityState.INACTIVE
-  assert authority.update(True, _feedback(state=0, idx=10)) == PedalCommandAction.ACQUIRE
-  assert authority.state == PedalAuthorityState.ACTIVE
+  engagement = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
+  engagement.cruiseEnabled = True
+  engagement.enableLongControl = True
+  engagement.handle_pedal_unavailable()
+
+  assert engagement.pedal_unavailable
+
+  engagement.process_buttons(
+    cruise_buttons=0,
+    prev_cruise_buttons=0,
+    curr_time_ms=1000,
+    v_ego=15.0,
+    speed_units="KPH",
+    use_pedal=True,
+    pedal_long_allowed=True,
+    long_control_allowed=True,
+    real_brake_pressed=False,
+  )
+  assert engagement.pedal_unavailable
+
+  engagement.process_buttons(
+    cruise_buttons=2,
+    prev_cruise_buttons=0,
+    curr_time_ms=1100,
+    v_ego=15.0,
+    speed_units="KPH",
+    use_pedal=True,
+    pedal_long_allowed=True,
+    long_control_allowed=True,
+    real_brake_pressed=False,
+  )
+  assert engagement.enableLongControl
+  assert not engagement.pedal_unavailable
+
+  engagement.handle_pedal_unavailable()
+  engagement.handle_steering_disengage(True)
+  assert not engagement.cruiseEnabled
+  assert not engagement.pedal_unavailable
 
 
 def test_fully_disengaged_pedal_is_silent(controller_env):
   controller, cc, cs, tesla_can = controller_env
 
   assert controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0) == []
-  assert controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0) == []
-
-
-@pytest.mark.parametrize("idle_state", (PEDAL_STATE_FAULT_STARTUP, PEDAL_STATE_FAULT_TIMEOUT))
-def test_disengaged_recoverable_idle_streams_disabled_zero(controller_env, idle_state):
-  """FINDINGS 0000000d: STATE=5 can stick for an entire route while available.
-  While disengaged, stream idle disabled-zero on 0x551 so firmware can return to
-  NO_FAULT. Never enable from this health path."""
-  controller, cc, cs, tesla_can = controller_env
-  # Default fixture is disengaged / NO_FAULT. Flip to sticky idle.
-  for frame, idx in enumerate((3, 4, 5), start=0):
-    cs.pedal.update(
-      {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": idle_state, "IDX": idx},
-      20 + frame * 20,
-    )
-    sent = controller.update(cc, cs, frame=frame * 2, tesla_can=tesla_can, can_bus_party=0)
-    assert len(sent) == 1
-    decoded = _decode_pedal_command(sent[0])
-    assert not decoded.enabled
-    assert decoded.raw_command == 0
-    assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
-    assert cs.pedal_authority_action == int(PedalCommandAction.NONE)
-
-
-def test_disengaged_idle_clear_stops_once_no_fault(controller_env):
-  controller, cc, cs, tesla_can = controller_env
-  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 2}, 20)
-  clearing = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
-  assert len(clearing) == 1
-  assert not _decode_pedal_command(clearing[0]).enabled
-
-  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 3}, 40)
   assert controller.update(cc, cs, frame=2, tesla_can=tesla_can, can_bus_party=0) == []
 
 
@@ -530,20 +448,15 @@ def test_enabled_command_publishes_actual_counter_and_replay_timestamp(controlle
   assert cs.pedal_first_enabled_mono_time == 123456789
 
   cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 7}, 40)
-  held = controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0, now_nanos=222222222)
-  assert len(held) == 1
-  assert not _decode_pedal_command(held[0]).enabled
-  assert cs.pedal_authority_state == int(PedalAuthorityState.ACTIVE)
-  assert cs.pedal_authority_action == int(PedalCommandAction.RESET)
-
+  controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0, now_nanos=222222222)
   cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 7}, 60)
   controller.update(cc, cs, frame=6, tesla_can=tesla_can, can_bus_party=0, now_nanos=333333333)
   cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 0, "IDX": 8}, 80)
-  resumed = controller.update(
+  reacquired = controller.update(
     cc, cs, frame=8, tesla_can=tesla_can, can_bus_party=0, now_nanos=444444444,
   )
-  assert _decode_pedal_command(resumed[0]).enabled
-  assert cs.pedal_authority_action == int(PedalCommandAction.ENABLE)
+  assert _decode_pedal_command(reacquired[0]).enabled
+  assert cs.pedal_authority_action == int(PedalCommandAction.ACQUIRE)
   assert cs.pedal_first_enabled_mono_time == 123456789
 
 
@@ -556,6 +469,7 @@ def test_active_pedal_releases_once_then_stays_silent(controller_env, override):
   assert _decode_pedal_command(active[0]).enabled
 
   if override == "brake":
+    cs.enableLongControl = False
     cs.real_brake_pressed = True
   else:
     cc.longActive = False
@@ -568,21 +482,32 @@ def test_active_pedal_releases_once_then_stays_silent(controller_env, override):
   assert controller.update(cc, cs, frame=4, tesla_can=tesla_can, can_bus_party=0) == []
 
 
-def test_engage_while_brake_already_held_is_lateral_only(controller_env):
-  controller, cc, cs, tesla_can = controller_env
-  _activate_longitudinal(cc, cs)
-  cs.real_brake_pressed = True
-  sent = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
-  assert sent == []
-  assert not cs.pedal_authority_requested
-  assert controller.pedal_authority.state == PedalAuthorityState.INACTIVE
+def test_engage_while_brake_already_held_is_lateral_only():
+  engagement = PreAPEngagement(double_pull_enabled=False, double_pull_window_ms=750)
+  engagement.preap_brake_pressed_prev = True
+
+  engagement.process_buttons(
+    cruise_buttons=2,
+    prev_cruise_buttons=0,
+    curr_time_ms=1000,
+    v_ego=15.0,
+    speed_units="KPH",
+    use_pedal=True,
+    pedal_long_allowed=True,
+    long_control_allowed=True,
+    real_brake_pressed=True,
+  )
+
+  assert engagement.cruiseEnabled
+  assert not engagement.enableLongControl
+  assert engagement.enableJustCC
 
 
 def test_timeout_rearm_requires_reset_then_advancing_healthy_feedback(controller_env):
   controller, cc, cs, tesla_can = controller_env
   _activate_longitudinal(cc, cs)
 
-  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": PEDAL_STATE_FAULT_TIMEOUT, "IDX": 7}, 20)
+  cs.pedal.update({"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": 5, "IDX": 7}, 20)
   cs.pedal_timeout = cs.pedal.timeout
   reset = controller.update(cc, cs, frame=0, tesla_can=tesla_can, can_bus_party=0)
   assert len(reset) == 1
@@ -606,25 +531,9 @@ def test_timeout_rearm_requires_reset_then_advancing_healthy_feedback(controller
   assert _decode_pedal_command(enabled[0]).enabled
 
 
-def test_fault_timeout_never_emits_enabled_command(controller_env):
-  controller, cc, cs, tesla_can = controller_env
-  _activate_longitudinal(cc, cs)
-
-  for frame, idx in enumerate(range(7, 12)):
-    cs.pedal.update(
-      {"INTERCEPTOR_GAS": 0.0, "INTERCEPTOR_GAS2": 0.0, "STATE": PEDAL_STATE_FAULT_TIMEOUT, "IDX": idx},
-      20 + frame * 20,
-    )
-    sent = controller.update(cc, cs, frame=frame * 2, tesla_can=tesla_can, can_bus_party=0)
-    if sent:
-      assert not _decode_pedal_command(sent[0]).enabled
-      assert _decode_pedal_command(sent[0]).raw_command == 0
-
-  assert controller.pedal_authority.state == PedalAuthorityState.FAILED
-
-
 def _start_gas_override(cc, cs):
-  cs.long_active = True
+  cs.cruiseEnabled = True
+  cs.enableLongControl = True
   cs.out.gasPressed = True
   cs.out.aEgo = 1.618
   cs.pedal_interceptor_value = 0.0
@@ -859,17 +768,19 @@ def test_max_regen_does_not_prompt_when_requested_decel_is_delivered(controller_
   _activate_longitudinal(cc, cs)
   cc.actuators.accel = -1.5
 
+  max_regen_prompted = False
   for frame in range(0, 400, 2):
     # Model delivered deceleration as a one-update response to the controller's
     # previous jerk-limited command, beginning from the vehicle's current zero.
     cs.out.aEgo = controller.vdas.jerk_limiter.a_limited
+    # CarController clears edge events before each PreAP controller update.
+    cs.pccEvent = None
     controller.update(cc, cs, frame=frame, tesla_can=tesla_can, can_bus_party=0)
-    assert not cs.pedal_brake_required
-    assert not controller.regen_decel_monitor.active
+    max_regen_prompted |= cs.pccEvent == "pedalMaxRegen"
 
   assert controller.vdas.jerk_limiter.a_limited == pytest.approx(cc.actuators.accel)
   assert controller.prev_pedal_di < -4.75
-  assert not controller.regen_decel_monitor.active
+  assert not max_regen_prompted
 
 
 def test_controller_prompts_when_full_regen_under_delivers_while_moving(controller_env):

@@ -11,11 +11,7 @@ SPOOF_ECHO_WINDOW_MS = 300
 
 
 class PreAPEngagement:
-  """Pre-AP engagement FSM: double-pull detection, target speed, brake override, CC spoof flags.
-
-  process_buttons still builds ButtonEvents so stalk +/- can mutate pedal_speed_kph.
-  naponsp CarState must not publish those events; intent PASSTHROUGH_LEVERS stays.
-  """
+  """Pre-AP engagement FSM: double-pull detection, target speed, brake override, CC spoof flags."""
 
   def __init__(self, double_pull_enabled, double_pull_window_ms):
     self.enableDoublePull = double_pull_enabled

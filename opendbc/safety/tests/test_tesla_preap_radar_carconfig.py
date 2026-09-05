@@ -1,44 +1,16 @@
 #!/usr/bin/env python3
 from opendbc.car.structs import CarParams
-from opendbc.car.tesla.preap.radar_can import transform_car_config
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
 from opendbc.safety import DLC_TO_LEN
 from opendbc.safety.tests.libsafety import libsafety_py
 
 
-PREAP_FLAG_RADAR_EMULATION = 1 << 3
-
-_RADAR_CDEF = """
-bool tesla_preap_radar_car_config_captured(void);
-uint32_t tesla_preap_radar_car_config_addr(void);
-uint8_t tesla_preap_radar_car_config_bus(void);
-uint8_t tesla_preap_radar_car_config_dlc(void);
-uint8_t tesla_preap_radar_car_config_data(int index);
-bool tesla_preap_radar_vin_feed_captured(void);
-uint8_t tesla_preap_radar_vin_feed_data(int index);
-bool tesla_preap_radar_donor_active_debug(void);
-bool tesla_preap_radar_ready_debug(void);
-int tesla_preap_radar_gateway_count(void);
-uint32_t tesla_preap_radar_gateway_addr(int index);
-uint8_t tesla_preap_radar_gateway_bus(int index);
-uint8_t tesla_preap_radar_gateway_dlc(int index);
-bool tesla_preap_radar_gateway_fd(int index);
-uint8_t tesla_preap_radar_gateway_data(int index, int byte_index);
-void tesla_preap_radar_gateway_reset(void);
-"""
-try:
-  libsafety_py.ffi.cdef(_RADAR_CDEF)
-except Exception:
-  pass
-
-
-CAR_CONFIG_VECTORS = (
-  (bytes.fromhex("0290555300001700"), bytes.fromhex("4295555300001710")),
-  (bytes.fromhex("0281555300000000"), bytes.fromhex("4285555300000010")),
-)
+PREAP_FLAG_RADAR_EMULATION = 2
 
 
 class TestTeslaPreAPRadarCarConfig:
+  TX_MSGS = []
+
   def setup_method(self):
     self.safety = libsafety_py.libsafety
 
@@ -48,18 +20,22 @@ class TestTeslaPreAPRadarCarConfig:
     self.safety.init_tests()
 
   def test_car_config_emulation_preserves_application_data(self):
+    test_cases = (
+      (bytes.fromhex("0290555300001700"), bytes.fromhex("4295555300001710")),
+      (bytes.fromhex("0281555300000000"), bytes.fromhex("4285555300000010")),
+    )
     actual_payloads = []
     expected_payloads = []
 
     self._set_safety_hooks(False)
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, CAR_CONFIG_VECTORS[0][0]))
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, test_cases[0][0]))
     assert not self.safety.tesla_preap_radar_car_config_captured()
 
     self._set_safety_hooks(True)
     for fragment in range(3):
       _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, "", True, 0, 0)
       self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
-    for source_data, expected_data in CAR_CONFIG_VECTORS:
+    for source_data, expected_data in test_cases:
       source = libsafety_py.make_CANPacket(0x398, 0, source_data)
       self.safety.safety_rx_hook(source)
 
@@ -72,30 +48,3 @@ class TestTeslaPreAPRadarCarConfig:
       expected_payloads.append(expected_data.hex())
 
     assert actual_payloads == expected_payloads
-
-  def test_emulation_off_blocks_config(self):
-    self._set_safety_hooks(False)
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, CAR_CONFIG_VECTORS[0][0]))
-    assert not self.safety.tesla_preap_radar_car_config_captured()
-
-  def test_high_bit_byte3_and_byte7_match_python(self):
-    self._set_safety_hooks(True)
-    for fragment in range(3):
-      _addr, dat, _bus = TeslaCANPreAP.create_radar_vin_msg(fragment, "", True, 0, 0)
-      self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, dat))
-    payload = bytes((0x02, 0x90, 0x55, 0x80, 0x00, 0x00, 0x17, 0x80))
-    frozen = bytes.fromhex("4295558000001790")
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, payload))
-    actual = bytes(self.safety.tesla_preap_radar_car_config_data(i) for i in range(8))
-    assert actual == frozen
-    assert actual == transform_car_config(payload, position=0)
-    assert (actual[3] & 0x80) == 0x80
-    assert (actual[7] & 0x80) == 0x80
-
-  def test_wrong_bus_and_length_are_rejected(self):
-    self._set_safety_hooks(True)
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 1, CAR_CONFIG_VECTORS[0][0]))
-    assert not self.safety.tesla_preap_radar_car_config_captured()
-    self.safety.tesla_preap_radar_gateway_reset()
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes(7)))
-    assert not self.safety.tesla_preap_radar_car_config_captured()

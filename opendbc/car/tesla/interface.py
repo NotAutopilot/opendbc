@@ -3,14 +3,13 @@ from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, DBC, FSD_14_FW, Ecu
-from opendbc.car.tesla.radar_interface import RadarInterface as ContinentalRadarInterface, RADAR_START_ADDR
 
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP, TeslaSafetyFlagsSP
-from opendbc.car.tesla.preap.carcontroller import PreAPCarController
-from opendbc.car.tesla.preap.carstate import PreAPCarState
-from opendbc.car.tesla.preap.interface import get_preap_params, get_preap_params_sp
-from opendbc.car.tesla.preap.boot import is_preap_platform
-from opendbc.car.tesla.preap.radar_interface import RadarInterface as PreAPRadarInterface
+from opendbc.car.tesla.preap.sp.carcontroller import PreAPCarController
+from opendbc.car.tesla.preap.sp.carstate import PreAPCarState
+from opendbc.car.tesla.preap.sp.interface import get_preap_accel_limits, get_preap_params, get_preap_params_sp, is_preap_platform
+from opendbc.car.tesla.preap.sp.radar_interface import RadarInterface as PreAPRadarInterface
+from opendbc.car.tesla.radar_interface_sp import RadarInterface as ContinentalRadarInterface, RADAR_START_ADDR
 
 
 def _apply_modern_tesla_v1_capabilities(ret: structs.CarParamsSP) -> structs.CarParamsSP:
@@ -45,7 +44,9 @@ class CarInterface(CarInterfaceBase):
   CarController = CarController
   RadarInterface = staticmethod(RadarInterface)
 
-  def __init__(self, CP, CP_SP):
+  def __init__(self, CP, CP_SP=None):
+    if CP_SP is None:
+      CP_SP = structs.CarParamsSP()
     self._preap_platform = is_preap_platform(CP)
     if self._preap_platform:
       self.CarState = PreAPCarState
@@ -62,8 +63,15 @@ class CarInterface(CarInterfaceBase):
     return super().update(can_packets)
 
   @staticmethod
+  def get_pid_accel_limits(CP, CP_SP, current_speed, cruise_speed):
+    if CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP:
+      return get_preap_accel_limits(current_speed)
+    return CarInterfaceBase.get_pid_accel_limits(CP, CP_SP, current_speed, cruise_speed)
+
+  @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
     if is_preap_platform(candidate):
+      ret.brand = "tesla"
       return get_preap_params(ret, fingerprint)
 
     ret.brand = "tesla"
@@ -105,7 +113,7 @@ class CarInterface(CarInterfaceBase):
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
                      car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
     if is_preap_platform(candidate):
-      return get_preap_params_sp(ret)
+      return get_preap_params_sp(stock_cp, ret)
 
     stock_cp.enableBsm = True
 

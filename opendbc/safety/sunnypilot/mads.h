@@ -166,6 +166,7 @@ extern inline void mads_set_system_state(const bool enabled, const bool disengag
 inline void mads_exit_controls(const DisengageReason reason) {
   // Always track this as a pending reason
   m_mads_state.current_disengage.pending_reasons |= reason;
+  steering_control_inhibited = false;
 
   if (controls_allowed_lateral) {
     m_mads_state.current_disengage.active_reason = reason;

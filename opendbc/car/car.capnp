@@ -205,6 +205,22 @@ struct CarState {
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
   turnSignalStalkState @61 :UInt8;  # physical turn-signal lever: 0=idle, 1=left, 2=right; SNA(3) published as 0
   handsOnLevel @62 :UInt8;         # steering-wheel hands-on classification on cars that report a discrete level
+  pedalMaxRegen @63 :Bool;  # regen near limit and sustained decel demand is not being delivered
+  pedalLongActive @64 :Bool;  # Pre-AP pedal firmware has accepted longitudinal authority
+  teslaCCEngaged @65 :Bool;     # NAP: rising edge of stock Tesla CC engaging (no-pedal mode)
+  teslaCCDisengaged @66 :Bool;  # NAP: falling edge of stock Tesla CC
+  teslaCCNotArmed @67 :Bool;    # NAP: lateral engaged but DI_cruiseState != STANDBY/ENABLED
+  pedalAuthorityRequested @68 :Bool;  # NAP: pedal command authority is currently requested
+  pedalAuthorityState @69 :UInt8;  # NAP: PedalAuthorityState numeric value
+  pedalAuthorityAction @70 :UInt8;  # NAP: most recent PedalCommandAction numeric value
+  pedalCommandCounter @71 :UInt8;  # NAP: counter from the most recently transmitted pedal command
+  pedalFeedbackState @72 :UInt8;  # NAP: Comma Pedal firmware state
+  pedalFeedbackCounter @73 :UInt8;  # NAP: Comma Pedal feedback counter
+  pedalFirstEnabledMonoTime @74 :UInt64;  # NAP: monotonic timestamp of first enabled command for this request
+  vdasLimitedAccel @75 :Float32;  # NAP: jerk-limited VDAS acceleration command
+  pedalCommandDi @76 :Float32;  # NAP: controller DI-domain command/seed; RESET wire frames carry zero
+  pedalAuthorityFailed @77 :Bool;  # NAP: bounded pedal authority acquisition failed
+  enableLongControl @78 :Bool;  # Pre-AP: FSM longitudinal intent; survives gas override
 
   # cruise state
   cruiseState @10 :CruiseState;
@@ -319,12 +335,10 @@ struct RadarData @0x888ad6581cf0aacb {
     dRel @1 :Float32;    # m from the front bumper of the car
     yRel @2 :Float32;    # m
     vRel @3 :Float32;    # m/s
-
-    deprecated :group {
-      aRel @4 :Float32; # m/s^2
-      yvRel @5 :Float32; # m/s
-      measured @6 :Bool;  # measurement VS estimate flag
-    }
+    # NAP: the Pre-AP Bosch radar interface and radard write and read these.
+    aRel @4 :Float32; # m/s^2
+    yvRel @5 :Float32; # m/s
+    measured @6 :Bool;  # measurement VS estimate flag
   }
 
   enum ErrorDEPRECATED {

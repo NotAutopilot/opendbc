@@ -1,9 +1,9 @@
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.tesla.interface import CarInterface
-from opendbc.car.tesla.preap.radar_interface import BOSCH_DBC, RadarInterface as PreAPRadarInterface
-from opendbc.car.tesla.radar_interface import RADAR_MSG_COUNT, RADAR_START_ADDR
-from opendbc.car.tesla.radar_interface import RadarInterface as ContinentalRadarInterface
+from opendbc.car.tesla.preap.sp.radar_interface import RadarInterface as PreAPRadarInterface
+from opendbc.car.tesla.radar_interface import RadarInterface as NapRadarInterface
+from opendbc.car.tesla.radar_interface_sp import RadarInterface as ContinentalRadarInterface
 from opendbc.car.tesla.values import CAR
 
 
@@ -14,30 +14,29 @@ def _params(candidate):
 
 
 class TestTeslaRadarDispatch:
-  def test_preap_candidate_selects_bosch_implementation_and_dbc(self):
+  def test_preap_candidate_selects_bosch_implementation(self):
     CP, CP_SP = _params(CAR.TESLA_MODEL_S_PREAP)
     radar = interfaces[CAR.TESLA_MODEL_S_PREAP].RadarInterface(CP, CP_SP)
 
     assert type(radar) is PreAPRadarInterface
-    assert radar.dbc_name == BOSCH_DBC
-    assert radar.dbc_name == "tesla_radar_bosch_generated"
     assert radar.trigger_msg == 0x36E
     assert radar.num_points == 32
+    assert radar.bosch_radar
     assert CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP
 
-  def test_preap_dispatch_does_not_use_continental_class(self):
+  def test_preap_dispatch_does_not_use_root_nap_class(self):
     CP, CP_SP = _params(CAR.TESLA_MODEL_S_PREAP)
     radar = interfaces[CAR.TESLA_MODEL_S_PREAP].RadarInterface(CP, CP_SP)
 
     assert type(radar) is PreAPRadarInterface
-    assert type(radar) is not ContinentalRadarInterface
-    assert type(radar).__module__.endswith("tesla.preap.radar_interface")
+    assert type(radar) is not NapRadarInterface
+    assert type(radar).__module__.endswith("tesla.preap.sp.radar_interface")
 
-  def test_modern_tesla_keeps_root_continental_path(self):
+  def test_modern_tesla_does_not_select_preap_adapter(self):
     CP, CP_SP = _params(CAR.TESLA_MODEL_X)
     radar = interfaces[CAR.TESLA_MODEL_X].RadarInterface(CP, CP_SP)
 
     assert type(radar) is ContinentalRadarInterface
-    assert type(radar).__module__.endswith("tesla.radar_interface")
-    assert radar.trigger_msg == RADAR_START_ADDR + RADAR_MSG_COUNT - 1
-    assert not hasattr(radar, "bosch_tracks")
+    assert type(radar).__module__.endswith("tesla.radar_interface_sp")
+    assert type(radar) is not NapRadarInterface
+    assert type(radar) is not PreAPRadarInterface

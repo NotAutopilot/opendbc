@@ -20,12 +20,7 @@ from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuni
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
-from opendbc.car.tesla.preap.boot import (
-  apply_preap_hardware_snapshot,
-  hardware_snapshot_from_values,
-  is_preap_platform,
-  parse_steering_mode,
-)
+from opendbc.car.tesla.preap.sp.platform import is_preap_platform
 from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
 
@@ -91,13 +86,29 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   params_dict = {k: v for param in params_list for k, v in param.items()}
 
   _initialize_custom_longitudinal_tuning(CI, CP, CP_SP, params_dict)
-  _initialize_preap_boot(CP, CP_SP, params_dict)
   _initialize_coop_steering(CP, CP_SP, params_dict)
   _initialize_tesla_mads_screen_button(CP, CP_SP, params_dict)
   _populate_v1_mads_from_boot_params(CP, CP_SP, params_dict)
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
+
+
+STEERING_MODE_BY_VALUE = {
+  0: structs.CarParamsSP.MadsSteeringMode.remainActive,
+  1: structs.CarParamsSP.MadsSteeringMode.pause,
+  2: structs.CarParamsSP.MadsSteeringMode.disengage,
+}
+
+
+def parse_steering_mode(value) -> int:
+  try:
+    mode = int(value)
+  except (TypeError, ValueError):
+    return 0
+  if mode in STEERING_MODE_BY_VALUE:
+    return mode
+  return 0
 
 
 def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
@@ -112,30 +123,6 @@ def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: str
       CP_SP.flags |= HyundaiFlagsSP.LONG_TUNING_PREDICTIVE.value
 
   _ = CI.get_longitudinal_tuning_sp(CP, CP_SP)
-
-
-def _initialize_preap_boot(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
-                           params_dict: dict[str, str]) -> None:
-  if not is_preap_platform(CP):
-    return
-  snapshot = hardware_snapshot_from_values(
-    pedal_enabled=params_dict.get("NAPPedalEnabled"),
-    pedal_bus=params_dict.get("NAPPedalCanBus"),
-    pedal_calib_done=params_dict.get("NAPPedalCalibDone"),
-    pedal_calib_factor=params_dict.get("NAPPedalCalibFactor"),
-    pedal_calib_zero=params_dict.get("NAPPedalCalibZero"),
-    pedal_calib_min=params_dict.get("NAPPedalCalibMin"),
-    pedal_calib_max=params_dict.get("NAPPedalCalibMax"),
-    radar_enabled=params_dict.get("NAPRadarEnabled"),
-    radar_behind_nosecone=params_dict.get("NAPRadarBehindNosecone"),
-    radar_offset=params_dict.get("NAPRadarOffset"),
-    radar_donor_vin=params_dict.get("NAPRadarDonorVin"),
-    radar_position=params_dict.get("NAPRadarPosition"),
-    radar_epas_type=params_dict.get("NAPRadarEpasType"),
-    engagement_mode=params_dict.get("NAPLateralEngagementMode"),
-    mads_steering_mode=params_dict.get("MadsSteeringMode"),
-  )
-  apply_preap_hardware_snapshot(CP, CP_SP, snapshot)
 
 
 def _initialize_coop_steering(CP: structs.CarParams, CP_SP: structs.CarParamsSP,

@@ -1,41 +1,52 @@
-"""Pre-AP steering/EPAS/body controller plus no-pedal stock-CC 0x45 TX and pedal 0x551."""
 from enum import IntEnum
 
 import numpy as np
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus
-from opendbc.car.carlog import carlog
-from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.lateral import apply_steer_angle_limits_vm
-from opendbc.car.tesla.preap.boot import (
-  PedalCalib, pedal_bus_from_cp_sp, pedal_calib_from_cp_sp, pedal_pipeline_enabled, preap_radar_present,
-)
-from opendbc.car.tesla.preap.radar_donor_vin import radar_donor_live
-from opendbc.car.tesla.preap.constants import (
-  ENGAGE_GRACE_FRAMES,
-  ENGAGE_GRACE_PEDAL_RAMP_RATE_UP,
-  HANDS_ON_DISENGAGE_LEVEL,
-  PREAP_MODE_INVALID,
-  PREAP_MODE_MASK,
-  PEDAL_RAMP_RATE_UP,
-  PEDAL_RECOVERABLE_IDLE_STATES,
-  PEDAL_STATE_NO_FAULT,
-  REGEN_COMMAND_CLEAR_DI,
-  REGEN_COMMAND_TRIGGER_DI,
-  REGEN_DECEL_PROMPT_CLEAR_SPEED,
-  REGEN_DECEL_PROMPT_DWELL_UPDATES,
-  REGEN_DECEL_PROMPT_MIN_SPEED,
-  REGEN_DECEL_REQUEST_CLEAR,
-  REGEN_DECEL_REQUEST_TRIGGER,
-  REGEN_DECEL_SHORTFALL_CLEAR,
-  REGEN_DECEL_SHORTFALL_TRIGGER,
-  get_preap_accel_limits,
-)
+from opendbc.car.tesla.preap.nap_conf import nap_conf
+from opendbc.car.tesla.preap.interface import get_preap_accel_limits
+from opendbc.car.tesla.pedal.controller import get_zero_torque, PEDAL_RAMP_RATE_UP
+from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 from opendbc.car.tesla.preap.teslacan import TeslaCANPreAP
-from opendbc.car.tesla.preap.virtual_das import VirtualDAS, get_zero_torque
-from opendbc.car.tesla.values import CANBUS, CarControllerParams
-from opendbc.car.vehicle_model import VehicleModel
+from opendbc.car.tesla.values import CANBUS, CruiseButtons
+from opendbc.car.carlog import carlog
+
+
+def init_preap_can(dbc_names, packers):
+  packers[CANBUS.autopilot_party] = CANPacker(dbc_names[Bus.party])
+  tesla_can = TeslaCANPreAP(packers)
+  tesla_can.pedal_can_bus = nap_conf.pedal_can_bus
+  return tesla_can
+
+
+# Grace period after engage: ramp accel limit from 0 → full over this window.
+# Prevents both regen spike (negative) and pedal stab (MPC requesting high
+# positive accel on frame 1). Inspired by Tinkla's proportional ramp.
+ENGAGE_GRACE_FRAMES = 50  # 0.5s at 100Hz
+ENGAGE_GRACE_PEDAL_RAMP_RATE_UP = 0.9  # DI/update at 50Hz
+
+# The pedal controller updates at 50 Hz. Prompt when a sustained deceleration
+# request is not being delivered while the command is in the regen range.
+# Available regen varies with SOC and battery temperature, so proximity to
+# the DI rail is not a reliable "at the limit" signal: on a full battery the
+# rail delivers a fraction of nominal regen, and the integrator only reaches
+# it near the end of an under-delivery event. Field capture (2026-07-22,
+# minutes after supercharging) showed the command within 0.5 DI of the rail
+# for just 0.3 s of a multi-second under-delivery, so a rail gate plus a
+# consecutive dwell can never complete. Evidence instead accumulates in a
+# saturating up/down counter, which also rides through single-update
+# shortfall noise. Trigger and clear thresholds are separated so the visible
+# prompt cannot chatter.
+REGEN_DECEL_PROMPT_DWELL_UPDATES = 40  # 0.8s of net evidence at 50Hz
+REGEN_DECEL_PROMPT_MIN_SPEED = 2.0  # m/s; do not prompt for a stopped/settling car
+REGEN_DECEL_PROMPT_CLEAR_SPEED = 1.0  # m/s
+REGEN_DECEL_SHORTFALL_TRIGGER = 0.35  # m/s²
+REGEN_DECEL_SHORTFALL_CLEAR = 0.15  # m/s²
+REGEN_COMMAND_TRIGGER_DI = -2.0  # command deep in the regen range
+REGEN_COMMAND_CLEAR_DI = -1.0
+REGEN_DECEL_REQUEST_TRIGGER = -0.5  # m/s²; a meaningful deceleration request
+REGEN_DECEL_REQUEST_CLEAR = -0.2  # m/s²
 
 
 class RegenDecelMonitor:
@@ -133,22 +144,15 @@ class PedalAuthority:
     if self.state == PedalAuthorityState.FAILED:
       return PedalCommandAction.NONE
 
-    # Panda mirrors this split: recoverable idle never revokes controls, but an
-    # enabled 0x551 only leaves the panda while feedback is NO_FAULT.
-    feedback_no_fault = feedback.available and feedback.interceptor_state == PEDAL_STATE_NO_FAULT
+    feedback_healthy = feedback.available and feedback.interceptor_state == 0
     if self.state == PedalAuthorityState.ACTIVE:
-      if feedback_no_fault:
+      if feedback_healthy:
         return PedalCommandAction.ENABLE
-      if feedback.available:
-        # Recoverable idle while active: hold authority and stream the disabled
-        # zero command that clears the firmware back to NO_FAULT. Dropping to
-        # ACQUIRING here flapped the authority-loss alert on every idle entry.
-        return PedalCommandAction.RESET
       return self._start_acquisition(feedback)
 
     if self.state == PedalAuthorityState.ACQUIRING:
       feedback_advanced = feedback.idx != self.reset_feedback_counter
-      if feedback_no_fault and feedback_advanced:
+      if feedback_healthy and feedback_advanced:
         self.state = PedalAuthorityState.ACTIVE
         self._clear_acquisition()
         return PedalCommandAction.ACQUIRE
@@ -161,7 +165,7 @@ class PedalAuthority:
       self._clear_acquisition()
       return PedalCommandAction.FAILURE
 
-    if feedback_no_fault:
+    if feedback_healthy:
       self.state = PedalAuthorityState.ACTIVE
       return PedalCommandAction.ACQUIRE
 
@@ -175,85 +179,84 @@ class PedalAuthority:
 class PreAPLongController:
   """Pedal-mode longitudinal: VirtualDAS, zero-torque, command authority.
 
-  Stock-CC 0x45 remains the no-pedal path and is not invoked here.
+  Stalk-CC spoofs (CANCEL / SET_ACCEL) live in StockCCSpoofer.
+  Communicates with the spoofer via CarState flags only.
   """
 
-  def __init__(self, pedal_bus=2, calib=None):
-    self.pedal_bus = pedal_bus
-    self.calib = PedalCalib() if calib is None else calib
+  def __init__(self):
     self.prev_pedal_di = 0.0
     self.prev_requested_long = False
     self.preap_long_engage_frame = -1000000
+    # Snapshot of max-accel-at-engage-speed; used as the deterministic
+    # ceiling for the grace-period ramp. Set fresh on each engage rising edge.
     self.engage_a_max = 0.0
     self.preap_long_handoff_slew_active = False
     self.vdas = VirtualDAS(dt=0.02)
     self.pedal_authority = PedalAuthority()
     self.regen_decel_monitor = RegenDecelMonitor()
 
-  def _append_pedal_command(self, can_sends, CS, command):
+  @staticmethod
+  def _handle_pedal_unavailable(CS):
+    engagement = getattr(CS, 'engagement', None)
+    if engagement is None:
+      carlog.error("Pre-AP pedal authority failed without engagement state")
+      return
+
+    engagement.handle_pedal_unavailable()
+    # Keep the controller-facing bridge coherent immediately. CarState will
+    # refresh these fields from engagement again on its next update.
+    CS.cruiseEnabled = engagement.cruiseEnabled
+    CS.enableLongControl = engagement.enableLongControl
+    CS.enableJustCC = engagement.enableJustCC
+    CS.pedal_speed_kph = engagement.pedal_speed_kph
+    CS.longCtrlEvent = engagement.longCtrlEvent
+
+  @staticmethod
+  def _append_pedal_command(can_sends, CS, command):
     can_sends.append(command)
     CS.pedal_command_counter = command[1][4] & 0x0F
 
-  def _idle_needs_clear(self, CS):
-    """True when 0x552 shows recoverable idle (STATE 4/5) that clears on disabled-zero."""
-    pedal = getattr(CS, "pedal", None)
-    if pedal is None or not bool(getattr(pedal, "available", False)):
-      return False
-    return int(getattr(pedal, "interceptor_state", -1)) in PEDAL_RECOVERABLE_IDLE_STATES
-
-  def _append_idle_disabled_zero(self, can_sends, CS, tesla_can):
-    """Health-only 0x551: never enable; clears sticky FAULT_TIMEOUT/STARTUP to NO_FAULT."""
-    self._append_pedal_command(
-      can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
-
-  def update(self, CC, CS, frame, tesla_can, now_nanos=0, **_unused):
+  def update(self, CC, CS, frame, tesla_can, can_bus_party, now_nanos=0):
     can_sends = []
     actuators = CC.actuators
-    calib = self.calib
-    pedal_long_allowed = calib is not None and calib.available
-    pedal_factor = float(calib.factor) if calib is not None else 0.0
-    pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
-    if not (pedal_long_allowed and pedal_transform_valid):
-      self.regen_decel_monitor.reset()
-      CS.pedal_authority_requested = False
-      CS.pedal_authority_active = False
-      CS.pedal_authority_state = int(self.pedal_authority.state)
-      CS.pedal_authority_action = int(PedalCommandAction.NONE)
-      CS.vdas_limited_accel = float(self.vdas.jerk_limiter.a_limited)
-      CS.pedal_command_di = float(self.prev_pedal_di)
-      CS.pedal_brake_required = False
-      return can_sends
 
-    requested_long = bool(getattr(CS, "long_active", False))
-    long_active = requested_long and bool(CC.longActive)
+    requested_long = CS.cruiseEnabled and CS.enableLongControl
+    long_active = requested_long and CC.longActive
+    use_pedal = nap_conf.use_pedal
+    pedal_factor = float(nap_conf.pedal_factor)
+    pedal_transform_valid = np.isfinite(pedal_factor) and abs(pedal_factor) > 1e-6
+    pedal_long_allowed = use_pedal and pedal_transform_valid
     if (not long_active
-        or getattr(CS, "real_brake_pressed", False)
-        or getattr(CS.out, "gasPressed", False)):
+        or getattr(CS, 'real_brake_pressed', False)
+        or getattr(CS.out, 'gasPressed', False)):
       self.regen_decel_monitor.reset()
 
     requested_long_rising = (not self.prev_requested_long) and requested_long
     if requested_long_rising:
+      # Seed the disabled acquisition frames at coast, but do not initialize
+      # command dynamics until feedback proves the pedal accepted authority.
       zero_torque_di = get_zero_torque().get(CS.out.vEgo)
       self.prev_pedal_di = max(CS.pedal_interceptor_value, zero_torque_di)
       CS.pedal_first_enabled_mono_time = 0
-    elif not hasattr(CS, "pedal_first_enabled_mono_time"):
+    elif not hasattr(CS, 'pedal_first_enabled_mono_time'):
       CS.pedal_first_enabled_mono_time = 0
+
+    # --- Stock CC cancel triggers from pedal mode ---
+    # Engage / disengage / button-press in pedal mode all need to drop stock
+    # CC if it's running. Publish the request via CarState; StockCCSpoofer
+    # consumes it and TXes the CANCEL frame.
+    if pedal_long_allowed:
+      pedal_button_press = (CS.cruise_buttons != CS.prev_cruise_buttons
+                            and CS.cruise_buttons != CruiseButtons.IDLE)
+      pedal_long_falling = self.prev_requested_long and not requested_long
+      if requested_long_rising or pedal_long_falling or pedal_button_press:
+        CS.preap_cc_cancel_needed = True
 
     self.prev_requested_long = requested_long
 
     if frame % 2 == 0:
-      brake_pressed = getattr(CS, "real_brake_pressed", False)
-      # A timed-out pedal cannot retain authority or emit enabled commands.
-      pedal_responding = not bool(
-        getattr(CS, "pedal_timeout", False) or
-        getattr(getattr(CS, "pedal", None), "timeout", False)
-      )
-      authority_requested = (
-        long_active
-        and not brake_pressed
-        and not CS.out.gasPressed
-        and pedal_responding
-      )
+      brake_pressed = getattr(CS, 'real_brake_pressed', False)
+      authority_requested = pedal_long_allowed and long_active and not brake_pressed and not CS.out.gasPressed
       pedal_action = self.pedal_authority.update(authority_requested, CS.pedal)
       in_engage_grace = False
 
@@ -270,205 +273,109 @@ class PreAPLongController:
         )
         _, self.engage_a_max = get_preap_accel_limits(CS.out.vEgo)
 
-      if pedal_action not in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
-        self.vdas.observe(CS.out.aEgo, list(getattr(CC, "orientationNED", []) or []))
+      if use_pedal and pedal_action not in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
+        self.vdas.observe(CS.out.aEgo, list(CC.orientationNED))
 
-      get_zero_torque().update(
-        CS.pedal.torque_level,
-        self.prev_pedal_di,
-        CS.out.vEgo,
-        control_active=pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE),
-        accel_command=self.vdas.jerk_limiter.a_limited,
-      )
+      if use_pedal:
+        get_zero_torque().update(
+          CS.pedal.torque_level,
+          self.prev_pedal_di,
+          CS.out.vEgo,
+          control_active=pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE),
+          accel_command=self.vdas.jerk_limiter.a_limited,
+        )
 
       if pedal_action == PedalCommandAction.RESET:
-        self._append_pedal_command(
-          can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
+        self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
         self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
 
       elif pedal_action == PedalCommandAction.RELEASE:
-        self._append_pedal_command(
-          can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
+        self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
         self.prev_pedal_di = 0.0
         self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
 
       elif pedal_action in (PedalCommandAction.ACQUIRE, PedalCommandAction.ENABLE):
-        if not pedal_responding:
-          self._append_pedal_command(
-            can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
+        try:
+          engage_elapsed_frames = frame - self.preap_long_engage_frame
+          in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
+          accel_request = float(actuators.accel)
+          accel_effort_limits = None
+          pedal_ramp_rate_up = (
+            ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
+            if self.preap_long_handoff_slew_active
+            else PEDAL_RAMP_RATE_UP
+          )
+          if in_engage_grace:
+            # Cap at grace_progress * engage_a_max so the ceiling is the
+            # tuned accel-profile envelope, not the live MPC request.
+            # Keeps an MPC outlier on engage from propagating through.
+            grace_progress = engage_elapsed_frames / ENGAGE_GRACE_FRAMES
+            accel_cap = grace_progress * self.engage_a_max
+            accel_request = max(0.0, min(accel_request, accel_cap))
+            accel_effort_limits = (0.0, accel_cap)
+            pedal_ramp_rate_up = ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
+
+          self.prev_pedal_di = self.vdas.update(
+            accel_request, CS.out.vEgo, self.prev_pedal_di,
+            a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
+            orientation_ned=list(CC.orientationNED),
+            accel_effort_limits=accel_effort_limits,
+            pedal_ramp_rate_up=pedal_ramp_rate_up)
+          handoff_slew_complete = (
+            self.preap_long_handoff_slew_active
+            and not in_engage_grace
+            and not self.vdas.pedal_ramp_limited_up
+          )
+          if handoff_slew_complete:
+            self.preap_long_handoff_slew_active = False
+          pedal_cmd = nap_conf.di_to_pedal(self.prev_pedal_di)
+          command = tesla_can.create_pedal_command(pedal_cmd, enable=1)
+          self._append_pedal_command(can_sends, CS, command)
+          if pedal_action == PedalCommandAction.ACQUIRE and CS.pedal_first_enabled_mono_time == 0:
+            CS.pedal_first_enabled_mono_time = now_nanos
+          self.regen_decel_monitor.update(
+            pedal_control_active=True,
+            in_engage_grace=in_engage_grace,
+            pedal_di=self.prev_pedal_di,
+            limited_accel=self.vdas.jerk_limiter.a_limited,
+            actual_accel=CS.out.aEgo,
+            v_ego=CS.out.vEgo,
+          )
+
+        except Exception:
+          carlog.exception("Pre-AP pedal command failed; sending disabled")
+          self.pedal_authority.command_failed()
+          self._handle_pedal_unavailable(CS)
+          self._append_pedal_command(can_sends, CS, tesla_can.create_pedal_command(0, enable=0))
           self.prev_pedal_di = 0.0
           self.preap_long_handoff_slew_active = False
           self.regen_decel_monitor.reset()
-        else:
-          try:
-            engage_elapsed_frames = frame - self.preap_long_engage_frame
-            in_engage_grace = engage_elapsed_frames < ENGAGE_GRACE_FRAMES
-            accel_request = float(actuators.accel)
-            accel_effort_limits = None
-            pedal_ramp_rate_up = (
-              ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
-              if self.preap_long_handoff_slew_active
-              else PEDAL_RAMP_RATE_UP
-            )
-            if in_engage_grace:
-              grace_progress = engage_elapsed_frames / ENGAGE_GRACE_FRAMES
-              accel_cap = grace_progress * self.engage_a_max
-              accel_request = max(0.0, min(accel_request, accel_cap))
-              accel_effort_limits = (0.0, accel_cap)
-              pedal_ramp_rate_up = ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
-
-            self.prev_pedal_di = self.vdas.update(
-              accel_request, CS.out.vEgo, self.prev_pedal_di,
-              a_ego=CS.out.aEgo, freeze_integrator=in_engage_grace,
-              orientation_ned=list(getattr(CC, "orientationNED", []) or []),
-              accel_effort_limits=accel_effort_limits,
-              pedal_ramp_rate_up=pedal_ramp_rate_up)
-            handoff_slew_complete = (
-              self.preap_long_handoff_slew_active
-              and not in_engage_grace
-              and not self.vdas.pedal_ramp_limited_up
-            )
-            if handoff_slew_complete:
-              self.preap_long_handoff_slew_active = False
-            pedal_cmd = calib.di_to_pedal(self.prev_pedal_di)
-            command = tesla_can.create_pedal_command(pedal_cmd, enable=1, pedal_can_bus=self.pedal_bus)
-            self._append_pedal_command(can_sends, CS, command)
-            if pedal_action == PedalCommandAction.ACQUIRE and CS.pedal_first_enabled_mono_time == 0:
-              CS.pedal_first_enabled_mono_time = now_nanos
-            self.regen_decel_monitor.update(
-              pedal_control_active=True,
-              in_engage_grace=in_engage_grace,
-              pedal_di=self.prev_pedal_di,
-              limited_accel=self.vdas.jerk_limiter.a_limited,
-              actual_accel=CS.out.aEgo,
-              v_ego=CS.out.vEgo,
-            )
-
-          except Exception:
-            carlog.exception("Pre-AP pedal command failed; sending disabled")
-            self.pedal_authority.command_failed()
-            CS.pedal_authority_failed = True
-            self._append_pedal_command(
-              can_sends, CS, tesla_can.create_pedal_command(0, enable=0, pedal_can_bus=self.pedal_bus))
-            self.prev_pedal_di = 0.0
-            self.preap_long_handoff_slew_active = False
-            self.regen_decel_monitor.reset()
-            pedal_action = PedalCommandAction.FAILURE
+          pedal_action = PedalCommandAction.FAILURE
 
       elif pedal_action == PedalCommandAction.FAILURE:
         carlog.error("Pre-AP pedal authority acquisition failed")
-        CS.pedal_authority_failed = True
+        self._handle_pedal_unavailable(CS)
         self.preap_long_handoff_slew_active = False
         self.regen_decel_monitor.reset()
-        # Stay FAILED, but keep streaming idle disabled-zero so sticky STATE 4/5
-        # can return to NO_FAULT (health only — ENABLE still requires NO_FAULT).
-        if self._idle_needs_clear(CS):
-          self._append_idle_disabled_zero(can_sends, CS, tesla_can)
 
       else:
-        # Disengaged / no authority action: if interceptor is stuck in watchdog
-        # idle (STATE 4/5), stream disabled-zero on 0x551 so it can leave STATE=5.
-        # Idle stays PedalFeedback.available health-only; never enable here.
-        if self._idle_needs_clear(CS):
-          self._append_idle_disabled_zero(can_sends, CS, tesla_can)
         self.regen_decel_monitor.reset()
 
       CS.pedal_authority_requested = authority_requested
-      CS.pedal_authority_failed = self.pedal_authority.state == PedalAuthorityState.FAILED
-      CS.pedal_authority_active = self.pedal_authority.state == PedalAuthorityState.ACTIVE
+      CS.pedal_authority_active = (
+        self.pedal_authority.state == PedalAuthorityState.ACTIVE
+        and not CS.engagement.pedal_unavailable
+      )
+      # State and action remain live. The separate engagement-owned failure
+      # field is latched so a 10 Hz qlog sample cannot miss the incident.
       CS.pedal_authority_state = int(self.pedal_authority.state)
       CS.pedal_authority_action = int(pedal_action)
 
     CS.vdas_limited_accel = float(self.vdas.jerk_limiter.a_limited)
+    # This is the controller's DI-domain command/seed. RESET preserves the
+    # coast seed even though its disabled wire command carries zero.
     CS.pedal_command_di = float(self.prev_pedal_di)
     CS.pedal_brake_required = self.regen_decel_monitor.active
     return can_sends
-
-
-class PreAPCarController(CarControllerBase):
-  def __init__(self, dbc_names, CP, CP_SP):
-    super().__init__(dbc_names, CP, CP_SP)
-    self.apply_angle_last = 0.0
-    self.packer = CANPacker(dbc_names[Bus.party])
-    self.tesla_can = TeslaCANPreAP(self.packer)
-    self.VM = VehicleModel(CP)
-    self._pedal_pipeline = pedal_pipeline_enabled(CP, CP_SP)
-    self._engagement_mode_valid = (
-      int(CP_SP.safetyParam) & PREAP_MODE_MASK
-    ) != PREAP_MODE_INVALID
-    self.long_controller = None
-    self.radar_vin_idx = 0
-    self._radar_present = preap_radar_present(CP, CP_SP)
-    # Invalid mode bits grant neither pedal nor stock-CC authority.
-    if self._pedal_pipeline and self._engagement_mode_valid:
-      self.tesla_can.pedal_can_bus = pedal_bus_from_cp_sp(CP_SP)
-      self.long_controller = PreAPLongController(
-        pedal_bus=self.tesla_can.pedal_can_bus,
-        calib=pedal_calib_from_cp_sp(CP_SP),
-      )
-
-  def update(self, CC, CC_SP, CS, now_nanos):
-    # No-pedal stock cruise: prior-cycle CC.enabled is logical standard-long active.
-    # Pedal/openpilot-long: prior-cycle CC.longActive remains the only long-active fact.
-    if hasattr(CS, "set_long_active"):
-      if not self._engagement_mode_valid:
-        CS.set_long_active(False)
-      elif not self.CP.openpilotLongitudinalControl:
-        CS.set_long_active(bool(CC.enabled))
-      else:
-        CS.set_long_active(bool(CC.longActive))
-
-    actuators = CC.actuators
-    can_sends = []
-    hands_on_level = int(getattr(CS.out, "handsOnLevel", 0) or 0)
-    mads_active = bool(getattr(getattr(CC_SP, "mads", None), "active", False))
-    # Panda inhibit is not a controller input. MADS keeps mads.active false on mismatch.
-    lateral_actuation_allowed = bool(CC.latActive) and mads_active and hands_on_level < HANDS_ON_DISENGAGE_LEVEL
-
-    if self.frame % 2 == 0:
-      steer_angle = float(getattr(CS.out, "steeringAngleDeg", 0.0) or 0.0)
-      v_ego_raw = float(getattr(CS.out, "vEgoRaw", 0.0) or 0.0)
-      self.apply_angle_last = apply_steer_angle_limits_vm(
-        float(actuators.steeringAngleDeg), self.apply_angle_last, v_ego_raw, steer_angle,
-        lateral_actuation_allowed, CarControllerParams, self.VM,
-      )
-      cntr = (self.frame // 2) % 16
-      can_sends.append(self.tesla_can.create_steering_control(cntr, self.apply_angle_last, lateral_actuation_allowed))
-      can_sends.append(self.tesla_can.create_epas_control(cntr, int(lateral_actuation_allowed)))
-
-    if self.frame % 10 == 0 and lateral_actuation_allowed:
-      turn = int(bool(CC.rightBlinker)) * 2 + int(bool(CC.leftBlinker))
-      cntr = (self.frame // 10) % 16
-      can_sends.append(self.tesla_can.create_body_controls_message(turn, 0, CANBUS.party, cntr))
-
-    stock_cc = getattr(CS, "stock_cc", None)
-    if stock_cc is not None and not self._pedal_pipeline and self._engagement_mode_valid:
-      lever = stock_cc.poll_tx(self.frame)
-      if lever is not None and stock_cc.live_stw is not None:
-        counter = stock_cc.tx_counter()
-        msg = self.tesla_can.create_action_request(lever, CANBUS.party, counter, stock_cc.live_stw)
-        if msg is not None:
-          can_sends.append(msg)
-          now_ms = int(getattr(CS, "stock_cc_now_ms", 0)) & 0xFFFFFFFF
-          stock_cc.note_tx(lever, counter, now_ms)
-
-    if self.long_controller is not None and self._engagement_mode_valid:
-      can_sends.extend(self.long_controller.update(CC, CS, self.frame, self.tesla_can, now_nanos=now_nanos))
-
-    # Tinkla 0.6.6 donor contract: always stream VIN/position/EPAS on 0x560
-    # when radar is present. Empty VIN is 17 spaces (this-car passthrough);
-    # position and EPAS still apply.
-    if self._radar_present and self.frame % 100 == 0:
-      can_sends.append(self.tesla_can.create_radar_vin_msg(
-        self.radar_vin_idx, radar_donor_live.vin, True,
-        radar_donor_live.position, radar_donor_live.epas_type,
-      ))
-      self.radar_vin_idx = (self.radar_vin_idx + 1) % 3
-
-    new_actuators = actuators.as_builder() if hasattr(actuators, "as_builder") else actuators
-    if hasattr(new_actuators, "steeringAngleDeg"):
-      new_actuators.steeringAngleDeg = self.apply_angle_last
-    self.frame += 1
-    return new_actuators, can_sends

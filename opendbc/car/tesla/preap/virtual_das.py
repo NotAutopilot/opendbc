@@ -14,71 +14,31 @@ from numpy import clip, interp
 from opendbc.car.common.filter_simple import FirstOrderFilter, HighPassFilter
 from opendbc.car.common.pid import PIDController
 from opendbc.car.tesla.preap.constants import (
-  ACCEL_DEADBAND, ACCEL_MAX,
-  FF_ACCEL_BP, FF_DEFAULT_TABLE, FF_SPEED_BP,
-  PEDAL_BP, PEDAL_DI_MIN, PEDAL_DI_ZERO, PEDAL_MAX_VALUES,
-  PEDAL_RAMP_RATE_DOWN, PEDAL_RAMP_RATE_UP,
-  REGEN_MAX,
-  TORQUE_LEVEL_ACC, TORQUE_LEVEL_DECEL,
-  VDAS_ACCEL_JERK_MAX, VDAS_ACCEL_SNAP_MAX, VDAS_AEGO_FILTER_RC,
-  VDAS_DECEL_JERK_MAX, VDAS_EGO_JERK_MAX,
+  VDAS_INNER_K_BP, VDAS_INNER_KP_V, VDAS_INNER_KI_V,
   VDAS_FUTURE_T_BP, VDAS_FUTURE_T_V,
-  VDAS_INNER_K_BP, VDAS_INNER_KI_V, VDAS_INNER_KP_V,
+  VDAS_AEGO_FILTER_RC,
+  VDAS_ACCEL_JERK_MAX, VDAS_DECEL_JERK_MAX, VDAS_ACCEL_SNAP_MAX,
   VDAS_ZERO_TORQUE_TRANSITION_WIDTH,
-  ZERO_TORQUE_ADAPT_RATE, ZERO_TORQUE_MIN_SPEED_MS, ZERO_TORQUE_SETTLE_UPDATES,
+  VDAS_EGO_JERK_MAX,
+)
+from opendbc.car.tesla.preap.ff_table_default import (
+  SPEED_BP as FF_SPEED_BP,
+  ACCEL_BP as FF_ACCEL_BP,
+  DEFAULT_TABLE as FF_DEFAULT_TABLE,
+)
+from opendbc.car.tesla.preap.nap_conf import (
+  nap_conf,
+  PEDAL_DI_MIN,
+  PEDAL_BP, PEDAL_MAX_VALUES,
+  ACCEL_MAX, REGEN_MAX,
+)
+from opendbc.car.tesla.pedal.controller import (
+  get_zero_torque,
+  PEDAL_RAMP_RATE_UP, PEDAL_RAMP_RATE_DOWN,
 )
 
 
 FF_TABLE_PATH = "/data/vdas_ff_table.json"
-
-class PedalZeroTorque:
-  """Learns the pedal DI position that produces zero motor torque."""
-
-  def __init__(self):
-    self.value = PEDAL_DI_ZERO
-    self._target = PEDAL_DI_ZERO
-    self._best_torque = TORQUE_LEVEL_DECEL
-    self._settled_updates = 0
-
-  def update(self, torque_level: float, current_pedal_di: float, v_ego: float, *,
-             control_active: bool, accel_command: float):
-    observation_valid = (
-      control_active
-      and all(math.isfinite(value) for value in (torque_level, current_pedal_di, v_ego, accel_command))
-      and v_ego >= ZERO_TORQUE_MIN_SPEED_MS
-      and abs(accel_command) < ACCEL_DEADBAND
-    )
-    if observation_valid:
-      self._settled_updates += 1
-    else:
-      self._settled_updates = 0
-      self._best_torque = TORQUE_LEVEL_DECEL
-
-    if (self._settled_updates >= ZERO_TORQUE_SETTLE_UPDATES
-        and TORQUE_LEVEL_DECEL < torque_level < TORQUE_LEVEL_ACC
-        and abs(torque_level) < abs(self._best_torque)):
-      self._target = current_pedal_di
-      self._best_torque = torque_level
-
-    if self._settled_updates >= ZERO_TORQUE_SETTLE_UPDATES:
-      self.value = float(clip(
-        self._target,
-        self.value - ZERO_TORQUE_ADAPT_RATE,
-        self.value + ZERO_TORQUE_ADAPT_RATE,
-      ))
-
-  def get(self, v_ego: float) -> float:
-    if v_ego < 5.0 * 0.44704:
-      return PEDAL_DI_ZERO
-    return self.value
-
-
-_zero_torque = PedalZeroTorque()
-
-
-def get_zero_torque():
-  return _zero_torque
-
 
 # Inner PID error deadband: brief or sign-changing errors below this threshold
 # are zeroed before entering the PID. A coherent same-sign residual earns
@@ -582,7 +542,8 @@ class VirtualDAS:
 
     pedal_di_unclipped = self._feedforward(accel_effort, v_ego)
 
-    max_pedal_value = float(interp(v_ego, PEDAL_BP, PEDAL_MAX_VALUES))
+    pedal_profile = nap_conf.get_pedal_profile_values()
+    max_pedal_value = float(interp(v_ego, PEDAL_BP, pedal_profile))
     pedal_di_bounded = float(clip(pedal_di_unclipped, PEDAL_DI_MIN, max_pedal_value))
 
     if negative_handoff_in_progress:

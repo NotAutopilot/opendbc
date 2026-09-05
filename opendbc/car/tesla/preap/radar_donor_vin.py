@@ -9,32 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from opendbc.car.can_definitions import CanData
-
-
-def normalize_radar_donor_vin(value):
-  """Return a 17-char donor VIN, or empty if the value is not one."""
-  if isinstance(value, bytes):
-    text = value.decode("ascii", errors="ignore")
-  else:
-    text = "" if value is None else str(value)
-  vin = "".join(ch for ch in text.upper() if ch.isalnum())
-  return vin if len(vin) == 17 else ""
-
-
-@dataclass
-class RadarDonorLive:
-  vin: str = ""
-  position: int = 0
-  epas_type: int = 0
-
-
-radar_donor_live = RadarDonorLive()
-
-
-def seed_radar_donor_live(vin="", position=0, epas_type=0) -> None:
-  radar_donor_live.vin = normalize_radar_donor_vin(vin)
-  radar_donor_live.position = int(position)
-  radar_donor_live.epas_type = int(epas_type)
+from opendbc.car.tesla.preap.nap_conf import normalize_radar_donor_vin
 
 
 RADAR_UDS_TX = 0x641
