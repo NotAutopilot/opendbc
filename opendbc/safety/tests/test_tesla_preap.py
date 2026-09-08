@@ -13,6 +13,8 @@ from opendbc.safety.tests.common import CANPackerSafety
 PREAP_FLAG_ENABLE_PEDAL = 1
 PREAP_FLAG_RADAR_EMULATION = 2
 PREAP_FLAG_RADAR_BEHIND_NOSECONE = 4
+PREAP_FLAG_PEDAL_BUS_ZERO = 1 << 5
+PREAP_FLAG_PEDAL_CALIBRATION = 1 << 6
 
 # Stalk lever positions from tesla_preap.h
 STALK_FWD_CANCEL = 1
@@ -670,6 +672,187 @@ class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
                                                  {"GAS_COMMAND": 100, "ENABLE": 0})
     self.assertFalse(self._tx(attack_msg),
                      "ENABLE=0 with high GAS_COMMAND must be blocked (defense-in-depth)")
+
+
+class TestTeslaPreAPPedalCalibration(unittest.TestCase):
+  TX_MSGS = [[0x551, 0], [0x551, 2]]
+
+  def setUp(self):
+    self.packer = CANPackerSafety("tesla_preap")
+    self.safety = libsafety_py.libsafety
+    self.idx = 0
+    self._init(PREAP_FLAG_PEDAL_CALIBRATION)
+
+  def _init(self, flags):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, flags)
+    self.safety.init_tests()
+    self.idx = 0
+
+  def _tx(self, msg):
+    return self.safety.safety_tx_hook(msg)
+
+  def _rx(self, msg):
+    return self.safety.safety_rx_hook(msg)
+
+  def _gas(self, bus, enable, raw=0, raw2=None, idx=None, checksum=None, reserved=0):
+    if raw2 is None:
+      raw2 = raw
+    if idx is None:
+      idx = self.idx
+      self.idx = (self.idx + 1) % 16
+    data = bytearray(6)
+    data[0] = (raw >> 8) & 0xFF
+    data[1] = raw & 0xFF
+    data[2] = (raw2 >> 8) & 0xFF
+    data[3] = raw2 & 0xFF
+    data[4] = ((1 if enable else 0) << 7) | (reserved & 0x70) | (idx & 0x0F)
+    chk = (0x551 & 0xFF) + ((0x551 >> 8) & 0xFF)
+    for i in range(5):
+      chk += data[i]
+    data[5] = checksum if checksum is not None else (chk & 0xFF)
+    return libsafety_py.make_CANPacket(0x551, bus, bytes(data))
+
+  def _esp(self, centi_kph, bus=0, hi_byte=5, lo_byte=6):
+    data = bytearray(8)
+    data[hi_byte] = (centi_kph >> 8) & 0xFF
+    data[lo_byte] = centi_kph & 0xFF
+    return libsafety_py.make_CANPacket(0x155, bus, bytes(data))
+
+  def _prime(self, gear=3, di_brake=True, brake_msg=True, centi_kph=0, esp_bus=0):
+    self._rx(self.packer.make_can_msg_safety("DI_torque2", 0, {
+      "DI_gear": gear, "DI_brakePedal": 1 if di_brake else 0,
+    }))
+    self._rx(self.packer.make_can_msg_safety("BrakeMessage", 0, {
+      "driverBrakeStatus": 2 if brake_msg else 1,
+    }))
+    self._rx(self._esp(centi_kph, bus=esp_bus))
+
+  def test_enable0_without_window(self):
+    self.assertTrue(self._tx(self._gas(2, 0, 0)))
+
+  def test_enable0_high_raw_blocked(self):
+    self.assertFalse(self._tx(self._gas(2, 0, 501)))
+
+  def test_enable0_high_raw2_blocked(self):
+    self.assertFalse(self._tx(self._gas(2, 0, 0, raw2=501)))
+
+  def test_enable0_while_moving(self):
+    self._prime(centi_kph=181)
+    self.assertTrue(self._tx(self._gas(2, 0, 0)))
+
+  def test_enable1_unprimed_blocked(self):
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_drive_blocked(self):
+    self._prime(gear=4, di_brake=True)
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_neutral_no_brake_blocked(self):
+    self._prime(gear=3, di_brake=False, brake_msg=False)
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_di_brake_only_opens(self):
+    self._prime(gear=3, di_brake=True, brake_msg=False)
+    self.assertTrue(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_brake_message_only_opens(self):
+    self._prime(gear=3, di_brake=False, brake_msg=True)
+    self.assertTrue(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_window_open(self):
+    self._prime()
+    self.assertTrue(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_standstill_boundary(self):
+    self._prime(centi_kph=180)
+    self.assertTrue(self._tx(self._gas(2, 1, 0)))
+    self._init(PREAP_FLAG_PEDAL_CALIBRATION)
+    self._prime(centi_kph=181)
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_1kph_bytes56_allowed(self):
+    self._prime(centi_kph=100)
+    self.assertTrue(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_speed_wrong_bytes_ignored(self):
+    self._prime(gear=3, di_brake=True, brake_msg=True, centi_kph=0)
+    self._rx(self._esp(500, hi_byte=0, lo_byte=1))
+    self.assertTrue(self._tx(self._gas(2, 1, 0)))
+
+  def test_enable1_esp_wrong_bus_not_fresh(self):
+    self._prime(esp_bus=2)
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+
+  def test_wrong_bus_blocked(self):
+    self._prime()
+    self.assertFalse(self._tx(self._gas(0, 1, 0)))
+
+  def test_bus0_param_96(self):
+    self._init(PREAP_FLAG_PEDAL_CALIBRATION | PREAP_FLAG_PEDAL_BUS_ZERO)
+    self._prime()
+    self.assertTrue(self._tx(self._gas(0, 1, 0)))
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+
+  def test_no_other_tx_or_authority(self):
+    self._prime()
+    steer = self.packer.make_can_msg_safety("DAS_steeringControl", 0, {
+      "DAS_steeringAngleRequest": 0, "DAS_steeringControlType": 1,
+    }, fix_checksum=_fix_das_checksum)
+    self.assertFalse(self._tx(steer))
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("STW_ACTN_RQ", 0, {"SpdCtrlLvr_Stat": STALK_RWD_ENGAGE})))
+    self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x641, 1, bytes(8))))
+    self._rx(self.packer.make_can_msg_safety("STW_ACTN_RQ", 0, {"SpdCtrlLvr_Stat": STALK_RWD_ENGAGE}))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_mixed_flags_fail_closed(self):
+    for flags in (PREAP_FLAG_PEDAL_CALIBRATION | PREAP_FLAG_ENABLE_PEDAL,
+                  PREAP_FLAG_PEDAL_CALIBRATION | PREAP_FLAG_RADAR_EMULATION,
+                  PREAP_FLAG_PEDAL_CALIBRATION | PREAP_FLAG_RADAR_BEHIND_NOSECONE,
+                  PREAP_FLAG_PEDAL_CALIBRATION | (1 << 3),
+                  PREAP_FLAG_PEDAL_CALIBRATION | (1 << 15)):
+      with self.subTest(flags=flags):
+        self._init(flags)
+        self._prime()
+        self.assertFalse(self._tx(self._gas(2, 1, 0)))
+        self.assertFalse(self._tx(self._gas(2, 0, 0)))
+        steer = self.packer.make_can_msg_safety("DAS_steeringControl", 0, {
+          "DAS_steeringAngleRequest": 0, "DAS_steeringControlType": 1,
+        }, fix_checksum=_fix_das_checksum)
+        self.assertFalse(self._tx(steer))
+
+  def test_stale_window(self):
+    self._prime()
+    self.safety.set_timer(1000001)
+    self.assertFalse(self._tx(self._gas(2, 1, 0)))
+    self.assertTrue(self._tx(self._gas(2, 0, 0)))
+
+  def test_bad_checksum_blocked(self):
+    self._prime()
+    self.assertFalse(self._tx(self._gas(2, 1, 0, checksum=0)))
+
+  def test_repeated_counter_blocked(self):
+    self._prime()
+    self.assertTrue(self._tx(self._gas(2, 1, 0, idx=0)))
+    self.assertFalse(self._tx(self._gas(2, 1, 0, idx=0)))
+    self.assertTrue(self._tx(self._gas(2, 1, 0, idx=1)))
+
+  def test_reserved_bits_blocked(self):
+    self._prime()
+    self.assertFalse(self._tx(self._gas(2, 1, 0, reserved=0x10)))
+
+  def test_rx_checks_valid_without_552(self):
+    self._prime()
+    self._rx(self.packer.make_can_msg_safety("EPAS_sysStatus", 0, {
+      "EPAS_internalSAS": 0, "EPAS_handsOnLevel": 0, "EPAS_eacStatus": 1,
+      "EPAS_eacErrorCode": 0, "EPAS_sysStatusCounter": 0,
+    }, fix_checksum=_fix_epas_checksum))
+    self._rx(self.packer.make_can_msg_safety("DI_torque1", 0, {"DI_pedalPos": 0}))
+    self._rx(self.packer.make_can_msg_safety("DI_state", 0, {"DI_state": 1}))
+    self._rx(self.packer.make_can_msg_safety("GTW_carState", 0, {"DOOR_STATE_FL": 0}))
+    self._rx(self.packer.make_can_msg_safety("STW_ACTN_RQ", 0, {"SpdCtrlLvr_Stat": 0}))
+    self.safety.set_timer(int(5e5))
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.safety_config_valid())
 
 
 if __name__ == "__main__":

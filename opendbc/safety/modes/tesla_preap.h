@@ -79,7 +79,11 @@ void can_set_checksum(CANPacket_t *packet);
 #define PREAP_FLAG_RADAR_EMULATION      2U
 // Leftover bit. Position comes from host 0x560, not this flag.
 #define PREAP_FLAG_RADAR_BEHIND_NOSECONE 4U
+#define PREAP_FLAG_PEDAL_BUS_ZERO       (1U << 5)
+#define PREAP_FLAG_PEDAL_CALIBRATION    (1U << 6)
 #define PREAP_HANDS_ON_DISENGAGE_LEVEL  2
+#define PREAP_CALIBRATION_SOURCE_TIMEOUT_US 1000000U
+#define PREAP_CALIBRATION_STANDSTILL_CENTI_KPH 180U  // 1.8 kph == 0.5 m/s; independent of driving 0.5 kph
 
 // ============================================
 // State variables
@@ -87,6 +91,8 @@ void can_set_checksum(CANPacket_t *packet);
 
 static bool preap_enable_pedal = false;
 static bool preap_radar_emulation = false;
+static bool preap_pedal_calibration = false;
+static uint8_t preap_pedal_bus = 2U;
 
 static int preap_pedal_can = -1;
 
@@ -96,6 +102,17 @@ static int preap_gear_prev = 4;
 static bool preap_doors_open = false;
 static bool preap_di_brake_pressed = false;
 static bool preap_brake_message_pressed = false;
+static bool preap_gear_seen = false;
+static uint32_t preap_gear_ts = 0U;
+static bool preap_di_brake_seen = false;
+static uint32_t preap_di_brake_ts = 0U;
+static bool preap_brake_message_seen = false;
+static uint32_t preap_brake_message_ts = 0U;
+static bool preap_esp_seen = false;
+static uint32_t preap_esp_ts = 0U;
+static bool preap_esp_standstill = false;
+static bool preap_pedal_tx_counter_seen = false;
+static uint8_t preap_pedal_tx_counter = 0U;
 
 // Stalk echo filter
 static uint32_t preap_last_stalk_engage_us = 0;
@@ -249,6 +266,21 @@ static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
     }
   }
   return chksum;
+}
+
+static bool tesla_preap_source_fresh(bool seen, uint32_t ts, uint32_t now) {
+  return seen && (safety_get_ts_elapsed(now, ts) <= PREAP_CALIBRATION_SOURCE_TIMEOUT_US);
+}
+
+static bool tesla_preap_calibration_window_open(uint32_t now) {
+  return preap_pedal_calibration &&
+         tesla_preap_source_fresh(preap_gear_seen, preap_gear_ts, now) &&
+         tesla_preap_source_fresh(preap_di_brake_seen, preap_di_brake_ts, now) &&
+         tesla_preap_source_fresh(preap_brake_message_seen, preap_brake_message_ts, now) &&
+         tesla_preap_source_fresh(preap_esp_seen, preap_esp_ts, now) &&
+         (preap_gear == 3) &&
+         (preap_di_brake_pressed || preap_brake_message_pressed) &&
+         preap_esp_standstill;
 }
 
 // CRC-8 lookup table (polynomial 0x1D) for steering angle re-addressing
@@ -585,6 +617,9 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     float speed = (((msg->data[5] << 8) | msg->data[6]) * 0.01f) * KPH_TO_MS;
     UPDATE_VEHICLE_SPEED(speed);
     vehicle_moving = speed > (0.5f * KPH_TO_MS);
+    preap_esp_seen = true;
+    preap_esp_ts = microsecond_timer_get();
+    preap_esp_standstill = ((((uint32_t)msg->data[5] << 8) | (uint32_t)msg->data[6]) <= PREAP_CALIBRATION_STANDSTILL_CENTI_KPH);
   }
 
   // Gas pressed from DI_torque1 (0x108) — only when pedal interceptor is not active.
@@ -601,6 +636,8 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   if (msg->addr == 0x20aU) {
     preap_brake_message_pressed = ((msg->data[0] >> 2) & 0x03U) == 2U;
     brake_pressed = false;
+    preap_brake_message_seen = true;
+    preap_brake_message_ts = microsecond_timer_get();
   }
 
   // Cruise state (DI_state: 0x368) — vehicle_moving only, engagement via stalk
@@ -617,6 +654,10 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
   if (msg->addr == 0x118U) {
     preap_di_brake_pressed = ((msg->data[1] >> 7) & 0x01U) != 0U;
     preap_gear = (msg->data[1] >> 4) & 0x07;
+    preap_di_brake_seen = true;
+    preap_di_brake_ts = microsecond_timer_get();
+    preap_gear_seen = true;
+    preap_gear_ts = preap_di_brake_ts;
     if ((preap_gear_prev == 4) && (preap_gear != 4)) {
       controls_allowed = false;
     }
@@ -651,6 +692,10 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
         pcm_cruise_check(false);
       }
     }
+  }
+
+  if (preap_pedal_calibration) {
+    controls_allowed = false;
   }
 }
 
@@ -738,7 +783,37 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   //   ENABLE=1: authoritative actuation command. Gated by get_longitudinal_allowed()
   //   (controls_allowed && !gas_pressed_prev).
   if (msg->addr == 0x551U) {
-    if (!preap_enable_pedal) {
+    if (preap_pedal_calibration) {
+      const bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
+      const int raw_gas_cmd = (msg->data[0] << 8) | msg->data[1];
+      const int raw_gas_cmd2 = (msg->data[2] << 8) | msg->data[3];
+      const uint8_t counter = msg->data[4] & 0x0FU;
+      uint8_t chksum = (uint8_t)(msg->addr & 0xFFU) + (uint8_t)((msg->addr >> 8) & 0xFFU);
+      for (int i = 0; i < 5; i++) {
+        chksum += msg->data[i];
+      }
+      const bool protocol_valid = (GET_BUS(msg) == preap_pedal_bus) &&
+                                  (GET_LEN(msg) == 6U) &&
+                                  !msg->fd &&
+                                  ((msg->data[4] & 0x70U) == 0U) &&
+                                  (chksum == msg->data[5]) &&
+                                  (raw_gas_cmd < 65535) && (raw_gas_cmd2 < 65535) &&
+                                  (!preap_pedal_tx_counter_seen ||
+                                   (counter == (uint8_t)((preap_pedal_tx_counter + 1U) & 0x0FU)));
+      if (!protocol_valid) {
+        violation = true;
+      } else if (pedal_enable) {
+        if (!tesla_preap_calibration_window_open(microsecond_timer_get())) {
+          violation = true;
+        }
+      } else if ((raw_gas_cmd > 500) || (raw_gas_cmd2 > 500)) {
+        violation = true;
+      }
+      if (!violation) {
+        preap_pedal_tx_counter_seen = true;
+        preap_pedal_tx_counter = counter;
+      }
+    } else if (!preap_enable_pedal) {
       violation = true;
     } else {
       bool pedal_enable = (msg->data[4] & 0x80U) != 0U;
@@ -796,14 +871,31 @@ static bool tesla_preap_fwd_hook(int bus_num, int addr) {
 // ============================================
 
 static safety_config tesla_preap_init(uint16_t param) {
-  preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL);
-  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION);
+  const bool calib_requested = GET_FLAG(param, PREAP_FLAG_PEDAL_CALIBRATION);
+  const bool mixed_calib = calib_requested &&
+                           (param != PREAP_FLAG_PEDAL_CALIBRATION) &&
+                           (param != (PREAP_FLAG_PEDAL_CALIBRATION | PREAP_FLAG_PEDAL_BUS_ZERO));
+  preap_pedal_calibration = calib_requested && !mixed_calib;
+  preap_enable_pedal = GET_FLAG(param, PREAP_FLAG_ENABLE_PEDAL) && !preap_pedal_calibration && !mixed_calib;
+  preap_radar_emulation = GET_FLAG(param, PREAP_FLAG_RADAR_EMULATION) && !preap_pedal_calibration && !mixed_calib;
+  preap_pedal_bus = GET_FLAG(param, PREAP_FLAG_PEDAL_BUS_ZERO) ? 0U : 2U;
 
   preap_gear = 4;
   preap_gear_prev = 4;
   preap_doors_open = false;
   preap_di_brake_pressed = false;
   preap_brake_message_pressed = false;
+  preap_gear_seen = false;
+  preap_gear_ts = 0U;
+  preap_di_brake_seen = false;
+  preap_di_brake_ts = 0U;
+  preap_brake_message_seen = false;
+  preap_brake_message_ts = 0U;
+  preap_esp_seen = false;
+  preap_esp_ts = 0U;
+  preap_esp_standstill = false;
+  preap_pedal_tx_counter_seen = false;
+  preap_pedal_tx_counter = 0U;
   preap_pedal_can = -1;
   preap_radar_status = 0;
   preap_last_radar_signal = 0;
@@ -865,6 +957,19 @@ static safety_config tesla_preap_init(uint16_t param) {
              {0x552, 2, 6, 50U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }}},  // GAS_SENSOR
   };
 
+  static const CanMsg PREAP_TX_MSGS_CAL_BUS0[] = {
+    {0x551, 0, 6, .check_relay = false, .disable_static_blocking = true},
+  };
+  static const CanMsg PREAP_TX_MSGS_CAL_BUS2[] = {
+    {0x551, 2, 6, .check_relay = false, .disable_static_blocking = true},
+  };
+  if (mixed_calib) {
+    return (safety_config){NULL, 0, NULL, 0, true}; // NOLINT(readability/braces)
+  }
+  if (preap_pedal_calibration) {
+    return (preap_pedal_bus == 0U) ? BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_CAL_BUS0)
+                                   : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS_CAL_BUS2);
+  }
   return preap_enable_pedal ? BUILD_SAFETY_CFG(preap_rx_checks_with_pedal, PREAP_TX_MSGS)
                             : BUILD_SAFETY_CFG(preap_rx_checks, PREAP_TX_MSGS);
 }
