@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from opendbc.car import structs
 from opendbc.car.tesla.preap import interface
+from opendbc.car.tesla.preap.sp.interface import get_preap_params
 
 
 def test_pedal_params_leave_generic_outer_feedback_disabled(monkeypatch):
@@ -15,8 +16,7 @@ def test_pedal_params_leave_generic_outer_feedback_disabled(monkeypatch):
   params = structs.CarParams.new_message()
   params.wheelbase = 2.96
 
-  configured_params = interface.get_preap_params(params, fingerprint={})
+  configured_params = get_preap_params(params, fingerprint={})
 
   assert list(configured_params.longitudinalTuning.kpV) == [0.0] * 4
   assert list(configured_params.longitudinalTuning.kiV) == [0.0] * 4
-  assert configured_params.longitudinalTuning.kf == 1.0

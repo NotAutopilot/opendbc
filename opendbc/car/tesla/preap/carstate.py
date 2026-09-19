@@ -20,6 +20,15 @@ except ImportError:
 # Pre-AP door signal names from GTW_carState
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
 _SDM1_MAX_AGE_S = 1.0  # SDM1 is 10 Hz; unseen/stale is unknown/unlatched.
+_DTR_SNA = 255
+_DTR_STEP = 33
+
+
+def nap_stalk_follow_distance(dtr_dist: int) -> int:
+  """Map STW DTR_Dist_Rq to CarState.napStalkFollowDistance: 0 unavailable, 1..7 setting."""
+  if dtr_dist == _DTR_SNA:
+    return 0
+  return min((int(dtr_dist) // _DTR_STEP) + 1, 7)
 
 
 def _hands_on_disengage_level(cs):
@@ -138,14 +147,16 @@ def update_preap(cs, can_parsers):
   cs.cruise_buttons = int(cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"])
   cs.msg_stw_actn_req = copy.copy(cp_chassis.vl["STW_ACTN_RQ"])
 
-  # Follow distance dial
-  if _nap_params is not None:
-    dtr_dist = int(cp_chassis.vl["STW_ACTN_RQ"]["DTR_Dist_Rq"])
-    if dtr_dist != 255:  # 255 = SNA
-      stalk_follow = min((dtr_dist // 33) + 1, 7)
-      if stalk_follow != cs.prev_stalk_follow:
-        _nap_params.put(NAPParamKeys.FOLLOW_DISTANCE, stalk_follow)
-        cs.prev_stalk_follow = stalk_follow
+  # Follow distance dial. Persist on change only; always publish the live wheel.
+  dtr_ts = cp_chassis.ts_nanos.get("STW_ACTN_RQ", {}).get("DTR_Dist_Rq", 0)
+  if dtr_ts == 0:
+    ret.napStalkFollowDistance = 0
+  else:
+    stalk_follow = nap_stalk_follow_distance(int(cp_chassis.vl["STW_ACTN_RQ"]["DTR_Dist_Rq"]))
+    ret.napStalkFollowDistance = stalk_follow
+    if _nap_params is not None and stalk_follow and stalk_follow != cs.prev_stalk_follow:
+      _nap_params.put(NAPParamKeys.FOLLOW_DISTANCE, stalk_follow)
+      cs.prev_stalk_follow = stalk_follow
 
   curr_time_ms = _current_time_millis()
   use_pedal = nap_conf.use_pedal

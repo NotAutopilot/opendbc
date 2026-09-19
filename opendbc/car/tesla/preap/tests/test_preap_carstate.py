@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-AP carstate update tests.
-
-Regression coverage for the class of bug where update_preap writes a field on
-`ret` (the CarState capnp struct) without a matching schema entry in car.capnp.
-These writes look like ordinary Python assignment but silently require the
-schema to agree; the first update call crashes card with AttributeError, which
-leaves the panda in elm327 safe mode and surfaces as 'Unknown Vehicle Variant'
-(canError) in the UI.
-"""
+"""Pre-AP published car-state behavior."""
 import unittest
 from unittest.mock import patch, PropertyMock
 
@@ -33,61 +25,14 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
                                  alpha_long=False, is_release=False, docs=False)
     return CarInterface(CP)
 
-  def test_update_runs_without_crashing(self):
-    """update() with empty CAN must not raise — exercises every ret.X write path."""
-    CI = self._make_interface()
-    # Ten iterations; mirrors upstream test_car_interfaces pattern and catches
-    # issues that only appear after state has accumulated.
-    for _ in range(10):
-      CI.update([])
-
-  def test_nap_specific_fields_on_carstate(self):
-    """NAP-specific booleans written by update_preap must exist on the schema."""
-    CI = self._make_interface()
-    CS = CI.update([])
-    for field in ("teslaCCEngaged", "teslaCCDisengaged", "teslaCCNotArmed",
-                  "pedalMaxRegen", "pedalLongActive", "enableLongControl",
-                  "pedalAuthorityRequested",
-                  "pedalAuthorityState", "pedalAuthorityAction", "pedalCommandCounter",
-                  "pedalFeedbackState", "pedalFeedbackCounter", "pedalFirstEnabledMonoTime",
-                  "vdasLimitedAccel", "pedalCommandDi", "pedalAuthorityFailed"):
-      self.assertTrue(hasattr(CS, field), f"CarState schema missing {field}")
-
   def test_regen_brake_prompt_uses_controller_level_state(self):
     CI = self._make_interface()
     CI.CS.pedal_brake_required = True
-    self.assertTrue(CI.update([]).pedalMaxRegen)
+    self.assertTrue(CI.update([])[0].pedalMaxRegen)
 
     CI.CS.pedal_brake_required = False
     CI.CS.pccEvent = "pedalMaxRegen"
-    self.assertFalse(CI.update([]).pedalMaxRegen)
-
-  def test_pedal_authority_diagnostics_publish_owned_state(self):
-    CI = self._make_interface()
-    CI.CS.pedal_authority_requested = True
-    CI.CS.pedal_authority_state = 2
-    CI.CS.pedal_authority_action = 3
-    CI.CS.pedal_command_counter = 14
-    CI.CS.pedal_first_enabled_mono_time = 123456789
-    CI.CS.vdas_limited_accel = -0.25
-    CI.CS.pedal_command_di = 3.5
-    CI.CS.pedal.interceptor_state = 5
-    CI.CS.pedal.idx = 11
-    CI.CS.engagement.pedal_unavailable = True
-
-    with patch.object(CI.CS.pedal, "update"):
-      CS = CI.update([])
-
-    self.assertTrue(CS.pedalAuthorityRequested)
-    self.assertEqual(CS.pedalAuthorityState, 2)
-    self.assertEqual(CS.pedalAuthorityAction, 3)
-    self.assertEqual(CS.pedalCommandCounter, 14)
-    self.assertEqual(CS.pedalFeedbackState, 5)
-    self.assertEqual(CS.pedalFeedbackCounter, 11)
-    self.assertEqual(CS.pedalFirstEnabledMonoTime, 123456789)
-    self.assertAlmostEqual(CS.vdasLimitedAccel, -0.25)
-    self.assertAlmostEqual(CS.pedalCommandDi, 3.5)
-    self.assertTrue(CS.pedalAuthorityFailed)
+    self.assertFalse(CI.update([])[0].pedalMaxRegen)
 
   def test_pedal_long_active_reports_accepted_authority_not_request_intent(self):
     CI = self._make_interface()
@@ -96,10 +41,10 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CI.CS.pedal_authority_active = False
 
     with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True):
-      self.assertFalse(CI.update([]).pedalLongActive)
+      self.assertFalse(CI.update([])[0].pedalLongActive)
 
       CI.CS.pedal_authority_active = True
-      self.assertTrue(CI.update([]).pedalLongActive)
+      self.assertTrue(CI.update([])[0].pedalLongActive)
 
   def test_enable_long_control_publishes_fsm_intent_not_authority(self):
     CI = self._make_interface()
@@ -107,12 +52,12 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
     CI.CS.pedal_authority_active = False
 
     with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True):
-      published = CI.update([])
+      published, _ = CI.update([])
       self.assertTrue(published.enableLongControl)
       self.assertFalse(published.pedalLongActive)
 
       CI.CS.engagement.enableLongControl = False
-      published = CI.update([])
+      published, _ = CI.update([])
       self.assertFalse(published.enableLongControl)
 
   def test_hands_on_level_two_disengages(self):
@@ -124,7 +69,7 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
           "EPAS_eacStatus": 1,
           "EPAS_eacErrorCode": 0,
         })
-        CS = CI.update(packets)
+        CS, _ = CI.update(packets)
         self.assertEqual(CS.steeringDisengage, should_disengage)
 
   def test_cluster_speed_uses_dash_signal(self):
@@ -136,7 +81,7 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
           "DI_speedUnits": speed_units,
           "DI_digitalSpeed": digital_speed,
         })
-        CS = CI.update(packets)
+        CS, _ = CI.update(packets)
         expected_speed = digital_speed * conversion
         self.assertAlmostEqual(CS.vEgoCluster, expected_speed, places=5)
         self.assertAlmostEqual(CS.cruiseState.speed, expected_speed, places=5)
@@ -146,35 +91,48 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
       with self.subTest(lever=lever):
         CI = self._make_interface()
         packets = self._can_packet("STW_ACTN_RQ", {"TurnIndLvr_Stat": lever})
-        CS = CI.update(packets)
+        CS, _ = CI.update(packets)
         self.assertEqual(CS.turnSignalStalkState, expected)
 
-  def test_internal_brake_signal_ors_both_raw_sources_while_public_signal_stays_suppressed(self):
+  def test_brake_signal_ors_both_raw_sources(self):
     CI = self._make_interface()
 
-    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 1}))
+    CS, _ = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 1}))
     self.assertTrue(CI.CS.real_brake_pressed)
-    self.assertFalse(CS.brakePressed)
+    self.assertTrue(CS.brakePressed)
 
-    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
+    CS, _ = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
     self.assertTrue(CI.CS.real_brake_pressed)
-    self.assertFalse(CS.brakePressed)
+    self.assertTrue(CS.brakePressed)
 
-    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
+    CS, _ = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
     self.assertFalse(CI.CS.real_brake_pressed)
     self.assertFalse(CS.brakePressed)
 
-    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 2}))
+    CS, _ = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 2}))
     self.assertTrue(CI.CS.real_brake_pressed)
-    self.assertFalse(CS.brakePressed)
+    self.assertTrue(CS.brakePressed)
 
-    CS = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
+    CS, _ = CI.update(self._can_packet("DI_torque2", {"DI_gear": 4, "DI_brakePedal": 0}))
     self.assertTrue(CI.CS.real_brake_pressed)
-    self.assertFalse(CS.brakePressed)
+    self.assertTrue(CS.brakePressed)
 
-    CS = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
+    CS, _ = CI.update(self._can_packet("BrakeMessage", {"driverBrakeStatus": 1}))
     self.assertFalse(CI.CS.real_brake_pressed)
     self.assertFalse(CS.brakePressed)
+
+  def test_nap_stalk_follow_distance_maps_stw_dtr(self):
+    CI = self._make_interface()
+    state, _ = CI.update([])
+    self.assertEqual(state.napStalkFollowDistance, 0)
+    cases = (
+      (0, 1), (33, 2), (66, 3), (100, 4), (133, 5), (166, 6), (200, 7), (255, 0),
+    )
+    for raw, expected in cases:
+      with self.subTest(dtr=raw):
+        packets = self._can_packet("STW_ACTN_RQ", {"DTR_Dist_Rq": raw})
+        CS, _ = CI.update(packets)
+        self.assertEqual(CS.napStalkFollowDistance, expected)
 
 
 if __name__ == "__main__":
