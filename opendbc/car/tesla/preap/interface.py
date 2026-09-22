@@ -81,6 +81,6 @@ def get_preap_params(ret, fingerprint):
   # CarSpecs in values.py — do NOT override them here to avoid double-counting
   # STD_CARGO_KG (the framework adds it automatically).
   # Confirmed by Lukas (xnor-tech): identical to HW3.
-  ret.centerToFront = ret.wheelbase * 0.5
+  ret.centerToFront = ret.wheelbase * 0.53
 
   return ret
