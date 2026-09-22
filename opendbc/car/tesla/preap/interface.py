@@ -77,10 +77,10 @@ def get_preap_params(ret, fingerprint):
   ret.stoppingDecelRate = 1.0
 
   # Pre-AP Model S is physically the same platform as HW1/HW2/HW3 Model S.
-  # Vehicle params (mass=2100, wheelbase=2.960, steerRatio=15.0) come from
-  # CarSpecs in values.py — do NOT override them here to avoid double-counting
-  # STD_CARGO_KG (the framework adds it automatically).
+  # Vehicle params (mass=2100, wheelbase=2.960, steerRatio=15.0, and
+  # centerToFrontRatio=0.54 for RWD) come from CarSpecs in values.py — do NOT
+  # override them here. Mass would double-count STD_CARGO_KG (the framework adds
+  # it automatically), and centerToFront is derived from centerToFrontRatio.
   # Confirmed by Lukas (xnor-tech): identical to HW3.
-  ret.centerToFront = ret.wheelbase * 0.53
 
   return ret

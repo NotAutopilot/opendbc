@@ -40,6 +40,14 @@ class TeslaPlatformConfig(PlatformConfig):
   dbc_dict: DbcDict = field(default_factory=lambda: {Bus.party: 'tesla_model3_party'})
 
 
+# Model S center of mass, as a fraction of wheelbase back from the front axle
+# (CarSpecs.centerToFrontRatio). RWD cars sit further rearward than dual-motor
+# AWD cars. Model S platforms split by Autopilot hardware, not drivetrain, so
+# each takes the drivetrain it predominantly shipped with.
+MODEL_S_CENTER_TO_FRONT_AWD = 0.52
+MODEL_S_CENTER_TO_FRONT_RWD = 0.54
+
+
 class CAR(Platforms):
   TESLA_MODEL_3 = TeslaPlatformConfig(
     [
@@ -78,11 +86,12 @@ class CAR(Platforms):
   )
   TESLA_MODEL_S = TeslaPlatformConfig(
     [TeslaCarDocsHW4("Tesla Model S (with HW4) 2024")],
-    CarSpecs(mass=2166., wheelbase=2.960, steerRatio=12.0),
+    CarSpecs(mass=2166., wheelbase=2.960, steerRatio=12.0, centerToFrontRatio=MODEL_S_CENTER_TO_FRONT_AWD),
   )
   TESLA_MODEL_S_HW1 = TeslaPlatformConfig(
     [CarDocs("Tesla Model S (with HW1) 2014-16", "All", car_parts=CarParts.common([CarHarness.tesla_model_s_hw1]))],
-    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
+    # HW1 shipped both RWD and dual-motor; AWD is the majority.
+    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0, centerToFrontRatio=MODEL_S_CENTER_TO_FRONT_AWD),
     {
       Bus.chassis: 'tesla_can',
       Bus.party: 'tesla_can',
@@ -92,7 +101,8 @@ class CAR(Platforms):
   )
   TESLA_MODEL_S_HW2 = TeslaPlatformConfig(
     [CarDocs("Tesla Model S (with HW2) 2017-19", "All", car_parts=CarParts.common([CarHarness.tesla_model_sx_hw2]))],
-    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
+    # HW2 shipped both RWD and dual-motor; AWD is the majority.
+    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0, centerToFrontRatio=MODEL_S_CENTER_TO_FRONT_AWD),
     {
       Bus.chassis: 'tesla_can',
       Bus.party: 'tesla_can',
@@ -102,7 +112,7 @@ class CAR(Platforms):
   )
   TESLA_MODEL_S_HW3 = TeslaPlatformConfig(
     [CarDocs("Tesla Model S (with HW3) 2020-23", "All", car_parts=CarParts.common([CarHarness.tesla_model_sx_hw3]))],
-    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
+    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0, centerToFrontRatio=MODEL_S_CENTER_TO_FRONT_AWD),
     {
       Bus.chassis: 'tesla_can',
       Bus.party: 'tesla_raven_party',
@@ -112,7 +122,8 @@ class CAR(Platforms):
   )
   TESLA_MODEL_S_PREAP = TeslaPlatformConfig(
     [CarDocs("Tesla Model S (Pre-AP) 2012-14", "All", car_parts=CarParts.common([CarHarness.tesla_model_s_hw1]))],
-    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0),
+    # Dual-motor Model S arrived with AP1 hardware, so Pre-AP cars are RWD.
+    CarSpecs(mass=2100., wheelbase=2.960, steerRatio=15.0, centerToFrontRatio=MODEL_S_CENTER_TO_FRONT_RWD),
     {
       Bus.chassis: 'tesla_preap',
       Bus.party: 'tesla_preap',
