@@ -60,6 +60,7 @@ def _make_bosch_interface():
   radar.trigger_msg = BOSCH_TRIGGER_ADDRESS
   radar.radar_off_can = False
   radar.radar_offset = 0.0
+  radar.radar_direction = 1
   radar.updated_messages = set()
   radar.track_id = 0
   radar.pts = {}

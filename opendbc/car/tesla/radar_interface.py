@@ -157,12 +157,14 @@ class RadarInterface(RadarInterfaceBase):
     self.track_id = 0
     self.bosch_tracks = BoschTrackLifecycle()
     self.table_freeze = BoschTableFreezeWatch() if BoschTableFreezeWatch is not None else None
-    # Keep parity with Tinkla radar lateral alignment behavior.
-    # For behind-nosecone installs, users can configure horizontal offset in meters.
+    # Offset is applied after any upside-down sign flip so it stays a
+    # vehicle-frame translation (not Tinkla's -(LatDist + offset)).
+    self.radar_offset = 0.0
+    self.radar_direction = 1
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
       self.radar_offset = float(nap_conf.radar_offset)
-    else:
-      self.radar_offset = 0.0
+      if nap_conf.radar_upside_down:
+        self.radar_direction = -1
     self.ignore_hw_fail = _resolve_ignore_hw_fail()
 
   def update(self, can_msgs):
@@ -274,9 +276,9 @@ class RadarInterface(RadarInterfaceBase):
 
     return BoschTrackObservation(
       d_rel=msg_a['LongDist'],
-      y_rel=msg_a['LatDist'] + self.radar_offset,
+      y_rel=self.radar_direction * msg_a['LatDist'] + self.radar_offset,
       v_rel=msg_a['LongSpeed'],
       a_rel=msg_a['LongAccel'],
-      yv_rel=msg_b['LatSpeed'],
+      yv_rel=self.radar_direction * msg_b['LatSpeed'],
       measured=bool(msg_a['Meas']),
     )

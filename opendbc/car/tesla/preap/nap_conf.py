@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
   'radar_enabled': False,
   'radar_ignore_hw_fail': False,
   'radar_behind_nosecone': False,
+  'radar_upside_down': False,
   'radar_offset': 0.0,
   'radar_donor_vin': '',
   'radar_epas_type': 0,
@@ -225,6 +226,14 @@ class NAPConf:
   @radar_behind_nosecone.setter
   def radar_behind_nosecone(self, value):
     self._put_param_bool(NAPParamKeys.RADAR_BEHIND_NOSECONE, 'radar_behind_nosecone', value)
+
+  @property
+  def radar_upside_down(self):
+    return self._get_param_bool(NAPParamKeys.RADAR_UPSIDE_DOWN, 'radar_upside_down')
+
+  @radar_upside_down.setter
+  def radar_upside_down(self, value):
+    self._put_param_bool(NAPParamKeys.RADAR_UPSIDE_DOWN, 'radar_upside_down', value)
 
   @property
   def radar_donor_vin(self):
@@ -426,6 +435,7 @@ class NAPConf:
     print(f"    Radar Enabled:        {'ON' if self.radar_enabled else 'OFF'}")
     print(f"    Ignore HWFail:        {'ON' if self.radar_ignore_hw_fail else 'OFF'}")
     print(f"    Behind Nosecone:      {'YES' if self.radar_behind_nosecone else 'NO'}")
+    print(f"    Upside Down:          {'YES' if self.radar_upside_down else 'NO'}")
     print(f"    Radar Offset:         {self.radar_offset}m")
     print("")
     print("==================================")
@@ -447,6 +457,7 @@ class NAPConf:
       'radar_enabled': self.radar_enabled,
       'radar_ignore_hw_fail': self.radar_ignore_hw_fail,
       'radar_behind_nosecone': self.radar_behind_nosecone,
+      'radar_upside_down': self.radar_upside_down,
       'radar_offset': self.radar_offset,
     }
 

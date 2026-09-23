@@ -28,6 +28,7 @@ class NAPParamKeys:
   RADAR_IGNORE_HW_FAIL = "NAPRadarIgnoreHwFail"
   RADAR_BEHIND_NOSECONE = "NAPRadarBehindNosecone"
   RADAR_OFFSET = "NAPRadarOffset"
+  RADAR_UPSIDE_DOWN = "NAPRadarUpsideDown"
   RADAR_DONOR_VIN = "NAPRadarDonorVin"
   RADAR_EPAS_TYPE = "NAPRadarEpasType"
   RADAR_POSITION = "NAPRadarPosition"
@@ -59,6 +60,7 @@ DEFAULTS = {
   NAPParamKeys.RADAR_IGNORE_HW_FAIL: False,
   NAPParamKeys.RADAR_BEHIND_NOSECONE: False,
   NAPParamKeys.RADAR_OFFSET: 0.0,
+  NAPParamKeys.RADAR_UPSIDE_DOWN: False,
   NAPParamKeys.RADAR_DONOR_VIN: "",
   NAPParamKeys.RADAR_EPAS_TYPE: 0,
   NAPParamKeys.RADAR_POSITION: 0,
