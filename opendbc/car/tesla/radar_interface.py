@@ -161,11 +161,13 @@ class RadarInterface(RadarInterfaceBase):
     # vehicle-frame translation (not Tinkla's -(LatDist + offset)).
     self.radar_offset = 0.0
     self.radar_direction = 1
-    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
+    # NAP radar options describe the Pre-AP retrofit radar; other cars' radars are set up by the car
+    self.preap_radar_options = self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP
+    if self.preap_radar_options and nap_conf is not None:
       self.radar_offset = float(nap_conf.radar_offset)
       if nap_conf.radar_upside_down:
         self.radar_direction = -1
-    self.ignore_hw_fail = _resolve_ignore_hw_fail()
+    self.ignore_hw_fail = self.preap_radar_options and _resolve_ignore_hw_fail()
 
   def update(self, can_msgs):
 
@@ -185,7 +187,7 @@ class RadarInterface(RadarInterfaceBase):
 
     # Re-read every cycle: compiled params_pyx may not know the new key,
     # and the on-disk param is the source of truth when that throws.
-    ignore_hw_fail = _resolve_ignore_hw_fail()
+    ignore_hw_fail = self.preap_radar_options and _resolve_ignore_hw_fail()
     self.ignore_hw_fail = ignore_hw_fail
 
     # Errors

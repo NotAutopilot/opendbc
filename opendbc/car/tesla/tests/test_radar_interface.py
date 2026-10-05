@@ -61,6 +61,7 @@ def _make_bosch_interface():
   radar.radar_off_can = False
   radar.radar_offset = 0.0
   radar.radar_direction = 1
+  radar.preap_radar_options = True
   radar.updated_messages = set()
   radar.track_id = 0
   radar.pts = {}
@@ -257,6 +258,14 @@ class TestBoschHealth:
     assert _run_cycle(radar).errors.radarFault is True
     ns.radar_ignore_hw_fail = True
     assert _run_cycle(radar).errors.radarFault is False
+
+  def test_ignore_hw_fail_only_applies_to_preap(self, monkeypatch):
+    radar = _make_bosch_interface()
+    radar.preap_radar_options = False  # e.g. AP1: the factory radar is configured by the car
+    radar.rcp.vl["TeslaRadarSguInfo"]["RADC_HWFail"] = 1
+    monkeypatch.setattr(radar_interface_module, "nap_conf", SimpleNamespace(radar_ignore_hw_fail=True))
+
+    assert _run_cycle(radar).errors.radarFault is True
 
   def test_ignore_hw_fail_file_fallback_when_sources_raise(self, monkeypatch, tmp_path):
     radar = _make_bosch_interface()
