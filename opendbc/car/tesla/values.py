@@ -258,3 +258,6 @@ DBC = CAR.create_dbc_map()
 STEER_THRESHOLD = 1
 
 LEGACY_CARS = (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_S_HW3, CAR.TESLA_MODEL_X_HW1, CAR.TESLA_MODEL_S_PREAP)
+
+# AP1: the Mobileye DAS ECU sits on bus 2 behind the harness; powertrain is the chassis bus
+HW1_CARS = (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1)

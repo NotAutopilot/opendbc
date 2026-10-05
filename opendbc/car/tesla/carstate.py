@@ -3,7 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS
+from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, LEGACY_CARS, HW1_CARS
 from opendbc.car.tesla.preap.nap_conf import nap_conf
 from opendbc.car.tesla.preap.engagement import PreAPEngagement
 from opendbc.car.tesla.preap.pedal_feedback import PedalFeedback
@@ -41,6 +41,7 @@ class CarState(CarStateBase):
 
     self.hands_on_level = 0
     self.das_control = None
+    self.das_body_controls = None  # HW1: AP ECU's latest DAS_bodyControls, rebuilt by the controller
     self.cruise_buttons = 0
     self.prev_cruise_buttons = 0
     self.msg_stw_actn_req = None  # Full STW_ACTN_RQ message for spoofing cancel commands
@@ -258,8 +259,18 @@ class CarState(CarStateBase):
     ret.doorOpen = any((self.can_defines["GTW_carState"][door].get(int(cp_chassis.vl["GTW_carState"][door]), "OPEN") == "OPEN") for door in DOORS)
 
     # Blinkers
-    ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] == 1
-    ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] == 1
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_X_HW1:
+      ret.leftBlinker = cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"] == 1
+      ret.rightBlinker = cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"] == 2
+    else:
+      ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] == 1
+      ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] == 1
+
+    if self.CP.carFingerprint in HW1_CARS:
+      # The lamp stays latched while openpilot drives it. Publish the physical
+      # lever level so modeld can reliably detect new taps from conflated carState.
+      turn_lever = int(cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"])
+      ret.turnSignalStalkState = 0 if turn_lever == 3 else turn_lever
 
     # Seatbelt
     if self.CP.flags & TeslaLegacyParams.NO_SDM1:
@@ -278,6 +289,8 @@ class CarState(CarStateBase):
 
     # Messages needed by carcontroller
     self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
+    if self.CP.carFingerprint in HW1_CARS:
+      self.das_body_controls = copy.copy(cp_ap_party.vl["DAS_bodyControls"])
     self.cruise_enabled_prev = ret.cruiseState.enabled
 
     return ret
@@ -288,6 +301,7 @@ class CarState(CarStateBase):
       return get_preap_can_parsers(CP)
 
     if CP.carFingerprint in LEGACY_CARS:
+      hw1 = CP.carFingerprint in HW1_CARS
       chassis_messages = [
         ("ESP_B", 0),
         ("BrakeMessage", 0),
@@ -295,12 +309,19 @@ class CarState(CarStateBase):
         ("DI_torque2", 0),
         ("GTW_carState", 0),
         ("STW_ANGLHP_STAT", 0),
-        ("SDM1", 0),
-        ("RCM_status", 0),
       ]
+
+      # A car sends one seatbelt message or the other; registering both is a permanent CAN error
+      if CP.flags & TeslaLegacyParams.NO_SDM1:
+        chassis_messages.append(("RCM_status", 0))
+      else:
+        chassis_messages.append(("SDM1", 0))
 
       if CP.carFingerprint != CAR.TESLA_MODEL_S_HW3:
         chassis_messages.append(("EPAS_sysStatus", 0))
+
+      if hw1:
+        chassis_messages.append(("STW_ACTN_RQ", 0))  # turn lever level for lane-change taps
 
       # ESP_B lives on the chassis parser (tesla_can DBC) — no need on pt.
       # Also, tesla_powertrain DBC (used by HW2/HW3 pt) doesn't define ESP_B.
@@ -326,23 +347,19 @@ class CarState(CarStateBase):
       ap_party_messages = [("DAS_steeringControl", 0)]
       ap_pt_messages = [("DAS_control", 0)]
 
-      # HW1: redirect AP/PT parsers to Bus 0
-      pt_bus = CANBUS.powertrain
-      if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
-        pt_bus = CANBUS.party
-        ap_bus = CANBUS.party
+      if hw1:
+        # AP1: powertrain is the chassis bus and the DAS ECU is on bus 2 behind the harness.
+        # DAS_bodyControls is only read to carry its light/wiper fields, so it is not required.
+        ap_party_messages.append(("DAS_bodyControls", float("nan")))
+        pt_bus, ap_pt_bus = CANBUS.party, CANBUS.autopilot_party
       else:
-        ap_bus = CANBUS.autopilot_party
+        pt_bus, ap_pt_bus = CANBUS.powertrain, CANBUS.autopilot_powertrain
 
       return {
         Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_messages, CANBUS.party),
-        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_party_messages, ap_bus),
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], ap_party_messages, CANBUS.autopilot_party),
         Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, pt_bus),
-        Bus.ap_pt: CANParser(
-          DBC[CP.carFingerprint][Bus.pt],
-          ap_pt_messages,
-          ap_bus if ap_bus == CANBUS.party else CANBUS.autopilot_powertrain
-        ),
+        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], ap_pt_messages, ap_pt_bus),
         Bus.chassis: CANParser(
           DBC[CP.carFingerprint][Bus.chassis], chassis_messages,
           CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party,
