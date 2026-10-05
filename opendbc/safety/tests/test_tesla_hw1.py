@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import random
 import unittest
+from pathlib import Path
 import numpy as np
 
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
@@ -14,6 +15,7 @@ from opendbc.safety.tests.common import CANPackerSafety, MAX_SPEED_DELTA, MAX_WR
 
 MSG_DAS_steeringControl = 0x488
 MSG_DAS_Control_HW1 = 0x2b9
+MSG_DAS_bodyControls = 0x3e9
 MSG_DI_torque1 = 0x108  # HW1 uses different message ID
 
 
@@ -28,7 +30,7 @@ class TestTeslaHW1Safety(common.CarSafetyTest, common.AngleSteeringSafetyTest, c
   # HW1 configuration - based on tesla_legacy.h
   RELAY_MALFUNCTION_ADDRS = {0: (MSG_DAS_steeringControl, MSG_DAS_Control_HW1)}
   FWD_BLACKLISTED_ADDRS = {2: [MSG_DAS_steeringControl, MSG_DAS_Control_HW1]}
-  TX_MSGS = [[MSG_DAS_steeringControl, 0], [MSG_DAS_Control_HW1, 0]]
+  TX_MSGS = [[MSG_DAS_steeringControl, 0], [MSG_DAS_Control_HW1, 0], [MSG_DAS_bodyControls, 0]]
 
   STANDSTILL_THRESHOLD = 0.1
   GAS_PRESSED_THRESHOLD = 3
@@ -129,6 +131,9 @@ class TestTeslaHW1Safety(common.CarSafetyTest, common.AngleSteeringSafetyTest, c
   def _accel_msg(self, accel: float):
     return self._long_control_msg(10, accel_limits=(accel, max(accel, 0)))
 
+  def _body_controls_msg(self, turn: int, bus: int = 0):
+    return self.packer.make_can_msg_safety("DAS_bodyControls", bus, {"DAS_turnIndicatorRequest": turn})
+
   def test_rx_hook(self):
     # Legacy models don't have checksums for most messages
     # Test basic message reception
@@ -215,6 +220,25 @@ class TestTeslaHW1Safety(common.CarSafetyTest, common.AngleSteeringSafetyTest, c
     self.assertEqual(1, self._rx(aeb_msg_cam))
     self.assertEqual(0, self.safety.safety_fwd_hook(2, aeb_msg_cam.addr))
     self.assertFalse(self._tx(no_aeb_msg))
+
+  def test_body_controls_tx_only_while_engaged(self):
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for turn in range(4):
+        self.assertEqual(controls_allowed, self._tx(self._body_controls_msg(turn)), (controls_allowed, turn))
+
+  def test_body_controls_forwarding_follows_engagement(self):
+    # The AP ECU's DAS_bodyControls passes through until openpilot takes over the turn signal
+    self.safety.set_controls_allowed(False)
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, MSG_DAS_bodyControls))
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, MSG_DAS_bodyControls))
+
+  def test_no_manual_bus2_resend_hook(self):
+    # Regression: an rx_all hook re-sent every bus-2 frame (incl. 0x488/0x2B9) to bus 0 with
+    # skip_tx_hook, bypassing the forwarding blocks. Forwarding must go only through fwd_hook.
+    src = Path(__file__).resolve().parents[1] / "modes" / "tesla_legacy.h"
+    self.assertNotIn("rx_all", src.read_text())
 
   def test_prevent_reverse(self):
     # Test reverse prevention logic - use the same test as modern Tesla

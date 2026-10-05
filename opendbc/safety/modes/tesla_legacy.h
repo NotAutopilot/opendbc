@@ -2,17 +2,6 @@
 
 #include "opendbc/safety/declarations.h"
 
-// Legacy macros for Tinkla porting
-#define GET_BYTES_04(msg) ((msg)->data[0] | ((msg)->data[1] << 8) | ((msg)->data[2] << 16) | ((msg)->data[3] << 24))
-#define GET_BYTES_48(msg) ((msg)->data[4] | ((msg)->data[5] << 8) | ((msg)->data[6] << 16) | ((msg)->data[7] << 24))
-#define WORD_TO_BYTE_ARRAY(dst8, src32) 0[dst8] = ((src32) & 0xFFU); 1[dst8] = (((src32) >> 8U) & 0xFFU); 2[dst8] = (((src32) >> 16U) & 0xFFU); 3[dst8] = (((src32) >> 24U) & 0xFFU)
-
-// Forward declarations (these are defined in can_common.h, included after safety.h)
-#if defined(STM32H7) || defined(STM32F4)
-void can_send(CANPacket_t *to_push, uint8_t bus_number, bool skip_tx_hook);
-void can_set_checksum(CANPacket_t *packet);
-#endif
-
 static bool tesla_external_panda = false;
 static bool tesla_hw1 = false;
 static bool tesla_hw2 = false;
@@ -26,40 +15,6 @@ static bool tesla_legacy_stock_aeb = false;
 
 static bool tesla_legacy_stock_lkas = false;
 static bool tesla_legacy_stock_lkas_prev = false;
-
-// Note: checksum/CRC functions that were here moved to tesla_preap.h
-// as preap_byte_sum_checksum() and preap_compute_crc8() respectively.
-
-// Handles manual forwarding modification since safety hooks don't allow modification
-static void tesla_legacy_handle_forwarding(const CANPacket_t *to_fwd) {
-  // Simple forwarding 2 -> 0 (AP1/AP2 only)
-  int bus_num = GET_BUS(to_fwd);
-  int addr = GET_ADDR(to_fwd);
-
-  if (bus_num == 2) {
-    bool forward = true;
-    if (!tesla_external_panda && !tesla_hw1 && (addr == 0x27dU)) forward = false;
-    if (!tesla_external_panda && (addr == 0x488U) && !tesla_legacy_stock_lkas) forward = true;
-
-    if (forward) {
-        CANPacket_t to_send;
-        to_send.returned = 0U;
-        to_send.rejected = 0U;
-        to_send.extended = to_fwd->extended;
-        to_send.bus = 0;
-        to_send.addr = addr;
-        to_send.data_len_code = to_fwd->data_len_code;
-        uint32_t RDLR = GET_BYTES_04(to_fwd);
-        uint32_t RDHR = GET_BYTES_48(to_fwd);
-        WORD_TO_BYTE_ARRAY(&to_send.data[4], RDHR);
-        WORD_TO_BYTE_ARRAY(&to_send.data[0], RDLR);
-#if defined(STM32H7) || defined(STM32F4)
-        can_set_checksum(&to_send);
-        can_send(&to_send, 0, true);
-#endif
-    }
-  }
-}
 
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   // Steering angle: (0.1 * val) - 819.2 in deg.
@@ -205,6 +160,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     violation |= longitudinal_accel_checks(raw_accel_min, TESLA_LONG_LIMITS);
   }
 
+  // DAS_bodyControls (HW1): openpilot drives the turn signal for lane changes,
+  // only while engaged. DAS_turnIndicatorRequest is a 2-bit field, so every value is valid.
+  if (tesla_hw1 && (msg->addr == 0x3E9U) && !controls_allowed) {
+    violation = true;
+  }
+
   if (violation) {
     tx = false;
   }
@@ -238,6 +199,12 @@ static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
     // DAS_control: OP TXs on HW1 (0x2b9) or external panda (0x2bf).
     // Block unless stock AEB is active (safety passthrough: yield to stock AEB).
     if ((addr == (int)das_control_msg) && (tesla_hw1 || tesla_external_panda) && !tesla_legacy_stock_aeb) {
+      return true;
+    }
+    // DAS_bodyControls: OP TXs on HW1 while engaged (lane-change turn signal).
+    // Block the AP ECU's copy only while controls are allowed, so its automatic
+    // high-beam and wiper requests reach the car whenever openpilot is not engaged.
+    if ((addr == 0x3E9) && tesla_hw1 && controls_allowed) {
       return true;
     }
   }
@@ -277,8 +244,9 @@ static safety_config tesla_legacy_init(uint16_t param) {
   };
 
   static const CanMsg TESLA_TX_LEGACY_HW1_MSGS[] = {
-    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},  // DAS_steeringControl
-    {0x2b9, 0, 8, .check_relay = true, .disable_static_blocking = true},  // DAS_control
+    {0x488, 0, 4, .check_relay = true, .disable_static_blocking = true},   // DAS_steeringControl
+    {0x2b9, 0, 8, .check_relay = true, .disable_static_blocking = true},   // DAS_control
+    {0x3e9, 0, 8, .check_relay = false, .disable_static_blocking = true},  // DAS_bodyControls (turn signal)
   };
 
   // AP1+ RX check arrays
@@ -337,7 +305,6 @@ static safety_config tesla_legacy_init(uint16_t param) {
 const safety_hooks tesla_legacy_hooks = {
   .init = tesla_legacy_init,
   .rx = tesla_legacy_rx_hook,
-  .rx_all = tesla_legacy_handle_forwarding,  // sees ALL messages for GTW emulation
   .tx = tesla_legacy_tx_hook,
   .fwd = tesla_legacy_fwd_hook,
 };
