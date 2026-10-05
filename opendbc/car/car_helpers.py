@@ -8,6 +8,7 @@ from opendbc.car.structs import CarParams, CarParamsT
 from opendbc.car.fingerprints import eliminate_incompatible_cars, all_legacy_fingerprint_cars
 from opendbc.car.fw_versions import ObdCallback, get_fw_versions_ordered, get_present_ecus, match_fw_to_car
 from opendbc.car.mock.values import CAR as MOCK
+from opendbc.car.tesla.nap_detect import AP_ECU_ADDRS, FORCED_PLATFORM, NAP_CAR_TYPE_AUTO, detect_legacy_platform, read_nap_car_type
 from opendbc.car.values import BRANDS
 from opendbc.car.vin import get_vin, is_valid_vin, VIN_UNKNOWN
 
@@ -87,16 +88,12 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
 
-  # NAP: Force Pre-AP fingerprint when NAPForcePreAP is set.
-  if not fixed_fingerprint:
-    try:
-      from openpilot.common.params import Params
-      if Params().get_bool("NAPForcePreAP"):
-        fixed_fingerprint = "TESLA_MODEL_S_PREAP"
-        skip_fw_query = True
-        carlog.warning("NAPForcePreAP enabled — forcing TESLA_MODEL_S_PREAP fingerprint")
-    except Exception:
-      pass
+  # NAP car type: forced types pin the platform; Auto picks it from CAN after the
+  # fingerprint window. None (unset) leaves stock fingerprinting alone.
+  nap_car_type = None if fixed_fingerprint else read_nap_car_type()
+  if nap_car_type is not None:
+    fixed_fingerprint = FORCED_PLATFORM.get(nap_car_type, "")
+    skip_fw_query = True
 
   ecu_rx_addrs = set()
 
@@ -142,6 +139,13 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
   exact_match = True
   source = CarParams.FingerprintSource.can
+
+  if nap_car_type == NAP_CAR_TYPE_AUTO:
+    car_fingerprint = detect_legacy_platform(finger)
+    carlog.warning({"event": "nap_car_detect", "mode": "auto", "result": car_fingerprint,
+                    "ap_ecu_addrs_seen": [hex(a) for a in AP_ECU_ADDRS if any(a in finger.get(b, {}) for b in (0, 2))]})
+  elif nap_car_type is not None:
+    carlog.warning({"event": "nap_car_detect", "mode": "forced", "result": fixed_fingerprint})
 
   # If FW query returns exactly 1 candidate, use it
   if len(fw_candidates) == 1:

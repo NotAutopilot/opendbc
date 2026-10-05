@@ -39,7 +39,11 @@ class NAPParamKeys:
   IBOOSTER_ENABLED = "NAPiBoosterEnabled"
   BRAKE_FACTOR = "NAPBrakeFactor"
 
-  # Advanced
+  # Vehicle
+  CAR_TYPE = "NAPCarType"  # 0=Auto, 1=Pre-AP, 2=AP1 (see opendbc/car/tesla/nap_detect.py)
+  ACTIVE_PROFILE = "NAPActiveProfile"  # state written by card, not a setting
+
+  # Retired by CAR_TYPE; kept one release so stale values still load
   FORCE_PRE_AP = "NAPForcePreAP"
 
 
@@ -66,5 +70,5 @@ DEFAULTS = {
   NAPParamKeys.RADAR_POSITION: 0,
   NAPParamKeys.IBOOSTER_ENABLED: False,
   NAPParamKeys.BRAKE_FACTOR: 1.0,
-  NAPParamKeys.FORCE_PRE_AP: False,
+  NAPParamKeys.CAR_TYPE: 0,
 }
