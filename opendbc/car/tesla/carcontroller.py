@@ -5,7 +5,7 @@ from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.tesla.teslacan import TeslaCAN
 from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven
-from opendbc.car.tesla.values import CarControllerParams, CANBUS, LEGACY_CARS, CAR
+from opendbc.car.tesla.values import CarControllerParams, CANBUS, LEGACY_CARS, HW1_CARS, CAR
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.tesla.preap.carcontroller import PreAPLongController, init_preap_can
 from opendbc.car.tesla.preap.nap_conf import nap_conf
@@ -22,6 +22,8 @@ class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
     super().__init__(dbc_names, CP)
     self.apply_angle_last = 0
+    self.body_controls_counter = 0
+    self.body_controls_active = False
     self.packer = CANPacker(dbc_names[Bus.party])
     self.tesla_can = TeslaCAN(self.packer)
 
@@ -78,11 +80,28 @@ class CarController(CarControllerBase):
         state = 13 if CC.cruiseControl.cancel else 4  # ACC_ON / ACC_CANCEL_GENERIC_SILENT
         accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         cntr = (self.frame // 4) % 8
-        can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive))
+        if self.CP.carFingerprint in LEGACY_CARS:
+          can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive, CS.out.gasPressed))
+        else:
+          can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive))
     else:
       if CC.cruiseControl.cancel:
         cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
         can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
+
+    # AP1 turn signal: while engaged, openpilot replaces the AP ECU's DAS_bodyControls
+    # (panda blocks the AP copy) so it can hold the blinker through a lane change.
+    # controlsd sets CC.leftBlinker/rightBlinker whenever laneChangeState != off.
+    if self.CP.carFingerprint in HW1_CARS:
+      if CC.enabled and not self.body_controls_active:
+        # Continue the AP ECU's counter so the body controller sees one sequence
+        src_counter = int(CS.das_body_controls["DAS_bodyControlsCounter"]) if CS.das_body_controls else -1
+        self.body_controls_counter = (src_counter + 1) % 16
+      self.body_controls_active = CC.enabled
+      if CC.enabled and self.frame % 10 == 0:
+        turn = int(CC.rightBlinker) * 2 + int(CC.leftBlinker)
+        can_sends.append(self.tesla_can.create_body_controls(CS.das_body_controls, turn, self.body_controls_counter))
+        self.body_controls_counter = (self.body_controls_counter + 1) % 16
 
     # TODO: HUD control
     new_actuators = actuators.as_builder()
