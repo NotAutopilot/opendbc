@@ -142,16 +142,21 @@ def update_preap(cs, can_parsers):
   cs.cruise_buttons = int(cp_chassis.vl["STW_ACTN_RQ"]["SpdCtrlLvr_Stat"])
   cs.msg_stw_actn_req = copy.copy(cp_chassis.vl["STW_ACTN_RQ"])
 
-  # Follow distance dial. Persist on change only; always publish the live wheel.
-  dtr_ts = cp_chassis.ts_nanos.get("STW_ACTN_RQ", {}).get("DTR_Dist_Rq", 0)
-  if dtr_ts == 0:
-    ret.napStalkFollowDistance = 0
-  else:
-    stalk_follow = nap_stalk_follow_distance(int(cp_chassis.vl["STW_ACTN_RQ"]["DTR_Dist_Rq"]))
-    ret.napStalkFollowDistance = stalk_follow
-    if _nap_params is not None and stalk_follow and stalk_follow != cs.prev_stalk_follow:
-      _nap_params.put(NAPParamKeys.FOLLOW_DISTANCE, stalk_follow)
+  # Latch every valid detent at the producer, including out-and-back changes
+  # within one update. Consumer observation times cannot order GUI requests.
+  for raw, timestamp in zip(cp_chassis.vl_all["STW_ACTN_RQ"]["DTR_Dist_Rq"],
+                            cp_chassis.ts_nanos_all["STW_ACTN_RQ"]["DTR_Dist_Rq"], strict=True):
+    stalk_follow = nap_stalk_follow_distance(int(raw))
+    if stalk_follow and stalk_follow != cs.prev_stalk_follow:
       cs.prev_stalk_follow = stalk_follow
+      cs.stalk_follow_timestamp = max(timestamp, cs.stalk_follow_timestamp + 1)
+      if _nap_params is not None:
+        _nap_params.put(NAPParamKeys.FOLLOW_DISTANCE, stalk_follow)
+  dtr_ts = cp_chassis.ts_nanos.get("STW_ACTN_RQ", {}).get("DTR_Dist_Rq", 0)
+  ret.napStalkFollowDistance = (
+    nap_stalk_follow_distance(int(cp_chassis.vl["STW_ACTN_RQ"]["DTR_Dist_Rq"])) if dtr_ts else 0
+  )
+  ret.napStalkFollowDistanceTimestamp = cs.stalk_follow_timestamp
 
   curr_time_ms = _current_time_millis()
   use_pedal = nap_conf.use_pedal

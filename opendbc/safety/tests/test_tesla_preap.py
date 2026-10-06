@@ -1238,5 +1238,102 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertTrue(self._tx(self._gas_enable()))
     self.assertFalse(self._tx(self._steer(True)))
 
+
+class TestTeslaPreAPIgnition(unittest.TestCase):
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.init_tests()
+    self.packer = CANPackerSafety("tesla_preap")
+
+  def _msg(self, counter, drive_rail=True, bus=0):
+    addr, data, bus = self.packer.make_can_msg("GTW_status", bus, {
+      "GTW_statusCounter": counter,
+      "GTW_driveRailReq": int(drive_rail),
+    })
+    data = data[:7] + bytes([((addr & 0xFF) + (addr >> 8) + sum(data[:7])) & 0xFF])
+    return libsafety_py.make_CANPacket(addr, bus, data)
+
+  def test_consecutive_counters_enable_and_disable_on_each_bus(self):
+    for bus in (0, 1):
+      for counter in range(16):
+        with self.subTest(bus=bus, counter=counter):
+          self.safety.init_tests()
+          self.safety.ignition_can_hook(self._msg(counter, bus=bus))
+          self.assertFalse(self.safety.get_ignition_can())
+          self.safety.ignition_can_hook(self._msg((counter + 1) % 16, bus=bus))
+          self.assertTrue(self.safety.get_ignition_can())
+          self.safety.ignition_can_hook(self._msg((counter + 2) % 16, drive_rail=False, bus=bus))
+          self.assertFalse(self.safety.get_ignition_can())
+
+  def test_duplicate_and_skipped_counters_do_not_change_ignition(self):
+    for counter in (4, 6):
+      with self.subTest(counter=counter):
+        self.safety.init_tests()
+        self.safety.ignition_can_hook(self._msg(4))
+        self.safety.ignition_can_hook(self._msg(counter))
+        self.assertFalse(self.safety.get_ignition_can())
+        self.safety.ignition_can_hook(self._msg(counter + 1))
+        self.assertTrue(self.safety.get_ignition_can())
+        self.safety.ignition_can_hook(self._msg(counter + 1, drive_rail=False))
+        self.assertTrue(self.safety.get_ignition_can())
+
+  def test_bus_counters_cannot_complete_each_other(self):
+    self.safety.ignition_can_hook(self._msg(15, bus=0))
+    self.safety.ignition_can_hook(self._msg(0, bus=1))
+    self.assertFalse(self.safety.get_ignition_can())
+    self.safety.ignition_can_hook(self._msg(0, bus=0))
+    self.assertTrue(self.safety.get_ignition_can())
+    self.safety.ignition_can_hook(self._msg(1, drive_rail=False, bus=1))
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_invalid_frames_do_not_advance_counters(self):
+    for bus in (0, 1):
+      for invalid in ("checksum", "bus", "length", "address"):
+        with self.subTest(bus=bus, invalid=invalid):
+          self.safety.init_tests()
+          self.safety.ignition_can_hook(self._msg(0, bus=bus))
+          msg = self._msg(1, bus=bus)
+          if invalid == "checksum":
+            msg[0].data[7] ^= 1
+          elif invalid == "bus":
+            msg[0].bus = 2
+          elif invalid == "length":
+            msg[0].data_len_code = 7
+          else:
+            msg[0].addr = 0x349
+          self.safety.ignition_can_hook(msg)
+          self.assertFalse(self.safety.get_ignition_can())
+          self.safety.ignition_can_hook(self._msg(1, bus=bus))
+          self.assertTrue(self.safety.get_ignition_can())
+
+  def test_invalid_checksum_cannot_turn_off_or_extend_ignition(self):
+    self.safety.ignition_can_hook(self._msg(0))
+    self.safety.ignition_can_hook(self._msg(1))
+    for _ in range(3):
+      self.safety.ignition_can_1hz_tick()
+    self.assertTrue(self.safety.get_ignition_can())
+    msg = self._msg(2, drive_rail=False)
+    msg[0].data[7] ^= 1
+    self.safety.ignition_can_hook(msg)
+    self.assertTrue(self.safety.get_ignition_can())
+    self.safety.ignition_can_1hz_tick()
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_stale_gap_requires_new_pair_on_each_bus(self):
+    for bus in (0, 1):
+      with self.subTest(bus=bus):
+        self.safety.init_tests()
+        for source_bus in (0, 1):
+          self.safety.ignition_can_hook(self._msg(0, bus=source_bus))
+          self.safety.ignition_can_hook(self._msg(1, bus=source_bus))
+        for _ in range(4):
+          self.safety.ignition_can_1hz_tick()
+        self.assertFalse(self.safety.get_ignition_can())
+        self.safety.ignition_can_hook(self._msg(2, bus=bus))
+        self.assertFalse(self.safety.get_ignition_can())
+        self.safety.ignition_can_hook(self._msg(3, bus=bus))
+        self.assertTrue(self.safety.get_ignition_can())
+
+
 if __name__ == "__main__":
   unittest.main()

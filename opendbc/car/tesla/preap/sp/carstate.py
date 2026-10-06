@@ -103,6 +103,7 @@ class PreAPCarState(CarStateBase):
     self.prev_cruise_buttons = 0
     self.msg_stw_actn_req = None
     self.prev_stalk_follow = 0
+    self.stalk_follow_timestamp = 0
     self.speed_units = "MPH"
 
     self.engagement = PreAPEngagement(

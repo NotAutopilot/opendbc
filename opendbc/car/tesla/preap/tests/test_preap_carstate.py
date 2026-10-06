@@ -163,6 +163,33 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
         CS, _ = CI.update(packets)
         self.assertEqual(CS.napStalkFollowDistance, expected)
 
+  def test_follow_detent_timestamp_latches_changes_including_batched_return(self):
+    CI = self._make_interface()
+    state, _ = CI.update([])
+    self.assertEqual(state.napStalkFollowDistanceTimestamp, 0)
+
+    def packet(raw, timestamp):
+      return [(timestamp, self._can_packet("STW_ACTN_RQ", {"DTR_Dist_Rq": raw})[0][1])]
+
+    state, _ = CI.update(packet(100, 100))
+    self.assertEqual((state.napStalkFollowDistance, state.napStalkFollowDistanceTimestamp), (4, 100))
+    for raw, timestamp in ((100, 200), (255, 300), (100, 400)):
+      state, _ = CI.update(packet(raw, timestamp))
+      self.assertEqual(state.napStalkFollowDistanceTimestamp, 100)
+
+    # Both detents arrive before a consumer update; equal final value must not
+    # erase the physical interaction or its ordering against a picker request.
+    state, _ = CI.update(packet(66, 500) + packet(100, 600))
+    self.assertEqual((state.napStalkFollowDistance, state.napStalkFollowDistanceTimestamp), (4, 600))
+    state, _ = CI.update([])
+    self.assertEqual(state.napStalkFollowDistanceTimestamp, 600)
+
+    # Multiple frames in one CAN envelope can share a receive timestamp.
+    frames = packet(66, 700)[0][1] + packet(100, 700)[0][1]
+    state, _ = CI.update([(700, frames)])
+    self.assertEqual(state.napStalkFollowDistance, 4)
+    self.assertGreater(state.napStalkFollowDistanceTimestamp, 600)
+
 
 if __name__ == "__main__":
   unittest.main()

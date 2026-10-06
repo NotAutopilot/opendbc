@@ -97,10 +97,22 @@ class TestTeslaPreAPRadarDonor:
 
   def test_donor_vin_replaces_mux_records(self):
     _send_donor(self.safety, AWD_VIN)
-    mux = bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, mux))
-    assert self.safety.tesla_preap_radar_vin_feed_captured() is True
-    dat = _payload(self.safety, self.safety.tesla_preap_radar_vin_feed_data)
-    assert dat[0] == 0x11
-    assert dat[1:4] == b"SA1"
-    assert dat[4:8] == b"E42F"
+    vin = AWD_VIN.encode("ascii")
+    expected_records = {
+      0x10: bytes([0x10, 0, 0, 0, 0]) + vin[:3],
+      0x11: bytes([0x11]) + vin[3:10],
+      0x12: bytes([0x12]) + vin[10:],
+    }
+    for record, expected in expected_records.items():
+      mux = bytes([record, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x99])
+      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, mux))
+      assert self.safety.tesla_preap_radar_vin_feed_captured() is True
+      assert _payload(self.safety, self.safety.tesla_preap_radar_vin_feed_data) == expected
+
+  def test_other_mux_records_preserve_chassis_payload(self):
+    _send_donor(self.safety, AWD_VIN)
+    for record in (0x00, 0x0F, 0x13, 0xFF):
+      mux = bytes([record, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x99])
+      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, mux))
+      assert self.safety.tesla_preap_radar_vin_feed_captured() is True
+      assert _payload(self.safety, self.safety.tesla_preap_radar_vin_feed_data) == mux

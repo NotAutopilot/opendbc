@@ -9,8 +9,8 @@ source ../../../setup.sh
 # reset coverage data
 rm -f ./libsafety/*.gcda
 
-# run safety tests and generate coverage data
-python -m unittest discover -s .
+# Run both unittest-style and pytest-style safety cases before measuring coverage.
+python -m pytest -n 0 .
 
 # NOTE: we accept that these tools will have slight differences,
 # and in return, we get to use the stock toolchain instead of
