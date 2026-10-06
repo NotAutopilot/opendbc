@@ -118,6 +118,7 @@ class ModularAssistiveDrivingSystem:
   enabled: bool = auto_field()
   active: bool = auto_field()
   available: bool = auto_field()
+  handsOnPaused: bool = auto_field()
 
   class ModularAssistiveDrivingSystemState(StrEnum):
     disabled = auto()

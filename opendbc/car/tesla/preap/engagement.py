@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from opendbc.car import structs
 from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
@@ -39,6 +41,8 @@ class PreAPEngagement:
     self.preap_brake_pressed_prev = False
     self.last_stalk_non_cancel_ms = -10000
     self.prev_steering_disengage = False
+    # The SP adapter wraps this per-instance callback to preserve hands-on pause.
+    self.handle_steering_disengage: Callable[[bool], None] = self._handle_steering_disengage
 
   def _drop_longitudinal_keep_lateral(self):
     was_long_active = self.enableLongControl
@@ -58,7 +62,7 @@ class PreAPEngagement:
     self.pedal_unavailable = True
     self._drop_longitudinal_keep_lateral()
 
-  def handle_steering_disengage(self, steering_disengage):
+  def _handle_steering_disengage(self, steering_disengage: bool) -> None:
     """Reset engagement on steering disengage rising edge."""
     if steering_disengage and not self.prev_steering_disengage:
       was_long_active = self.enableLongControl

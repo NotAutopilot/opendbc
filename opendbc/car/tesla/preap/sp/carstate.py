@@ -163,7 +163,7 @@ class PreAPCarState(CarStateBase):
       and not self._epas_fault
     )
 
-  def _handle_steering_disengage(self, steering_disengage):
+  def _handle_steering_disengage(self, steering_disengage: bool) -> None:
     if self._epas_rejecting or self._epas_fault:
       if steering_disengage:
         self.engagement.prev_steering_disengage = False

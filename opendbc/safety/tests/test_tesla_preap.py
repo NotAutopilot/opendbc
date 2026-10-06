@@ -67,11 +67,8 @@ def _get_preap_vm():
   return VehicleModel(CP)
 
 
-class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
-  # Abstract base class — concrete subclasses (SteeringOnly, WithPedal) do the work.
-  # __test__ = False prevents pytest from collecting this class directly (it still
-  # gets collected via MRO without this, because CarSafetyTest is a TestCase).
-  __test__ = False
+class TeslaPreAPTestMixin:
+  # Only configured concrete classes inherit TestCase and shared safety suites.
   # Pre-AP has no relay and no bus 2 forwarding
   RELAY_MALFUNCTION_ADDRS = {}
   FWD_BUS_LOOKUP = {}
@@ -528,9 +525,44 @@ class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     raise NotImplementedError
 
 
-class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, unittest.TestCase):
+class TestTeslaPreAPRadarWheelSpeeds(unittest.TestCase):
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, PREAP_FLAG_RADAR_EMULATION)
+    self.safety.init_tests()
+    # Complete the host's three-part config before radar emulation can send.
+    for fragment in (bytes([0, 0, 1, 0, 0, 32, 32, 32]),
+                     bytes([1]) + b" " * 7, bytes([2]) + b" " * 7):
+      self.assertFalse(self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, fragment)))
+
+  def test_wheel_speed_packing_boundaries(self):
+    # Raw DI_torque2 speed is mph * 20 + 500. Converted wheel speeds use
+    # 0.04 kph/count; 0xFFF is the input SNA and maps to all 13 bits set.
+    # Include the unsigned low-word sign bit and third-wheel word boundary.
+    cases = ((0, 0), (499, 0), (500, 0), (501, 2),
+             (515, 30), (516, 32), (531, 62), (532, 64),
+             (0xFFE, 7228), (0xFFF, 0x1FFF))
+    for raw_speed, speed in cases:
+      for counter in range(16):
+        with self.subTest(raw_speed=raw_speed, counter=counter):
+          self.setUp()
+          self.assertFalse(self.safety.tesla_preap_radar_wheel_speeds_captured())
+          source = (raw_speed << 16) | (counter << 32)
+          self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x118, 0, source.to_bytes(6, "little")))
+
+          self.assertTrue(self.safety.tesla_preap_radar_wheel_speeds_captured())
+          self.assertEqual(self.safety.tesla_preap_radar_wheel_speeds_addr(), 0x169)
+          self.assertEqual(self.safety.tesla_preap_radar_wheel_speeds_bus(), 1)
+          self.assertEqual(self.safety.tesla_preap_radar_wheel_speeds_dlc(), 8)
+          data = bytes(self.safety.tesla_preap_radar_wheel_speeds_data(i) for i in range(8))
+          # Assemble the whole 56-bit payload independently of the C split.
+          payload = sum(speed << (13 * wheel) for wheel in range(4)) | (counter << 52)
+          expected = payload.to_bytes(7, "little")
+          self.assertEqual(data, expected + bytes([(0x76 + sum(expected)) & 0xFF]))
+
+
+class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, common.CarSafetyTest, common.AngleSteeringSafetyTest):
   """Pre-AP with no pedal — lateral only."""
-  __test__ = True  # re-enable collection (mixin sets __test__=False)
 
   def setUp(self):
     super().setUp()
@@ -563,9 +595,8 @@ class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, unittest.TestCase):
                     "rx_checks must stay valid without a pedal installed")
 
 
-class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
+class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, common.CarSafetyTest, common.AngleSteeringSafetyTest):
   """Pre-AP with Comma Pedal enabled."""
-  __test__ = True  # re-enable collection (mixin sets __test__=False)
 
   def setUp(self):
     super().setUp()

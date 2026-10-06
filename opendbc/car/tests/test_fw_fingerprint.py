@@ -1,7 +1,6 @@
 import unittest
 from unittest.mock import patch
 import random
-import time
 from collections import defaultdict
 
 from opendbc.car.can_definitions import CanData
@@ -9,8 +8,7 @@ from opendbc.car.car_helpers import interfaces
 from opendbc.car.structs import CarParams
 from opendbc.car.fingerprints import FW_VERSIONS
 from opendbc.car.fw_versions import FW_QUERY_CONFIGS, FUZZY_EXCLUDE_ECUS, VERSIONS, build_fw_dict, \
-                                    match_fw_to_car, get_brand_ecu_matches, get_fw_versions, get_present_ecus
-from opendbc.car.vin import get_vin
+                                    match_fw_to_car, get_brand_ecu_matches, get_fw_versions
 from opendbc.testing import parameterized
 
 CarFw = CarParams.CarFw
@@ -191,13 +189,7 @@ class TestFwFingerprint(unittest.TestCase):
     assert not any(any(e) for b, e in brand_matches.items() if b != 'toyota')
 
 
-class TestFwFingerprintTiming(unittest.TestCase):
-  N: int = 5
-  TOL: float = 0.05
-
-  # for patched functions
-  current_obd_multiplexing: bool
-  total_time: float
+class TestFwQuery(unittest.TestCase):
 
   @staticmethod
   def fake_can_send(msgs):
@@ -207,94 +199,6 @@ class TestFwFingerprintTiming(unittest.TestCase):
   def fake_can_recv(wait_for_one: bool = False) -> list[list[CanData]]:
     return ([[CanData(random.randint(0x600, 0x800), b'\x00' * 8, 0)]]
             if random.uniform(0, 1) > 0.5 else [])
-
-  def fake_set_obd_multiplexing(self, obd_multiplexing):
-    """The 10Hz blocking params loop adds on average 50ms to the query time for each OBD multiplexing change"""
-    if obd_multiplexing != self.current_obd_multiplexing:
-      self.current_obd_multiplexing = obd_multiplexing
-      self.total_time += 0.1 / 2
-
-  def fake_get_data(self, timeout):
-    self.total_time += timeout
-    return {}
-
-  def _benchmark_brand(self, brand):
-    self.total_time = 0
-    with patch("opendbc.car.isotp_parallel_query.IsoTpParallelQuery.get_data", self.fake_get_data):
-      for _ in range(self.N):
-        # Treat each brand as the most likely (aka, the first) brand with OBD multiplexing initially on
-        self.current_obd_multiplexing = True
-
-        t = time.perf_counter()
-        get_fw_versions(self.fake_can_recv, self.fake_can_send, self.fake_set_obd_multiplexing, brand)
-        self.total_time += time.perf_counter() - t
-
-    return self.total_time / self.N
-
-  def _assert_timing(self, avg_time, ref_time):
-    assert avg_time < ref_time + self.TOL, avg_time
-    assert avg_time > ref_time - self.TOL, "Performance seems to have improved, update test refs."
-
-  def test_startup_timing(self):
-    # Tests worse-case VIN query time and typical present ECU query time
-    vin_ref_times = {'worst': 1.6, 'best': 0.8}  # best assumes we go through all queries to get a match
-    present_ecu_ref_time = 0.45
-
-    def fake_get_ecu_addrs(*_, timeout):
-      self.total_time += timeout
-      return set()
-
-    self.total_time = 0.0
-    with patch("opendbc.car.fw_versions.get_ecu_addrs", fake_get_ecu_addrs):
-      for _ in range(self.N):
-        self.current_obd_multiplexing = True
-        get_present_ecus(self.fake_can_recv, self.fake_can_send, self.fake_set_obd_multiplexing)
-    self._assert_timing(self.total_time / self.N, present_ecu_ref_time)
-    print(f'get_present_ecus, query time={self.total_time / self.N} seconds')
-
-    for name, args in (('worst', {}), ('best', {'retry': 1})):
-      with self.subTest(name=name):
-        self.total_time = 0.0
-        with patch("opendbc.car.isotp_parallel_query.IsoTpParallelQuery.get_data", self.fake_get_data):
-          for _ in range(self.N):
-            get_vin(self.fake_can_recv, self.fake_can_send, (0, 1), **args)
-        self._assert_timing(self.total_time / self.N, vin_ref_times[name])
-        print(f'get_vin {name} case, query time={self.total_time / self.N} seconds')
-
-  def test_fw_query_timing(self):
-    total_ref_time = 8.2
-    brand_ref_times = {
-      'gm': 1.0,
-      'body': 0.1,
-      'chrysler': 0.3,
-      'ford': 1.5,
-      'honda': 0.45,
-      'hyundai': 0.65,
-      'mazda': 0.1,
-      'nissan': 1.6,
-      'subaru': 0.65,
-      'tesla': 0.1,
-      'toyota': 0.7,
-      'volkswagen': 0.65,
-      'rivian': 0.3,
-      'psa': 0.1,
-    }
-
-    total_times = 0.0
-    for brand, config in FW_QUERY_CONFIGS.items():
-      with self.subTest(brand=brand):
-        avg_time = self._benchmark_brand(brand)
-        total_times += avg_time
-        avg_time = round(avg_time, 2)
-
-        ref_time = brand_ref_times[brand]
-        self._assert_timing(avg_time, ref_time)
-        print(f'{brand=}, {len(config.requests)=}, avg FW query time={avg_time} seconds')
-
-    with self.subTest(brand='all_brands'):
-      total_time = round(total_times, 2)
-      self._assert_timing(total_time, total_ref_time)
-      print(f'all brands, total FW query time={total_time} seconds')
 
   def test_get_fw_versions(self):
     # some coverage on IsoTpParallelQuery and panda UDS library

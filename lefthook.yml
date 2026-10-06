@@ -28,3 +28,6 @@ test:
     # *** tests ***
     unittest:
       run: unittest-parallel -j4
+    pytest:
+      # unittest discovery imports these modules but does not run their function tests.
+      run: pytest opendbc/car/tesla/preap/tests

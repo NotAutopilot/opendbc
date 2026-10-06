@@ -504,18 +504,18 @@ class TestInnerPID:
   def test_pid_correction_reduces_steady_state_error(self):
     """With feedback from the plant, system should settle near the target."""
     vdas = VirtualDAS(dt=0.02)
-    hist = _simulate_plant(vdas, a_cmd=1.0, v_ego=15.0, dt=0.02, n_steps=500)
-    final_error = abs(hist[-1]['a_actual'] - 1.0)
+    history = _simulate_plant(vdas, a_cmd=1.0, v_ego=15.0, dt=0.02, n_steps=500)
+    final_error = abs(history[-1]['a_actual'] - 1.0)
     assert final_error < 0.5, f"Steady-state error too large: {final_error}"
 
   def test_settling_time(self):
     """System should settle within 3 seconds for a 1 m/s² step."""
     vdas = VirtualDAS(dt=0.02)
-    hist = _simulate_plant(vdas, a_cmd=1.0, v_ego=15.0, dt=0.02, n_steps=300)
+    history = _simulate_plant(vdas, a_cmd=1.0, v_ego=15.0, dt=0.02, n_steps=300)
 
     settled = False
-    for i in range(len(hist) - 10):
-      window = hist[i:i+10]
+    for i in range(len(history) - 10):
+      window = history[i:i+10]
       if all(abs(h['a_actual'] - 1.0) < 0.3 for h in window):
         settle_time = i * 0.02
         settled = True
@@ -1475,8 +1475,10 @@ class TestVDASDomainBoundaries:
     assert (vdas.inner_pid.i - initial_integral_mps2) * blocked_direction < 0.0
 
   def test_transient_grade_compensation_enters_feedforward_in_acceleration_domain(self):
-    class FixedGradeEstimator:
-      def update(self, _orientation_ned):
+    from opendbc.car.tesla.preap.virtual_das import GradeEstimator
+
+    class FixedGradeEstimator(GradeEstimator):
+      def update(self, orientation_ned: list) -> tuple[float, float]:
         return 0.0, 0.2
 
     vdas = VirtualDAS(dt=0.02)

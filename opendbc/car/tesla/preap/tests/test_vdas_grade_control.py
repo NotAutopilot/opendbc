@@ -677,7 +677,7 @@ def assert_speed_ramp_transition_is_smooth(
   assert samples[-1].speed_mps >= SPEED_RAMP_FINAL_MPS
   assert rolling_mean_droop_mps2 <= SPEED_RAMP_DROOP_LIMIT_MPS2, (
     f"{SPEED_RAMP_ROLLING_WINDOW_S:.2f} s mean drooped {rolling_mean_droop_mps2:.3f} m/s²; "
-    + f"warmup mean {warmup_mean_acceleration_mps2:.3f} m/s²; "
+    + f"warm-up mean {warmup_mean_acceleration_mps2:.3f} m/s²; "
     + f"accumulated tracking error {accumulated_tracking_error_mps:.3f} m/s"
   )
   assert accumulated_tracking_error_mps <= SPEED_RAMP_TRACKING_ERROR_LIMIT_MPS

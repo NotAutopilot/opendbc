@@ -22,7 +22,7 @@ import numpy as np
 from opendbc.car.tesla.preap.constants import ACCEL_PREAP_BP, ACCEL_PREAP_PROFILES
 
 # Mirror the constants from carcontroller.py so the test fails loudly if
-# they're renamed or retuned without updating the test.
+# they're renamed or their tuning changes without updating the test.
 ENGAGE_GRACE_FRAMES = 50
 
 

@@ -57,11 +57,20 @@ cd opendbc
 ./test.sh
 
 # here are the individual commands it runs
-pip3 install -e .[testing,docs]  # install dependencies
-scons -j8                        # build with 8 cores
-unittest-parallel                # run the tests
-lefthook run lint                # run the linter
+source setup.sh                  # install the locked test dependencies
+uv lock --check                  # check dependency metadata
+lefthook run test                # run static analysis and both test runners
 ```
+
+The standalone test hook runs unittest discovery and the Pre-AP pytest suite;
+unittest discovery alone does not execute pytest function tests. Native openpilot
+Params integration belongs to the parent repository's
+`openpilot/selfdrive/car/tests/test_tesla_preap_params.py`, which runs in its Tesla
+regression and unit-test jobs rather than installing openpilot into this library.
+For NotAutopilot's `naponsp-dev` target, model CI uses the matching
+`NotAutopilot/openpilot` branch; other targets retain `sunnypilot/sunnypilot`
+`master`. Model-runner dependencies are declared separately in the `models`
+dependency group.
 
 [`examples/`](examples/) contains small example programs that can read state from the car and control the steering, gas, and brakes.
 [`examples/joystick.py`](examples/joystick.py) allows you to control a car with a joystick.

@@ -1,18 +1,28 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from opendbc.can.parser import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.tesla.values import DBC, CANBUS, CAR
 from opendbc.car.interfaces import RadarInterfaceBase
 
+if TYPE_CHECKING:
+  from opendbc.car.tesla.preap.nap_conf import NAPConf
+  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch as _BoschTableFreezeWatch
+
+nap_conf: "NAPConf | None"
+BoschTableFreezeWatch: "type[_BoschTableFreezeWatch] | None"
+
 # Optional NAP config import (available on device/runtime)
 try:
-  from opendbc.car.tesla.preap.nap_conf import nap_conf
+  from opendbc.car.tesla.preap.nap_conf import nap_conf as _nap_conf
+  nap_conf = _nap_conf
 except ImportError:
   nap_conf = None
 
 try:
-  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
+  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch as _BoschTableFreezeWatch
+  BoschTableFreezeWatch = _BoschTableFreezeWatch
 except ImportError:
   BoschTableFreezeWatch = None
 
@@ -161,9 +171,9 @@ class BoschTrackLifecycle:
 
 
 class RadarInterface(RadarInterfaceBase):
-  def __init__(self, CP):
-    super().__init__(CP)
-    self.CP = CP
+  def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP | None = None):
+    # Standalone Pre-AP users have no SP settings; do not mutate the shared base.
+    super().__init__(CP, structs.CarParamsSP() if CP_SP is None else CP_SP)
 
     self.continental_radar = False
     self.bosch_radar = CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP
