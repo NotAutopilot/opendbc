@@ -223,6 +223,7 @@ struct CarState {
   enableLongControl @78 :Bool;  # Pre-AP: FSM longitudinal intent; survives gas override
   napStalkFollowDistance @79 :UInt8;  # NAP: physical STW DTR; 0=unavailable/SNA, 1..7
   napStalkFollowDistanceTimestamp @80 :UInt64;  # Pre-AP: latched monotonic CAN detent time; retained through SNA
+  napStalkFollowDistanceValidTimestamp @81 :UInt64;  # Pre-AP: last valid 1..7 carState publication logMonoTime, retained through outages
 
   # cruise state
   cruiseState @10 :CruiseState;
