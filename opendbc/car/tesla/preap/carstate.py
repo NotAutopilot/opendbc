@@ -115,11 +115,6 @@ def update_preap(cs, can_parsers):
   elif speed_units == "MPH":
     ret.vEgoCluster = digital_speed * CV.MPH_TO_MS
 
-  if cs.enableLongControl and nap_conf.use_pedal:
-    ret.cruiseState.speed = cs.pedal_speed_kph * CV.KPH_TO_MS
-  elif speed_units is not None:
-    ret.cruiseState.speed = max(ret.vEgoCluster, 1e-3)
-
   ret.cruiseState.standstill = False
   ret.standstill = cruise_state == "STANDSTILL"
   ret.accFaulted = cruise_state == "FAULT"
@@ -180,6 +175,15 @@ def update_preap(cs, can_parsers):
 
   can_engage = cs.engagement.check_can_engage(ret.doorOpen, ret.gearShifter, ret.seatbeltUnlatched)
   ret.cruiseState.enabled = cs.engagement.cruiseEnabled and can_engage
+
+  # Publish the retained driver ceiling after processing this frame's gesture,
+  # independent of authority. A negative speed means no pedal target yet.
+  if use_pedal:
+    ret.cruiseState.speed = (cs.engagement.pedal_speed_kph * CV.KPH_TO_MS
+                            if cs.engagement.target_speed_initialized else -1.0)
+  elif speed_units is not None:
+    ret.cruiseState.speed = max(ret.vEgoCluster, 1e-3)
+  ret.cruiseState.speedCluster = ret.cruiseState.speed
 
   # Bridge engagement state for carcontroller
   cs.cruiseEnabled = cs.engagement.cruiseEnabled

@@ -967,3 +967,51 @@ def test_grade_hold_survives_speed_and_plant_uncertainty(
     1.0,
     uphill_load_mps2,
   )
+
+
+@pytest.mark.parametrize(("initial_grade_mps2", "final_grade_mps2"), [
+  (0.0, 0.0),    # flat
+  (0.0, 0.8),    # enter uphill
+  (0.0, -0.8),   # enter downhill
+  (0.8, 0.0),    # crest onto flat
+  (-0.8, 0.0),   # dip onto flat
+  (0.8, -0.8),   # crest into descent
+  (-0.8, 0.8),   # dip into climb
+  (0.0, 1.2),    # steep, within actuator effort limits for each target
+  (0.0, -1.2),
+])
+@pytest.mark.parametrize("target_mps2", [-0.2, 0.0, 0.2])
+def test_grade_transition_feedforward_cannot_overshoot_physical_load(
+    monkeypatch, initial_grade_mps2, final_grade_mps2, target_mps2):
+  controller = VirtualDAS(dt=CONTROL_DT_S)
+  # Observe effort directly: no pedal model, actuator lag, or learned trim can
+  # hide an estimator overshoot. Feedback is exactly on target throughout.
+  monkeypatch.setattr(controller, "_feedforward", lambda effort, _speed: effort)
+  monkeypatch.setattr(
+    virtual_das, "nap_conf",
+    SimpleNamespace(get_pedal_profile_values=lambda: [50.0] * len(virtual_das.PEDAL_BP)),
+  )
+  initial_orientation = [0.0, math.asin(initial_grade_mps2 / GRAVITY), 0.0]
+  for _ in range(round(12.0 / CONTROL_DT_S)):
+    controller.observe(target_mps2, initial_orientation)
+  controller.reset(
+    measured_accel=target_mps2, commanded_accel=target_mps2,
+    pedal_di_init=target_mps2 + initial_grade_mps2, preserve_grade=True,
+  )
+
+  final_orientation = [0.0, math.asin(final_grade_mps2 / GRAVITY), 0.0]
+  initial_net_error = initial_grade_mps2 - final_grade_mps2
+  previous_error = initial_net_error
+  for _ in range(round(6.0 / CONTROL_DT_S)):
+    effort = controller.update(
+      target_mps2, v_ego=15.0, prev_pedal_di=controller.prev_pedal_di,
+      a_ego=target_mps2, freeze_integrator=True, orientation_ned=final_orientation,
+    )
+    # Newton's law: gravity subtracts uphill load from tractive effort.
+    net_acceleration = effort - final_grade_mps2
+    net_error = net_acceleration - target_mps2
+    assert min(initial_net_error, 0.0) - 1e-8 <= net_error <= max(initial_net_error, 0.0) + 1e-8
+    assert abs(net_error) <= abs(previous_error) + 1e-8
+    assert controller.inner_pid.i == pytest.approx(0.0, abs=1e-8)
+    previous_error = net_error
+  assert net_acceleration == pytest.approx(target_mps2, abs=1e-4)

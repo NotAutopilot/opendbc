@@ -985,12 +985,50 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertFalse(self.safety.get_steering_control_inhibited())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
-  def test_disabled_held_stalk_does_not_arm(self):
-    self._rx(self._epas(hands=2))
+  def test_deliberate_pull_admitted_while_hands_block_steering(self):
+    for encoded, hands in ((0, 3), (1, 1), (2, 2), (3, 3)):
+      with self.subTest(encoded=encoded, hands=hands):
+        self._init(PREAP_FLAG_HANDS_ON_PAUSE | (encoded << PREAP_HANDS_ON_LEVEL_SHIFT))
+        self._rx(self._epas(hands=hands))
+        self.assertTrue(self.safety.get_steering_control_inhibited())
+        self.assertFalse(self.safety.get_controls_allowed_lateral())
+        self._rx(self._stalk(True))
+        self.assertTrue(self.safety.get_controls_allowed())
+        self.assertTrue(self.safety.get_controls_allowed_lateral())
+        self.assertFalse(self._tx(self._steer(True)))
+        self.assertTrue(self._tx(self._steer(False)))
+        self.safety.set_timer(0)
+        self._rx(self._epas(hands=0))
+        self.safety.set_timer(999999)
+        self._rx(self._epas(hands=0))
+        self.assertFalse(self._tx(self._steer(True)))
+        self.safety.set_timer(1000000)
+        self._rx(self._epas(hands=0))
+        self.assertFalse(self.safety.get_steering_control_inhibited())
+        self.assertTrue(self._tx(self._steer(True)))
+
+  def test_fresh_pull_cannot_bypass_epas_fault_or_pause_disabled(self):
+    for flags, status, error in ((0, 1, 0), (PREAP_FLAG_HANDS_ON_PAUSE, 3, 0),
+                                 (PREAP_FLAG_HANDS_ON_PAUSE, 0, 6)):
+      with self.subTest(flags=flags, status=status, error=error):
+        self._init(flags)
+        self._rx(self._epas(hands=3, eac_status=status, eac_error=error))
+        self._rx(self._stalk(True))
+        self.assertFalse(self.safety.get_controls_allowed())
+        self.assertFalse(self.safety.get_controls_allowed_lateral())
+        self.assertFalse(self._tx(self._steer(True)))
+
+  def test_cancel_clears_permission_and_new_pull_reinhibits_held_hands(self):
+    self._rx(self._epas(hands=3))
+    self._rx(self._stalk(True))
+    self.safety.set_timer(1000000)
+    self._rx(self._stalk(False))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
     self.assertFalse(self.safety.get_steering_control_inhibited())
     self._rx(self._stalk(True))
-    self.assertFalse(self.safety.get_controls_allowed())
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self.safety.get_steering_control_inhibited())
+    self.assertFalse(self._tx(self._steer(True)))
 
   def test_door_while_paused_exits(self):
     self.safety.set_controls_allowed_lateral(True)
@@ -1069,7 +1107,7 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertFalse(self._tx(self._steer(True)))
     self.assertTrue(self._tx(self._steer(False)))
 
-  def test_pause_does_not_start_inactive_long_or_pedal_tx(self):
+  def test_pause_needs_deliberate_pull_to_start_inactive_long(self):
     self._init(PREAP_FLAG_HANDS_ON_PAUSE | PREAP_FLAG_ENABLE_PEDAL)
     self.safety.set_controls_allowed(False)
     self.safety.set_controls_allowed_lateral(True)
@@ -1080,15 +1118,16 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertFalse(self._tx(self._steer(True)))
     self._rx(self._idle())
     self._rx(self._stalk(True))
-    self.assertFalse(self.safety.get_controls_allowed())
-    self.assertFalse(self._tx(self._gas_enable()))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(self._gas_enable()))
+    self.assertFalse(self._tx(self._steer(True)))
     self.safety.set_timer(0)
     self._rx(self._epas(hands=0))
     self.safety.set_timer(1000000)
     self._rx(self._epas(hands=0))
     self.assertFalse(self.safety.get_steering_control_inhibited())
-    self.assertFalse(self.safety.get_controls_allowed())
-    self.assertFalse(self._tx(self._gas_enable()))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(self._gas_enable()))
 
   def test_default_off_hands_on_drops_pedal_tx(self):
     self._init(PREAP_FLAG_ENABLE_PEDAL)

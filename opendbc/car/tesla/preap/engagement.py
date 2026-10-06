@@ -26,6 +26,8 @@ class PreAPEngagement:
     self.prev_stalk_pull_time_ms = -1000
 
     self.pedal_speed_kph = 0.0
+    self.target_speed_initialized = False
+    self.last_decel_press_ms = None
     self.longCtrlEvent = None
     self.pedal_unavailable = False
 
@@ -44,7 +46,7 @@ class PreAPEngagement:
       self.enableLongControl = False
       self.enableJustCC = True
       self.pending_enable = False
-      self.pedal_speed_kph = 0.0
+      self.last_decel_press_ms = None
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
 
@@ -64,7 +66,7 @@ class PreAPEngagement:
       self.enableLongControl = False
       self.enableJustCC = False
       self.pending_enable = False
-      self.pedal_speed_kph = 0.0
+      self.last_decel_press_ms = None
       self.stalk_pull_time_ms = 0
       self.prev_stalk_pull_time_ms = -1000
       self.pending_cancel_at_ms = 0
@@ -103,9 +105,8 @@ class PreAPEngagement:
         if pedal_long_allowed and self.enableLongControl:
           self._clear_pedal_unavailable()
         if pedal_long_allowed and self.enableLongControl:
-          self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
+          self._initialize_target_speed(v_ego, speed_units)
         else:
-          self.pedal_speed_kph = 0.0
           if not use_pedal and di_cruise_state == "STANDBY":
             self.preap_cc_engage_needed = True
             self.preap_last_cc_spoof_ms = curr_time_ms
@@ -141,6 +142,7 @@ class PreAPEngagement:
       self.enableLongControl = False
       self.enableJustCC = False
       self.pending_enable = False
+      self.last_decel_press_ms = None
       self._clear_pedal_unavailable()
     return can_engage
 
@@ -162,9 +164,8 @@ class PreAPEngagement:
         self._clear_pedal_unavailable()
       if pedal_long_allowed and self.enableLongControl:
         self.longCtrlEvent = "pccEnabled"
-        self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
+        self._initialize_target_speed(v_ego, speed_units)
       else:
-        self.pedal_speed_kph = 0.0
         # Always fire engage_needed on a no-pedal double-pull. The first pull
         # already fired an immediate cancel; even if di_cruise_state still
         # reads ENABLED at this frame (CAN lag — DI hasn't observed the cancel
@@ -180,7 +181,6 @@ class PreAPEngagement:
       self.cruiseEnabled = True
       self.enableLongControl = False
       self.enableJustCC = True
-      self.pedal_speed_kph = 0.0
       self.pending_enable = True
       if was_long_active:
         self.longCtrlEvent = "pccDisabled"
@@ -200,6 +200,8 @@ class PreAPEngagement:
     be = structs.CarState.ButtonEvent()
     be.pressed = cruise_buttons != CruiseButtons.IDLE
     state = cruise_buttons if be.pressed else prev_cruise_buttons
+    if be.pressed and not CruiseButtons.is_decel(state):
+      self.last_decel_press_ms = None
 
     if state == CruiseButtons.MAIN:
       be.type = ButtonType.setCruise
@@ -220,7 +222,7 @@ class PreAPEngagement:
         self.enableLongControl = False
         self.enableJustCC = False
         self.pending_enable = False
-        self.pedal_speed_kph = 0.0
+        self.last_decel_press_ms = None
         self.stalk_pull_time_ms = 0
         self.prev_stalk_pull_time_ms = -1000
         self.pending_cancel_at_ms = 0
@@ -250,18 +252,33 @@ class PreAPEngagement:
       be.type = ButtonType.decelCruise
       if be.pressed:
         self.last_stalk_non_cancel_ms = curr_time_ms
-        if use_pedal and self.enableLongControl:
-          speed_uom_kph = CV.MPH_TO_KPH if speed_units == "MPH" else 1.0
-          if state == CruiseButtons.DECEL_SET:
-            self.pedal_speed_kph -= speed_uom_kph
+        if use_pedal:
+          # A detent change during one held press is not a second tap.
+          fresh_tap = prev_cruise_buttons == CruiseButtons.IDLE
+          double_down = (fresh_tap and self.last_decel_press_ms is not None
+                         and 0 <= curr_time_ms - self.last_decel_press_ms < self.double_pull_window_ms)
+          if double_down:
+            self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
+            self.target_speed_initialized = True
+            self.last_decel_press_ms = None
           else:
-            self.pedal_speed_kph -= 5 * speed_uom_kph
-          self.pedal_speed_kph = max(self.pedal_speed_kph, 0.0)
+            if fresh_tap:
+              self.last_decel_press_ms = curr_time_ms
+            if self.enableLongControl:
+              speed_uom_kph = CV.MPH_TO_KPH if speed_units == "MPH" else 1.0
+              decrement = 1 if state == CruiseButtons.DECEL_SET else 5
+              self.pedal_speed_kph = max(self.pedal_speed_kph - decrement * speed_uom_kph, 0.0)
 
     else:
       be.type = ButtonType.unknown
 
     return be
+
+  def _initialize_target_speed(self, v_ego, speed_units):
+    """Resume the driver's ceiling; only the first engagement captures speed."""
+    if not self.target_speed_initialized:
+      self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units)
+      self.target_speed_initialized = True
 
   @staticmethod
   def _capture_target_speed(v_ego, speed_units):

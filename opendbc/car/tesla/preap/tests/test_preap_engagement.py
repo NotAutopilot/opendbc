@@ -8,6 +8,9 @@ This test verifies that the brake properly drops longitudinal while keeping late
 import unittest
 
 from opendbc.car.tesla.preap.engagement import PreAPEngagement
+from opendbc.car import structs
+from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.tesla.values import CruiseButtons
 
 
 class TestPreAPBrakeDisengage(unittest.TestCase):
@@ -284,6 +287,106 @@ class TestNoPedalUpDownPassthrough(unittest.TestCase):
 
     self.assertFalse(eng.enableLongControl)
     self.assertEqual(eng.pedal_speed_kph, 0.0)
+
+
+class TestRetainedCruiseTarget(unittest.TestCase):
+  def setUp(self):
+    self.eng = PreAPEngagement(True, 750)
+    self.previous = CruiseButtons.IDLE
+
+  def press(self, button, time_ms, speed=20.0, units="KPH", brake=False, pedal=True):
+    self.eng.process_buttons(button, self.previous, time_ms, speed, units, pedal, pedal, True, brake)
+    self.previous = button
+
+  def tap(self, button, time_ms, **kwargs):
+    self.press(button, time_ms, **kwargs)
+    self.press(CruiseButtons.IDLE, time_ms + 10, **kwargs)
+
+  def engage(self):
+    self.tap(CruiseButtons.MAIN, 1000)
+    self.assertFalse(self.eng.enableLongControl)
+    self.tap(CruiseButtons.MAIN, 1300)
+    self.assertTrue(self.eng.enableLongControl)
+    self.assertEqual(self.eng.pedal_speed_kph, 72.0)
+
+  def test_cancel_retains_and_double_pull_resumes_not_current_speed(self):
+    self.engage()
+    self.tap(CruiseButtons.CANCEL, 2500)
+    self.assertFalse(self.eng.cruiseEnabled)
+    self.assertFalse(self.eng.enableLongControl)
+    self.assertEqual(self.eng.pedal_speed_kph, 72.0)
+    self.tap(CruiseButtons.MAIN, 4000, speed=10.0)
+    self.assertTrue(self.eng.cruiseEnabled)
+    self.assertFalse(self.eng.enableLongControl)
+    self.assertEqual(self.eng.pedal_speed_kph, 72.0)
+    self.tap(CruiseButtons.MAIN, 4300, speed=10.0)
+    self.assertTrue(self.eng.enableLongControl)
+    self.assertEqual(self.eng.pedal_speed_kph, 72.0)
+
+  def test_brake_fault_and_prerequisite_revocation_retain_without_authority(self):
+    for revoke in ("brake", "steering", "pedal", "door", "seatbelt", "gear"):
+      with self.subTest(revoke=revoke):
+        self.setUp()
+        self.engage()
+        if revoke == "brake":
+          self.press(CruiseButtons.IDLE, 2000, brake=True)
+        elif revoke == "steering":
+          self.eng.handle_steering_disengage(True)
+        elif revoke == "pedal":
+          self.eng.handle_pedal_unavailable()
+        else:
+          gear = structs.CarState.GearShifter.park if revoke == "gear" else structs.CarState.GearShifter.drive
+          self.eng.check_can_engage(revoke == "door", gear, revoke == "seatbelt")
+        self.assertFalse(self.eng.enableLongControl)
+        self.assertEqual(self.eng.pedal_speed_kph, 72.0)
+
+  def test_held_brake_blocks_resume_even_with_retained_target(self):
+    self.engage()
+    self.press(CruiseButtons.IDLE, 2000, brake=True)
+    self.tap(CruiseButtons.MAIN, 3000, brake=True)
+    self.tap(CruiseButtons.MAIN, 3300, brake=True)
+    self.assertFalse(self.eng.enableLongControl)
+    self.assertEqual(self.eng.pedal_speed_kph, 72.0)
+
+  def test_double_down_captures_current_in_both_units_without_engaging(self):
+    for units, speed, expected in (("KPH", 13.7, 49.0), ("MPH", 13.7, 31 * CV.MPH_TO_KPH)):
+      with self.subTest(units=units):
+        self.setUp()
+        self.tap(CruiseButtons.DECEL_SET, 1000, speed=speed, units=units)
+        self.assertFalse(self.eng.target_speed_initialized)
+        self.tap(CruiseButtons.DECEL_SET, 1300, speed=speed, units=units)
+        self.assertTrue(self.eng.target_speed_initialized)
+        self.assertAlmostEqual(self.eng.pedal_speed_kph, expected)
+        self.assertFalse(self.eng.cruiseEnabled)
+        self.assertFalse(self.eng.enableLongControl)
+
+  def test_single_down_and_full_detent_are_adjustments_not_capture(self):
+    self.engage()
+    self.press(CruiseButtons.DECEL_SET, 2000, speed=10.0)
+    self.assertEqual(self.eng.pedal_speed_kph, 71.0)
+    self.press(CruiseButtons.DECEL_2ND, 2050, speed=10.0)
+    self.assertEqual(self.eng.pedal_speed_kph, 66.0)
+    self.press(CruiseButtons.IDLE, 2100)
+    self.tap(CruiseButtons.DECEL_SET, 3000, speed=10.0)
+    self.assertEqual(self.eng.pedal_speed_kph, 65.0)
+    self.tap(CruiseButtons.DECEL_SET, 3300, speed=10.0)
+    self.assertEqual(self.eng.pedal_speed_kph, 36.0)
+    self.assertTrue(self.eng.enableLongControl)
+
+  def test_window_boundary_and_intervening_up_do_not_capture(self):
+    self.engage()
+    self.tap(CruiseButtons.DECEL_SET, 2000, speed=10.0)
+    self.tap(CruiseButtons.DECEL_SET, 2750, speed=10.0)
+    self.assertEqual(self.eng.pedal_speed_kph, 70.0)
+    self.tap(CruiseButtons.RES_ACCEL, 2850, speed=10.0)
+    self.tap(CruiseButtons.DECEL_SET, 2900, speed=10.0)
+    self.assertEqual(self.eng.pedal_speed_kph, 70.0)
+
+  def test_no_pedal_double_down_stays_stock_owned(self):
+    self.tap(CruiseButtons.DECEL_SET, 1000, pedal=False)
+    self.tap(CruiseButtons.DECEL_SET, 1300, pedal=False)
+    self.assertFalse(self.eng.target_speed_initialized)
+    self.assertFalse(self.eng.enableLongControl)
 
 
 if __name__ == "__main__":

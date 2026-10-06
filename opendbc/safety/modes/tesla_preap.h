@@ -614,9 +614,9 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     const bool eac_fault = (eac_status == 3);
     preap_hands_on_level = hands_on_level;
     const bool hands_on = hands_on_level >= preap_hands_on_disengage_level;
-    if (preap_hands_on_pause && !eac_fault && !epas_rejecting && hands_on && controls_allowed_lateral) {
-      // Pause lat only. Keep already-active long; do not pcm_cruise_check(false)
-      // and do not admit a new long request while inhibited.
+    if (preap_hands_on_pause && !eac_fault && !epas_rejecting && hands_on) {
+      // Hands inhibit steering output, not deliberate stalk admission.
+      // Latch even before admission so no enabled steer can slip through.
       steering_control_inhibited = true;
       preap_hands_on_clear_timing = false;
       steering_disengage = false;
@@ -721,9 +721,13 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     int lever = msg->data[0] & 0x3FU;
     const bool fresh_pull = (lever == 2) && (cruise_button_prev != 2);
     if (lever == 2) {  // RWD = pull toward driver = enable
-      if (fresh_pull && (preap_gear == 4) && !preap_doors_open &&
-          (preap_hands_on_level < preap_hands_on_disengage_level) &&
-          !steering_control_inhibited) {
+      if (fresh_pull && (preap_gear == 4) && !preap_doors_open && !steering_disengage &&
+          (preap_hands_on_pause || ((preap_hands_on_level < preap_hands_on_disengage_level) &&
+                                   !steering_control_inhibited))) {
+        if (preap_hands_on_pause && (preap_hands_on_level >= preap_hands_on_disengage_level)) {
+          steering_control_inhibited = true;
+          preap_hands_on_clear_timing = false;
+        }
         cruise_engaged_prev = false;
         pcm_cruise_check(true);
         preap_last_stalk_engage_us = microsecond_timer_get();
