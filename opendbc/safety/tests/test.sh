@@ -6,11 +6,12 @@ cd $DIR
 
 source ../../../setup.sh
 
-# reset coverage data
-rm -f ./libsafety/*.gcda
+# Reset coverage data and notes from previous temporary libsafety builds.
+rm -f ./libsafety/*.gcda ./libsafety/*.gcno
 
-# Run both unittest-style and pytest-style safety cases before measuring coverage.
-python -m pytest -n 0 .
+# Preserve the shared unittest suite and collect the plain pytest radar classes.
+python -m unittest discover -s .
+python -m pytest -n 0 test_tesla_preap_radar_carconfig.py test_tesla_preap_radar_donor.py test_tesla_preap_radar_f190.py
 
 # NOTE: we accept that these tools will have slight differences,
 # and in return, we get to use the stock toolchain instead of

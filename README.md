@@ -72,9 +72,9 @@ For NotAutopilot's `naponsp-dev` target, model CI uses the matching
 `master`. Model-runner dependencies are declared separately in the `models`
 dependency group.
 
-The safety coverage gate uses pytest to collect both unittest classes and plain
-pytest classes, including the Pre-AP radar donor cases. Its required line
-coverage remains 100%.
+The safety coverage gate retains unittest discovery and additionally runs the
+plain pytest Pre-AP radar classes. It clears stale coverage notes from temporary
+library builds before testing; its required line coverage remains 100%.
 
 [`examples/`](examples/) contains small example programs that can read state from the car and control the steering, gas, and brakes.
 [`examples/joystick.py`](examples/joystick.py) allows you to control a car with a joystick.

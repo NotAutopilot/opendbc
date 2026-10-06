@@ -221,6 +221,16 @@ class TeslaPreAPTestMixin:
     self._rx(self.packer.make_can_msg_safety("ESP_B", 0, {"ESP_vehicleSpeed": 1.0}))
     self.assertTrue(self.safety.get_vehicle_moving())
 
+  def test_cruise_standstill_clears_moving_without_engaging_controls(self):
+    self._rx(self._speed_msg(10))
+    self.assertTrue(self.safety.get_vehicle_moving())
+    self.safety.set_controls_allowed(False)
+    self._rx(self.packer.make_can_msg_safety("DI_state", 0, {"DI_cruiseState": 3}))
+    self.assertFalse(self.safety.get_vehicle_moving())
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._speed_msg(10))
+    self.assertTrue(self.safety.get_vehicle_moving())
+
   def test_prev_user_brake(self):
     # PRE-AP BRAKE ARCHITECTURE:
     # The panda keeps the framework's brake_pressed=false so generic brake
@@ -949,6 +959,36 @@ class TestTeslaPreAPPedalCalibration(unittest.TestCase):
     self.safety.set_timer(1000001)
     self.assertFalse(self._tx(self._gas(2, 1, 0)))
 
+  def test_counter_progression_wraps_and_replay_does_not_advance_sequence(self):
+    self._prime()
+    for _ in range(17):
+      msg = self._gas(2, 1)
+      self.assertTrue(self._tx(msg))
+      self.assertFalse(self._tx(msg))
+    self.assertTrue(self._tx(self._gas(2, 1)))
+
+  def test_malformed_commands_do_not_consume_next_counter(self):
+    for invalid in ("checksum", "reserved", "fd", "raw_max", "raw2_max"):
+      with self.subTest(invalid=invalid):
+        self._init(PREAP_FLAG_PEDAL_CALIBRATION)
+        self._prime()
+        self.assertTrue(self._tx(self._gas(2, 1)))
+        valid = self._gas(2, 1)
+        payload = bytearray(valid[0].data[0:6])
+        if invalid == "reserved":
+          payload[4] |= 0x10
+        elif invalid == "raw_max":
+          payload[:2] = b"\xff\xff"
+        elif invalid == "raw2_max":
+          payload[2:4] = b"\xff\xff"
+        payload[5] = (0x51 + 0x05 + sum(payload[:5])) & 0xFF
+        if invalid == "checksum":
+          payload[5] ^= 1
+        malformed = libsafety_py.make_CANPacket(0x551, 2, payload)
+        malformed[0].fd = invalid == "fd"
+        self.assertFalse(self._tx(malformed))
+        self.assertTrue(self._tx(valid))
+
 
 class TestTeslaPreAPHandsOnPause(unittest.TestCase):
   def setUp(self):
@@ -1085,6 +1125,24 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self._rx(self._epas(hands=0))
     self.assertTrue(self.safety.get_steering_control_inhibited())
     self.safety.set_timer(1000000)
+    self._rx(self._epas(hands=0))
+    self.assertFalse(self.safety.get_steering_control_inhibited())
+
+  def test_hands_clear_without_lateral_permission_does_not_start_resume_timer(self):
+    self.safety.set_controls_allowed_lateral(False)
+    self._rx(self._epas(hands=2))
+    self._rx(self._epas(hands=0))
+    self.safety.set_timer(2000000)
+    self._rx(self._epas(hands=0))
+    self.assertTrue(self.safety.get_steering_control_inhibited())
+    self.assertFalse(self._tx(self._steer(True)))
+    self.safety.set_controls_allowed_lateral(True)
+    self._rx(self._epas(hands=0))
+    self.assertTrue(self.safety.get_steering_control_inhibited())
+    self.safety.set_timer(2999999)
+    self._rx(self._epas(hands=0))
+    self.assertTrue(self.safety.get_steering_control_inhibited())
+    self.safety.set_timer(3000000)
     self._rx(self._epas(hands=0))
     self.assertFalse(self.safety.get_steering_control_inhibited())
 

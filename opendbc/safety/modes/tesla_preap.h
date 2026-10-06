@@ -48,7 +48,7 @@
 //   - Pedal TX gated by PREAP_FLAG_ENABLE_PEDAL + get_longitudinal_allowed()
 //
 // Completely independent from tesla_legacy.h — has its own hooks struct,
-// counter/checksum functions, init, RX/TX/fwd hooks, and GTW emulation.
+// init, RX/TX/fwd hooks, and GTW emulation.
 // Registered as SAFETY_TESLA_PREAP in declarations.h.
 
 #include "opendbc/safety/declarations.h"
@@ -125,8 +125,6 @@ static uint32_t preap_last_stalk_engage_us = 0;
 #define PREAP_CANCEL_ECHO_WINDOW_US 600000U  // 600ms
 
 // Radar emulation state
-static int preap_radar_status = 0;
-static uint32_t preap_last_radar_signal = 0;
 static uint32_t preap_radar_epas_type = 0U;
 static uint32_t preap_radar_position = 0U;
 static uint8_t preap_radar_vin[17];
@@ -230,54 +228,6 @@ static void preap_apply_radar_vin_msg(const CANPacket_t *msg) {
   }
 }
 
-// ============================================
-// Checksum and counter (for EPAS validation)
-// ============================================
-
-static uint8_t tesla_preap_get_counter(const CANPacket_t *msg) {
-  uint8_t counter = 0U;
-  if (msg->addr == 0x370U) {
-    counter = msg->data[6] & 0x0FU;  // EPAS_sysStatusCounter
-  }
-  return counter;
-}
-
-static uint32_t tesla_preap_get_checksum(const CANPacket_t *msg) {
-  uint32_t checksum = 0U;
-  if (msg->addr == 0x370U) {
-    checksum = msg->data[7];  // EPAS_sysStatusChecksum at byte 7
-  } else if (msg->addr == 0x488U) {
-    checksum = msg->data[3];  // DAS_steeringControlChecksum at byte 3
-  } else {
-    // Other addresses have no checksum handled here.
-  }
-  return checksum;
-}
-
-static uint32_t tesla_preap_compute_checksum(const CANPacket_t *msg) {
-  // Tesla byte-sum checksum: sum of address bytes + all data bytes except checksum byte
-  int checksum_byte = -1;
-  if (msg->addr == 0x370U) {
-    checksum_byte = 7;
-  } else if (msg->addr == 0x488U) {
-    checksum_byte = 3;
-  } else {
-    // Other addresses have no checksum handled here.
-  }
-
-  uint8_t chksum = 0U;
-  if (checksum_byte != -1) {
-    chksum = (uint8_t)(msg->addr & 0xFFU) + (uint8_t)((msg->addr >> 8) & 0xFFU);
-    int len = GET_LEN(msg);
-    for (int i = 0; i < len; i++) {
-      if (i != checksum_byte) {
-        chksum += msg->data[i];
-      }
-    }
-  }
-  return chksum;
-}
-
 static bool tesla_preap_source_fresh(bool seen, uint32_t ts, uint32_t now) {
   return seen && (safety_get_ts_elapsed(now, ts) <= PREAP_CALIBRATION_SOURCE_TIMEOUT_US);
 }
@@ -330,8 +280,14 @@ static int preap_compute_crc8(uint32_t lo, uint32_t hi, unsigned int msg_len) {
 // GTW Emulation helpers
 // ============================================
 
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+static CANPacket_t preap_radar_readdr_capture;
+static CANPacket_t preap_radar_steering_capture;
+static CANPacket_t preap_radar_esp_control_capture;
+#endif
+
 static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
-#if defined(STM32H7) || defined(STM32F4)
+#if defined(ALLOW_DEBUG) || defined(STM32H7) || defined(STM32F4)
   CANPacket_t pkt;
   pkt.returned = 0U;
   pkt.rejected = 0U;
@@ -342,8 +298,13 @@ static void preap_radar_readdr(const CANPacket_t *src, uint16_t new_addr) {
   for (int i = 0; i < GET_LEN(src); i++) {
     pkt.data[i] = src->data[i];
   }
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+  preap_radar_readdr_capture = pkt;
+#endif
+#if defined(STM32H7) || defined(STM32F4)
   can_set_checksum(&pkt);
   can_send(&pkt, 1, true);
+#endif
 #else
   (void)src;
   (void)new_addr;
@@ -467,6 +428,9 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
       }
       PREAP_WORD_TO_BYTES(&pkt.data[0], lo);
       PREAP_WORD_TO_BYTES(&pkt.data[4], hi);
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+      preap_radar_steering_capture = pkt;
+#endif
 #if defined(STM32H7) || defined(STM32F4)
       can_set_checksum(&pkt);
       can_send(&pkt, 1, true);
@@ -484,6 +448,9 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
                          .bus = 1, .addr = 0x1A9, .data_len_code = 5};
       PREAP_WORD_TO_BYTES(&pkt.data[0], syn_lo);
       PREAP_WORD_TO_BYTES(&pkt.data[4], cksm);
+#if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+      preap_radar_esp_control_capture = pkt;
+#endif
 #if defined(STM32H7) || defined(STM32F4)
       can_set_checksum(&pkt);
       can_send(&pkt, 1, true);
@@ -527,21 +494,21 @@ static void tesla_preap_gtw_emulation(const CANPacket_t *to_fwd) {
 #endif
     }
   }
-
-  // Radar status tracking (CAN1 → informational only)
-  if ((bus_num == 1) && preap_radar_emulation) {
-    if ((addr == 0x631) && (preap_radar_status == 0)) {
-      preap_radar_status = 1;
-      preap_last_radar_signal = microsecond_timer_get();
-    }
-    if ((addr == 0x300) && (preap_radar_status == 1)) {
-      preap_radar_status = 2;
-      preap_last_radar_signal = microsecond_timer_get();
-    }
-  }
 }
 
 #if defined(ALLOW_DEBUG) && !defined(STM32H7) && !defined(STM32F4)
+const CANPacket_t *tesla_preap_radar_readdr_packet(void) {
+  return &preap_radar_readdr_capture;
+}
+
+const CANPacket_t *tesla_preap_radar_steering_packet(void) {
+  return &preap_radar_steering_capture;
+}
+
+const CANPacket_t *tesla_preap_radar_esp_control_packet(void) {
+  return &preap_radar_esp_control_capture;
+}
+
 bool tesla_preap_radar_car_config_captured(void) {
   return preap_radar_car_config_captured;
 }
@@ -931,14 +898,9 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
   // DAS_bodyControls (0x3E9): turn-signal actuation. Gate on controls_allowed
   // (matches all other Pre-AP TX) so the indicator can only be driven while
   // openpilot is engaged — on disengage controlsd clears the blinker anyway,
-  // and this is the defense-in-depth backstop. Also bound the turn-indicator
-  // request to valid values (0-3); the field is 2 bits (bit 8 = byte 1 bits
-  // 0-1) so it cannot exceed 3 — a guard if the field width ever changes.
+  // and this is the defense-in-depth backstop. The two-bit turn-indicator
+  // field already encodes only the valid values 0-3.
   if (msg->addr == 0x3E9U) {
-    int turn_req = (msg->data[1] & 0x03U);  // DAS_turnIndicatorRequest at bit 8
-    if (turn_req > 3) {
-      violation = true;
-    }
     if (!(controls_allowed || controls_allowed_lateral)) {
       violation = true;
     }
@@ -997,8 +959,6 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_pedal_tx_counter_seen = false;
   preap_pedal_tx_counter = 0U;
   preap_pedal_can = -1;
-  preap_radar_status = 0;
-  preap_last_radar_signal = 0;
   preap_last_stalk_engage_us = 0;
   preap_radar_position = 0U;
   preap_radar_epas_type = 0U;
@@ -1011,6 +971,9 @@ static safety_config tesla_preap_init(uint16_t param) {
   preap_radar_car_config_captured = false;
   preap_radar_vin_feed_captured = false;
   preap_radar_wheel_speeds_captured = false;
+  preap_radar_readdr_capture = (CANPacket_t){0};
+  preap_radar_steering_capture = (CANPacket_t){0};
+  preap_radar_esp_control_capture = (CANPacket_t){0};
 #endif
 
   // TX whitelist — no harness relay on Pre-AP
@@ -1026,9 +989,8 @@ static safety_config tesla_preap_init(uint16_t param) {
     {0x641, 1, 8, .check_relay = false, .disable_static_blocking = true},  // radar F190 read
   };
 
-  // RX checks — disable EPAS counter/checksum until we verify the Pre-AP
-  // EPAS firmware's checksum matches our compute_checksum exactly.
-  // Mismatched validation caused silent 21s steering dropout.
+  // RX checks — leave EPAS counter/checksum validation disabled until verified
+  // against Pre-AP firmware. Mismatched validation caused silent 21s dropouts.
   static RxCheck preap_rx_checks[] = {
     {.msg = {{0x370, 0, 8, 25U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},   // EPAS_sysStatus
     {.msg = {{0x108, 0, 8, 100U, .ignore_quality_flag = true, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},  // DI_torque1
@@ -1084,8 +1046,5 @@ const safety_hooks tesla_preap_hooks = {
   .rx_all = tesla_preap_gtw_emulation,  // must see ALL CAN traffic for radar GTW forwarding
   .tx = tesla_preap_tx_hook,
   .fwd = tesla_preap_fwd_hook,
-  .get_counter = tesla_preap_get_counter,
-  .get_checksum = tesla_preap_get_checksum,
-  .compute_checksum = tesla_preap_compute_checksum,
   .get_quality_flag_valid = NULL,
 };
