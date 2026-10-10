@@ -4,9 +4,7 @@ on:
   push:
     branches:
       - master
-      - naponsp-dev
   pull_request:
-  workflow_dispatch:
 
 jobs:
   tests:
@@ -109,16 +107,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        repository: ${{ github.repository == 'NotAutopilot/opendbc' && (github.base_ref || github.ref_name) == 'naponsp-dev' && 'NotAutopilot/openpilot' || 'sunnypilot/sunnypilot' }}
-        ref: ${{ github.repository == 'NotAutopilot/opendbc' && (github.base_ref || github.ref_name) == 'naponsp-dev' && 'naponsp-dev' || 'master' }}
+        repository: 'sunnypilot/sunnypilot'
+        ref: 'master'
         submodules: true
     - run: ./tools/op.sh setup
     - run: rm -rf opendbc_repo/
     - uses: actions/checkout@v4
       with:
         path: opendbc_repo
-    - name: Install model test dependencies
-      run: uv pip install --python .venv/bin/python --group opendbc_repo/pyproject.toml:models
     - name: Cache test routes
       id: routes-cache
       uses: actions/cache@v4

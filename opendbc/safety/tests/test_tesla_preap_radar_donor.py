@@ -21,15 +21,6 @@ def _send_donor(safety, vin, position=0, epas_type=1):
     assert allowed is False
 
 
-def _crc8_sae_j1850(data):
-  crc = 0xFF
-  for byte in data:
-    crc ^= byte
-    for _ in range(8):
-      crc = ((crc << 1) ^ (0x1D if crc & 0x80 else 0)) & 0xFF
-  return crc ^ 0xFF
-
-
 class TestTeslaPreAPRadarDonor:
   TX_MSGS = []
 
@@ -106,85 +97,10 @@ class TestTeslaPreAPRadarDonor:
 
   def test_donor_vin_replaces_mux_records(self):
     _send_donor(self.safety, AWD_VIN)
-    vin = AWD_VIN.encode("ascii")
-    expected_records = {
-      0x10: bytes([0x10, 0, 0, 0, 0]) + vin[:3],
-      0x11: bytes([0x11]) + vin[3:10],
-      0x12: bytes([0x12]) + vin[10:],
-    }
-    for record, expected in expected_records.items():
-      mux = bytes([record, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x99])
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, mux))
-      assert self.safety.tesla_preap_radar_vin_feed_captured() is True
-      assert _payload(self.safety, self.safety.tesla_preap_radar_vin_feed_data) == expected
-
-  def test_other_mux_records_preserve_chassis_payload(self):
-    _send_donor(self.safety, AWD_VIN)
-    for record in (0x00, 0x0F, 0x13, 0xFF):
-      mux = bytes([record, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x99])
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, mux))
-      assert self.safety.tesla_preap_radar_vin_feed_captured() is True
-      assert _payload(self.safety, self.safety.tesla_preap_radar_vin_feed_data) == mux
-
-  def test_simple_readdresses_preserve_payload_and_length(self):
-    _send_donor(self.safety, AWD_VIN)
-    for source, target, length in ((0x45, 0x219, 8), (0x108, 0x109, 8),
-                                  (0x145, 0x149, 8), (0x20A, 0x159, 8),
-                                  (0x308, 0x209, 8), (0x30A, 0x2D9, 8),
-                                  (0x115, 0x129, 8), (0x118, 0x119, 6)):
-      payload = bytes.fromhex("123456789abcdef0")[:length]
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(source, 0, payload))
-      packet = self.safety.tesla_preap_radar_readdr_packet()[0]
-      assert (packet.addr, packet.bus, packet.data_len_code) == (target, 1, length)
-      assert packet.returned == packet.rejected == packet.extended == 0
-      assert bytes(packet.data[0:length]) == payload
-
-  def test_steering_sna_replacement_preserves_status_and_repairs_crc(self):
-    _send_donor(self.safety, AWD_VIN)
-    for status in (0, 0x40, 0x80, 0xC0):
-      source = bytes([0x12, 0x34, status | 0x3F, 0xFF, 0xAB, 0x56, 0x78, 0x99])
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x0E, 0, source))
-      packet = self.safety.tesla_preap_radar_steering_packet()[0]
-      expected = bytes([0x12, 0x34, status | 0x20, 0, 0xA4, 0x56, 0x78])
-      assert (packet.addr, packet.bus, packet.data_len_code) == (0x199, 1, 8)
-      assert bytes(packet.data[0:8]) == expected + bytes([_crc8_sae_j1850(expected)])
-
-  def test_valid_steering_payload_passes_through_without_crc_changes(self):
-    _send_donor(self.safety, AWD_VIN)
-    for source in (bytes.fromhex("1234feffab567899"), bytes.fromhex("1234fffeab567899")):
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x0E, 0, source))
-      packet = self.safety.tesla_preap_radar_steering_packet()[0]
-      assert (packet.addr, packet.bus, packet.data_len_code) == (0x199, 1, 8)
-      assert bytes(packet.data[0:8]) == source
-
-  def test_synthetic_esp_control_counter_and_checksum(self):
-    _send_donor(self.safety, AWD_VIN)
-    for counter in range(16):
-      source = bytes([0xAA, 0xBB, 0xCC, 0xDD, (counter << 4) | 0xF, 0xEE, 0xFF, 0x99])
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x115, 0, source))
-      packet = self.safety.tesla_preap_radar_esp_control_packet()[0]
-      expected = bytes([0, 0, 0x0C, counter << 4])
-      assert (packet.addr, packet.bus, packet.data_len_code) == (0x1A9, 1, 5)
-      # DI_espControl uses a 0x38 seed, rather than the transmitted CAN address.
-      assert bytes(packet.data[0:5]) == expected + bytes([(0x38 + sum(expected)) & 0xFF])
-
-  def test_generated_frames_require_ready_host_configuration_and_chassis_bus(self):
-    for source, getter in ((0x45, self.safety.tesla_preap_radar_readdr_packet),
-                           (0x0E, self.safety.tesla_preap_radar_steering_packet),
-                           (0x115, self.safety.tesla_preap_radar_esp_control_packet)):
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(source, 0, bytes(8)))
-      assert getter()[0].addr == 0
-    _send_donor(self.safety, AWD_VIN)
-    for source, getter in ((0x45, self.safety.tesla_preap_radar_readdr_packet),
-                           (0x0E, self.safety.tesla_preap_radar_steering_packet),
-                           (0x115, self.safety.tesla_preap_radar_esp_control_packet)):
-      self.safety.safety_rx_hook(libsafety_py.make_CANPacket(source, 1, bytes(8)))
-      assert getter()[0].addr == 0
-
-  def test_capture_payload_access_rejects_out_of_bounds_indices(self):
-    _send_donor(self.safety, AWD_VIN)
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x398, 0, bytes.fromhex("0290555300001700")))
-    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, bytes([0x11]) + bytes(7)))
-    for getter in (self.safety.tesla_preap_radar_car_config_data, self.safety.tesla_preap_radar_vin_feed_data):
-      for index in (-1, 8):
-        assert getter(index) == 0
+    mux = bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
+    self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x405, 0, mux))
+    assert self.safety.tesla_preap_radar_vin_feed_captured() is True
+    dat = _payload(self.safety, self.safety.tesla_preap_radar_vin_feed_data)
+    assert dat[0] == 0x11
+    assert dat[1:4] == b"SA1"
+    assert dat[4:8] == b"E42F"

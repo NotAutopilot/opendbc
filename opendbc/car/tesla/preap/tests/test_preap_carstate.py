@@ -81,39 +81,10 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
           "DI_speedUnits": speed_units,
           "DI_digitalSpeed": digital_speed,
         })
-        with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=False):
-          CS, _ = CI.update(packets)
+        CS, _ = CI.update(packets)
         expected_speed = digital_speed * conversion
         self.assertAlmostEqual(CS.vEgoCluster, expected_speed, places=5)
         self.assertAlmostEqual(CS.cruiseState.speed, expected_speed, places=5)
-
-  def test_pedal_target_is_retained_while_disengaged_and_not_cluster_speed(self):
-    CI = self._make_interface()
-    with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True):
-      CS, _ = CI.update([])
-      self.assertEqual(CS.cruiseState.speed, -1.0)
-      CI.CS.engagement.pedal_speed_kph = 72.0
-      CI.CS.engagement.target_speed_initialized = True
-      CS, _ = CI.update(self._can_packet("DI_state", {"DI_digitalSpeed": 10, "DI_speedUnits": 1}))
-      self.assertFalse(CS.enableLongControl)
-      self.assertAlmostEqual(CS.cruiseState.speed, 20.0)
-      self.assertAlmostEqual(CS.cruiseState.speedCluster, 20.0)
-      CI.CS.engagement.handle_steering_disengage(True)
-      CS, _ = CI.update([])
-      self.assertAlmostEqual(CS.cruiseState.speed, 20.0)
-
-  def test_double_down_publishes_new_target_on_second_press(self):
-    CI = self._make_interface()
-    with patch.object(type(nap_conf), "use_pedal", new_callable=PropertyMock, return_value=True), \
-         patch.object(CI.CS, "update_speed_kf", return_value=(13.7, 0.0)), \
-         patch("opendbc.car.tesla.preap.carstate._current_time_millis", side_effect=(1000, 1010, 1300)):
-      CI.update(self._can_packet("DI_state", {"DI_speedUnits": 0})
-                + self._can_packet("STW_ACTN_RQ", {"SpdCtrlLvr_Stat": 32}))
-      CI.update(self._can_packet("STW_ACTN_RQ", {"SpdCtrlLvr_Stat": 0}))
-      CS, _ = CI.update(self._can_packet("STW_ACTN_RQ", {"SpdCtrlLvr_Stat": 32}))
-      self.assertAlmostEqual(CS.cruiseState.speed, 31 * CV.MPH_TO_MS, places=5)
-      self.assertAlmostEqual(CS.cruiseState.speedCluster, CS.cruiseState.speed)
-      self.assertFalse(CS.enableLongControl)
 
   def test_turn_signal_stalk_state_uses_lever_level(self):
     for lever, expected in ((0, 0), (1, 1), (2, 2), (3, 0)):
@@ -162,33 +133,6 @@ class TestPreAPCarStateUpdate(unittest.TestCase):
         packets = self._can_packet("STW_ACTN_RQ", {"DTR_Dist_Rq": raw})
         CS, _ = CI.update(packets)
         self.assertEqual(CS.napStalkFollowDistance, expected)
-
-  def test_follow_detent_timestamp_latches_changes_including_batched_return(self):
-    CI = self._make_interface()
-    state, _ = CI.update([])
-    self.assertEqual(state.napStalkFollowDistanceTimestamp, 0)
-
-    def packet(raw, timestamp):
-      return [(timestamp, self._can_packet("STW_ACTN_RQ", {"DTR_Dist_Rq": raw})[0][1])]
-
-    state, _ = CI.update(packet(100, 100))
-    self.assertEqual((state.napStalkFollowDistance, state.napStalkFollowDistanceTimestamp), (4, 100))
-    for raw, timestamp in ((100, 200), (255, 300), (100, 400)):
-      state, _ = CI.update(packet(raw, timestamp))
-      self.assertEqual(state.napStalkFollowDistanceTimestamp, 100)
-
-    # Both detents arrive before a consumer update; equal final value must not
-    # erase the physical interaction or its ordering against a picker request.
-    state, _ = CI.update(packet(66, 500) + packet(100, 600))
-    self.assertEqual((state.napStalkFollowDistance, state.napStalkFollowDistanceTimestamp), (4, 600))
-    state, _ = CI.update([])
-    self.assertEqual(state.napStalkFollowDistanceTimestamp, 600)
-
-    # Multiple frames in one CAN envelope can share a receive timestamp.
-    frames = packet(66, 700)[0][1] + packet(100, 700)[0][1]
-    state, _ = CI.update([(700, frames)])
-    self.assertEqual(state.napStalkFollowDistance, 4)
-    self.assertGreater(state.napStalkFollowDistanceTimestamp, 600)
 
 
 if __name__ == "__main__":

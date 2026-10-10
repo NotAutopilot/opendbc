@@ -218,15 +218,19 @@ typedef bool (*get_quality_flag_valid_t)(const CANPacket_t *msg);
 
 typedef safety_config (*safety_hook_init)(uint16_t param);
 typedef void (*rx_hook)(const CANPacket_t *msg);
+typedef void (*invalid_rx_hook)(const CANPacket_t *msg);
 typedef bool (*tx_hook)(const CANPacket_t *msg);  // returns true if the message is allowed
 typedef bool (*fwd_hook)(int bus_num, int addr);      // returns true if the message should be blocked from forwarding
+typedef void (*safety_tick_hook)(bool rx_checks_invalid);
 
 typedef struct {
   safety_hook_init init;
   rx_hook rx;
   rx_hook rx_all;  // called for ALL received messages, before whitelist check (for CAN forwarding)
+  invalid_rx_hook invalid_rx;
   tx_hook tx;
   fwd_hook fwd;
+  safety_tick_hook tick;
   get_checksum_t get_checksum;
   compute_checksum_t compute_checksum;
   get_counter_t get_counter;

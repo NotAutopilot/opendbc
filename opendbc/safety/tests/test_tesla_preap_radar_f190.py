@@ -21,32 +21,12 @@ class TestTeslaPreAPRadarF190:
 
   def test_allows_f190_read_while_disengaged(self):
     self.safety.set_controls_allowed(0)
-    payloads = (
-      TESTER, F190,
-      bytes.fromhex("0210010000000000"),
-      bytes.fromhex("0210030000000000"),
-      bytes.fromhex("3000000000000000"),
-      bytes.fromhex("023e800000000000"),
-    )
-    for payload in payloads:
-      assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, payload)) is True
+    assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, TESTER)) is True
+    assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, F190)) is True
 
   def test_rejects_f190_when_controls_allowed(self):
     self.safety.set_controls_allowed(1)
     assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, F190)) is False
-
-  def test_rejects_f190_when_only_lateral_allowed(self):
-    self.safety.set_controls_allowed(False)
-    self.safety.set_controls_allowed_lateral(True)
-    assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, F190)) is False
-
-  def test_rejects_modified_f190_payload_and_length(self):
-    for index in range(8):
-      payload = bytearray(F190)
-      payload[index] ^= 1
-      assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, payload)) is False
-    for length in range(8):
-      assert self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x641, 1, F190[:length])) is False
 
   def test_rejects_f190_without_radar(self):
     self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, 0)

@@ -117,14 +117,6 @@ bool tesla_preap_radar_vin_feed_captured(void);
 uint8_t tesla_preap_radar_vin_feed_data(int index);
 bool tesla_preap_radar_donor_active_debug(void);
 bool tesla_preap_radar_ready_debug(void);
-bool tesla_preap_radar_wheel_speeds_captured(void);
-uint32_t tesla_preap_radar_wheel_speeds_addr(void);
-uint8_t tesla_preap_radar_wheel_speeds_bus(void);
-uint8_t tesla_preap_radar_wheel_speeds_dlc(void);
-uint8_t tesla_preap_radar_wheel_speeds_data(int index);
-const CANPacket_t *tesla_preap_radar_readdr_packet(void);
-const CANPacket_t *tesla_preap_radar_steering_packet(void);
-const CANPacket_t *tesla_preap_radar_esp_control_packet(void);
 
 void set_honda_fwd_brake(bool c);
 bool get_honda_fwd_brake(void);

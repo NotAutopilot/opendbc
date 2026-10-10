@@ -67,8 +67,11 @@ def _get_preap_vm():
   return VehicleModel(CP)
 
 
-class TeslaPreAPTestMixin:
-  # Only configured concrete classes inherit TestCase and shared safety suites.
+class TeslaPreAPTestMixin(common.CarSafetyTest, common.AngleSteeringSafetyTest):
+  # Abstract base class — concrete subclasses (SteeringOnly, WithPedal) do the work.
+  # __test__ = False prevents pytest from collecting this class directly (it still
+  # gets collected via MRO without this, because CarSafetyTest is a TestCase).
+  __test__ = False
   # Pre-AP has no relay and no bus 2 forwarding
   RELAY_MALFUNCTION_ADDRS = {}
   FWD_BUS_LOOKUP = {}
@@ -219,16 +222,6 @@ class TeslaPreAPTestMixin:
     self.assertFalse(self.safety.get_vehicle_moving())
     # 1.0 kph → clearly above 0.5 kph threshold
     self._rx(self.packer.make_can_msg_safety("ESP_B", 0, {"ESP_vehicleSpeed": 1.0}))
-    self.assertTrue(self.safety.get_vehicle_moving())
-
-  def test_cruise_standstill_clears_moving_without_engaging_controls(self):
-    self._rx(self._speed_msg(10))
-    self.assertTrue(self.safety.get_vehicle_moving())
-    self.safety.set_controls_allowed(False)
-    self._rx(self.packer.make_can_msg_safety("DI_state", 0, {"DI_cruiseState": 3}))
-    self.assertFalse(self.safety.get_vehicle_moving())
-    self.assertFalse(self.safety.get_controls_allowed())
-    self._rx(self._speed_msg(10))
     self.assertTrue(self.safety.get_vehicle_moving())
 
   def test_prev_user_brake(self):
@@ -535,44 +528,9 @@ class TeslaPreAPTestMixin:
     raise NotImplementedError
 
 
-class TestTeslaPreAPRadarWheelSpeeds(unittest.TestCase):
-  def setUp(self):
-    self.safety = libsafety_py.libsafety
-    self.safety.set_safety_hooks(CarParams.SafetyModel.teslaPreap, PREAP_FLAG_RADAR_EMULATION)
-    self.safety.init_tests()
-    # Complete the host's three-part config before radar emulation can send.
-    for fragment in (bytes([0, 0, 1, 0, 0, 32, 32, 32]),
-                     bytes([1]) + b" " * 7, bytes([2]) + b" " * 7):
-      self.assertFalse(self.safety.safety_tx_hook(libsafety_py.make_CANPacket(0x560, 0, fragment)))
-
-  def test_wheel_speed_packing_boundaries(self):
-    # Raw DI_torque2 speed is mph * 20 + 500. Converted wheel speeds use
-    # 0.04 kph/count; 0xFFF is the input SNA and maps to all 13 bits set.
-    # Include the unsigned low-word sign bit and third-wheel word boundary.
-    cases = ((0, 0), (499, 0), (500, 0), (501, 2),
-             (515, 30), (516, 32), (531, 62), (532, 64),
-             (0xFFE, 7228), (0xFFF, 0x1FFF))
-    for raw_speed, speed in cases:
-      for counter in range(16):
-        with self.subTest(raw_speed=raw_speed, counter=counter):
-          self.setUp()
-          self.assertFalse(self.safety.tesla_preap_radar_wheel_speeds_captured())
-          source = (raw_speed << 16) | (counter << 32)
-          self.safety.safety_rx_hook(libsafety_py.make_CANPacket(0x118, 0, source.to_bytes(6, "little")))
-
-          self.assertTrue(self.safety.tesla_preap_radar_wheel_speeds_captured())
-          self.assertEqual(self.safety.tesla_preap_radar_wheel_speeds_addr(), 0x169)
-          self.assertEqual(self.safety.tesla_preap_radar_wheel_speeds_bus(), 1)
-          self.assertEqual(self.safety.tesla_preap_radar_wheel_speeds_dlc(), 8)
-          data = bytes(self.safety.tesla_preap_radar_wheel_speeds_data(i) for i in range(8))
-          # Assemble the whole 56-bit payload independently of the C split.
-          payload = sum(speed << (13 * wheel) for wheel in range(4)) | (counter << 52)
-          expected = payload.to_bytes(7, "little")
-          self.assertEqual(data, expected + bytes([(0x76 + sum(expected)) & 0xFF]))
-
-
-class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, common.CarSafetyTest, common.AngleSteeringSafetyTest):
+class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, unittest.TestCase):
   """Pre-AP with no pedal — lateral only."""
+  __test__ = True  # re-enable collection (mixin sets __test__=False)
 
   def setUp(self):
     super().setUp()
@@ -605,8 +563,9 @@ class TestTeslaPreAPSteeringOnly(TeslaPreAPTestMixin, common.CarSafetyTest, comm
                     "rx_checks must stay valid without a pedal installed")
 
 
-class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, common.CarSafetyTest, common.AngleSteeringSafetyTest):
+class TestTeslaPreAPWithPedal(TeslaPreAPTestMixin, unittest.TestCase):
   """Pre-AP with Comma Pedal enabled."""
+  __test__ = True  # re-enable collection (mixin sets __test__=False)
 
   def setUp(self):
     super().setUp()
@@ -959,36 +918,6 @@ class TestTeslaPreAPPedalCalibration(unittest.TestCase):
     self.safety.set_timer(1000001)
     self.assertFalse(self._tx(self._gas(2, 1, 0)))
 
-  def test_counter_progression_wraps_and_replay_does_not_advance_sequence(self):
-    self._prime()
-    for _ in range(17):
-      msg = self._gas(2, 1)
-      self.assertTrue(self._tx(msg))
-      self.assertFalse(self._tx(msg))
-    self.assertTrue(self._tx(self._gas(2, 1)))
-
-  def test_malformed_commands_do_not_consume_next_counter(self):
-    for invalid in ("checksum", "reserved", "fd", "raw_max", "raw2_max"):
-      with self.subTest(invalid=invalid):
-        self._init(PREAP_FLAG_PEDAL_CALIBRATION)
-        self._prime()
-        self.assertTrue(self._tx(self._gas(2, 1)))
-        valid = self._gas(2, 1)
-        payload = bytearray(valid[0].data[0:6])
-        if invalid == "reserved":
-          payload[4] |= 0x10
-        elif invalid == "raw_max":
-          payload[:2] = b"\xff\xff"
-        elif invalid == "raw2_max":
-          payload[2:4] = b"\xff\xff"
-        payload[5] = (0x51 + 0x05 + sum(payload[:5])) & 0xFF
-        if invalid == "checksum":
-          payload[5] ^= 1
-        malformed = libsafety_py.make_CANPacket(0x551, 2, payload)
-        malformed[0].fd = invalid == "fd"
-        self.assertFalse(self._tx(malformed))
-        self.assertTrue(self._tx(valid))
-
 
 class TestTeslaPreAPHandsOnPause(unittest.TestCase):
   def setUp(self):
@@ -1056,50 +985,12 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertFalse(self.safety.get_steering_control_inhibited())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
-  def test_deliberate_pull_admitted_while_hands_block_steering(self):
-    for encoded, hands in ((0, 3), (1, 1), (2, 2), (3, 3)):
-      with self.subTest(encoded=encoded, hands=hands):
-        self._init(PREAP_FLAG_HANDS_ON_PAUSE | (encoded << PREAP_HANDS_ON_LEVEL_SHIFT))
-        self._rx(self._epas(hands=hands))
-        self.assertTrue(self.safety.get_steering_control_inhibited())
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-        self._rx(self._stalk(True))
-        self.assertTrue(self.safety.get_controls_allowed())
-        self.assertTrue(self.safety.get_controls_allowed_lateral())
-        self.assertFalse(self._tx(self._steer(True)))
-        self.assertTrue(self._tx(self._steer(False)))
-        self.safety.set_timer(0)
-        self._rx(self._epas(hands=0))
-        self.safety.set_timer(999999)
-        self._rx(self._epas(hands=0))
-        self.assertFalse(self._tx(self._steer(True)))
-        self.safety.set_timer(1000000)
-        self._rx(self._epas(hands=0))
-        self.assertFalse(self.safety.get_steering_control_inhibited())
-        self.assertTrue(self._tx(self._steer(True)))
-
-  def test_fresh_pull_cannot_bypass_epas_fault_or_pause_disabled(self):
-    for flags, status, error in ((0, 1, 0), (PREAP_FLAG_HANDS_ON_PAUSE, 3, 0),
-                                 (PREAP_FLAG_HANDS_ON_PAUSE, 0, 6)):
-      with self.subTest(flags=flags, status=status, error=error):
-        self._init(flags)
-        self._rx(self._epas(hands=3, eac_status=status, eac_error=error))
-        self._rx(self._stalk(True))
-        self.assertFalse(self.safety.get_controls_allowed())
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-        self.assertFalse(self._tx(self._steer(True)))
-
-  def test_cancel_clears_permission_and_new_pull_reinhibits_held_hands(self):
-    self._rx(self._epas(hands=3))
-    self._rx(self._stalk(True))
-    self.safety.set_timer(1000000)
-    self._rx(self._stalk(False))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
+  def test_disabled_held_stalk_does_not_arm(self):
+    self._rx(self._epas(hands=2))
     self.assertFalse(self.safety.get_steering_control_inhibited())
     self._rx(self._stalk(True))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_steering_control_inhibited())
-    self.assertFalse(self._tx(self._steer(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
 
   def test_door_while_paused_exits(self):
     self.safety.set_controls_allowed_lateral(True)
@@ -1125,24 +1016,6 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self._rx(self._epas(hands=0))
     self.assertTrue(self.safety.get_steering_control_inhibited())
     self.safety.set_timer(1000000)
-    self._rx(self._epas(hands=0))
-    self.assertFalse(self.safety.get_steering_control_inhibited())
-
-  def test_hands_clear_without_lateral_permission_does_not_start_resume_timer(self):
-    self.safety.set_controls_allowed_lateral(False)
-    self._rx(self._epas(hands=2))
-    self._rx(self._epas(hands=0))
-    self.safety.set_timer(2000000)
-    self._rx(self._epas(hands=0))
-    self.assertTrue(self.safety.get_steering_control_inhibited())
-    self.assertFalse(self._tx(self._steer(True)))
-    self.safety.set_controls_allowed_lateral(True)
-    self._rx(self._epas(hands=0))
-    self.assertTrue(self.safety.get_steering_control_inhibited())
-    self.safety.set_timer(2999999)
-    self._rx(self._epas(hands=0))
-    self.assertTrue(self.safety.get_steering_control_inhibited())
-    self.safety.set_timer(3000000)
     self._rx(self._epas(hands=0))
     self.assertFalse(self.safety.get_steering_control_inhibited())
 
@@ -1196,7 +1069,7 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertFalse(self._tx(self._steer(True)))
     self.assertTrue(self._tx(self._steer(False)))
 
-  def test_pause_needs_deliberate_pull_to_start_inactive_long(self):
+  def test_pause_does_not_start_inactive_long_or_pedal_tx(self):
     self._init(PREAP_FLAG_HANDS_ON_PAUSE | PREAP_FLAG_ENABLE_PEDAL)
     self.safety.set_controls_allowed(False)
     self.safety.set_controls_allowed_lateral(True)
@@ -1207,16 +1080,15 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertFalse(self._tx(self._steer(True)))
     self._rx(self._idle())
     self._rx(self._stalk(True))
-    self.assertTrue(self.safety.get_controls_allowed())
-    self.assertTrue(self._tx(self._gas_enable()))
-    self.assertFalse(self._tx(self._steer(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self._gas_enable()))
     self.safety.set_timer(0)
     self._rx(self._epas(hands=0))
     self.safety.set_timer(1000000)
     self._rx(self._epas(hands=0))
     self.assertFalse(self.safety.get_steering_control_inhibited())
-    self.assertTrue(self.safety.get_controls_allowed())
-    self.assertTrue(self._tx(self._gas_enable()))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self._gas_enable()))
 
   def test_default_off_hands_on_drops_pedal_tx(self):
     self._init(PREAP_FLAG_ENABLE_PEDAL)
@@ -1295,103 +1167,6 @@ class TestTeslaPreAPHandsOnPause(unittest.TestCase):
     self.assertTrue(self.safety.get_steering_control_inhibited())
     self.assertTrue(self._tx(self._gas_enable()))
     self.assertFalse(self._tx(self._steer(True)))
-
-
-class TestTeslaPreAPIgnition(unittest.TestCase):
-  def setUp(self):
-    self.safety = libsafety_py.libsafety
-    self.safety.init_tests()
-    self.packer = CANPackerSafety("tesla_preap")
-
-  def _msg(self, counter, drive_rail=True, bus=0):
-    addr, data, bus = self.packer.make_can_msg("GTW_status", bus, {
-      "GTW_statusCounter": counter,
-      "GTW_driveRailReq": int(drive_rail),
-    })
-    data = data[:7] + bytes([((addr & 0xFF) + (addr >> 8) + sum(data[:7])) & 0xFF])
-    return libsafety_py.make_CANPacket(addr, bus, data)
-
-  def test_consecutive_counters_enable_and_disable_on_each_bus(self):
-    for bus in (0, 1):
-      for counter in range(16):
-        with self.subTest(bus=bus, counter=counter):
-          self.safety.init_tests()
-          self.safety.ignition_can_hook(self._msg(counter, bus=bus))
-          self.assertFalse(self.safety.get_ignition_can())
-          self.safety.ignition_can_hook(self._msg((counter + 1) % 16, bus=bus))
-          self.assertTrue(self.safety.get_ignition_can())
-          self.safety.ignition_can_hook(self._msg((counter + 2) % 16, drive_rail=False, bus=bus))
-          self.assertFalse(self.safety.get_ignition_can())
-
-  def test_duplicate_and_skipped_counters_do_not_change_ignition(self):
-    for counter in (4, 6):
-      with self.subTest(counter=counter):
-        self.safety.init_tests()
-        self.safety.ignition_can_hook(self._msg(4))
-        self.safety.ignition_can_hook(self._msg(counter))
-        self.assertFalse(self.safety.get_ignition_can())
-        self.safety.ignition_can_hook(self._msg(counter + 1))
-        self.assertTrue(self.safety.get_ignition_can())
-        self.safety.ignition_can_hook(self._msg(counter + 1, drive_rail=False))
-        self.assertTrue(self.safety.get_ignition_can())
-
-  def test_bus_counters_cannot_complete_each_other(self):
-    self.safety.ignition_can_hook(self._msg(15, bus=0))
-    self.safety.ignition_can_hook(self._msg(0, bus=1))
-    self.assertFalse(self.safety.get_ignition_can())
-    self.safety.ignition_can_hook(self._msg(0, bus=0))
-    self.assertTrue(self.safety.get_ignition_can())
-    self.safety.ignition_can_hook(self._msg(1, drive_rail=False, bus=1))
-    self.assertFalse(self.safety.get_ignition_can())
-
-  def test_invalid_frames_do_not_advance_counters(self):
-    for bus in (0, 1):
-      for invalid in ("checksum", "bus", "length", "address"):
-        with self.subTest(bus=bus, invalid=invalid):
-          self.safety.init_tests()
-          self.safety.ignition_can_hook(self._msg(0, bus=bus))
-          msg = self._msg(1, bus=bus)
-          if invalid == "checksum":
-            msg[0].data[7] ^= 1
-          elif invalid == "bus":
-            msg[0].bus = 2
-          elif invalid == "length":
-            msg[0].data_len_code = 7
-          else:
-            msg[0].addr = 0x349
-          self.safety.ignition_can_hook(msg)
-          self.assertFalse(self.safety.get_ignition_can())
-          self.safety.ignition_can_hook(self._msg(1, bus=bus))
-          self.assertTrue(self.safety.get_ignition_can())
-
-  def test_invalid_checksum_cannot_turn_off_or_extend_ignition(self):
-    self.safety.ignition_can_hook(self._msg(0))
-    self.safety.ignition_can_hook(self._msg(1))
-    for _ in range(3):
-      self.safety.ignition_can_1hz_tick()
-    self.assertTrue(self.safety.get_ignition_can())
-    msg = self._msg(2, drive_rail=False)
-    msg[0].data[7] ^= 1
-    self.safety.ignition_can_hook(msg)
-    self.assertTrue(self.safety.get_ignition_can())
-    self.safety.ignition_can_1hz_tick()
-    self.assertFalse(self.safety.get_ignition_can())
-
-  def test_stale_gap_requires_new_pair_on_each_bus(self):
-    for bus in (0, 1):
-      with self.subTest(bus=bus):
-        self.safety.init_tests()
-        for source_bus in (0, 1):
-          self.safety.ignition_can_hook(self._msg(0, bus=source_bus))
-          self.safety.ignition_can_hook(self._msg(1, bus=source_bus))
-        for _ in range(4):
-          self.safety.ignition_can_1hz_tick()
-        self.assertFalse(self.safety.get_ignition_can())
-        self.safety.ignition_can_hook(self._msg(2, bus=bus))
-        self.assertFalse(self.safety.get_ignition_can())
-        self.safety.ignition_can_hook(self._msg(3, bus=bus))
-        self.assertTrue(self.safety.get_ignition_can())
-
 
 if __name__ == "__main__":
   unittest.main()

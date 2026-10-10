@@ -210,6 +210,9 @@ bool safety_rx_hook(const CANPacket_t *msg) {
   if (valid && whitelisted) {
     current_hooks->rx(msg);
   }
+  if (!valid && whitelisted && (current_hooks->invalid_rx != NULL)) {
+    current_hooks->invalid_rx(msg);
+  }
 
   // Handles gas, brake, and regen paddle
   generic_rx_checks();
@@ -356,6 +359,9 @@ void safety_tick(const safety_config *cfg) {
   }
 
   safety_rx_checks_invalid = rx_checks_invalid;
+  if (current_hooks->tick != NULL) {
+    current_hooks->tick(rx_checks_invalid);
+  }
 }
 
 static void relay_malfunction_set(void) {

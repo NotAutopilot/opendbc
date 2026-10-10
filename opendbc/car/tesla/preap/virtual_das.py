@@ -11,7 +11,7 @@ from enum import Enum, auto
 
 from numpy import clip, interp
 
-from opendbc.car.common.filter_simple import FirstOrderFilter
+from opendbc.car.common.filter_simple import FirstOrderFilter, HighPassFilter
 from opendbc.car.common.pid import PIDController
 from opendbc.car.tesla.preap.constants import (
   VDAS_INNER_K_BP, VDAS_INNER_KP_V, VDAS_INNER_KI_V,
@@ -55,13 +55,11 @@ NEGATIVE_HANDOFF_PEDAL_STEP = 0.50  # DI/update
 
 GRAVITY = 9.81  # m/s²
 PITCH_LP_RC = 0.5   # low-pass filter RC for steady-state grade (seconds)
-PITCH_FAST_RC = 0.1  # faster grade estimate for transitions
+PITCH_HP_RC1 = 0.1  # high-pass inner RC for transient grade detection
+PITCH_HP_RC2 = 1.0  # high-pass outer RC
 MAX_PITCH_COMPENSATION = 1.5  # m/s² — clamp transient compensation
 MAX_STEADY_GRADE_COMPENSATION = 1.5  # m/s² — reject implausible sustained pitch
-# Preserve the prior grade path's low-frequency lag:
-# 0.5 - 0.4 * (1.0 - 0.1) = 0.14 s = (1 - 0.9) * 0.5 + 0.9 * 0.1.
-# Reusing its 0.4 gain here would instead add 0.20 s of grade-response lag.
-TRANSIENT_GRADE_GAIN = 0.9
+TRANSIENT_GRADE_GAIN = 0.4
 ORIENTATION_DROPOUT_HOLD_S = 0.50
 ORIENTATION_DROPOUT_DECAY_S = 1.50
 
@@ -69,17 +67,18 @@ ORIENTATION_DROPOUT_DECAY_S = 1.50
 class GradeEstimator:
   """Estimates road grade from IMU pitch and compensates the controller.
 
-  Blend slow and fast estimates of the same gravitational load. The transient
-  correction is only the fast estimate's residual over the steady estimate,
-  not a second grade contribution. This keeps total feedforward between the
-  two estimates, including at crests, without overshooting a sustained grade.
-  Planner targets and wheel-speed acceleration stay in the net domain.
+  Uses a low-pass filter on pitch for the steady-state grade component
+  and a high-pass filter for transient grade changes. Both components are
+  added to actuator effort so planner targets and measured acceleration stay
+  in the same net-acceleration domain.
+
+  Follows the same pattern as Toyota's carcontroller.py lines 68-69, 204-235.
   """
 
   def __init__(self, dt: float = 0.02):
     self.dt = dt
     self.pitch_lp = FirstOrderFilter(0.0, PITCH_LP_RC, dt)
-    self.pitch_fast = FirstOrderFilter(0.0, PITCH_FAST_RC, dt)
+    self.pitch_hp = HighPassFilter(0.0, PITCH_HP_RC1, PITCH_HP_RC2, dt)
     self.missing_orientation_elapsed_s = 0.0
     self.pitch_before_dropout_rad = 0.0
 
@@ -94,7 +93,7 @@ class GradeEstimator:
       (grade_accel, pitch_compensation):
         grade_accel: steady-state gravitational component along road (m/s²).
                      Positive = uphill (gravity resists the car).
-        pitch_compensation: fast-minus-steady grade correction (m/s²).
+        pitch_compensation: transient feedforward bump for grade changes (m/s²).
     """
     if len(orientation_ned) < 2:
       return self._update_for_missing_orientation()
@@ -104,11 +103,11 @@ class GradeEstimator:
     maximum_pitch = math.asin(MAX_STEADY_GRADE_COMPENSATION / GRAVITY)
     pitch = float(clip(orientation_ned[1], -maximum_pitch, maximum_pitch))
     self.pitch_lp.update(pitch)
-    self.pitch_fast.update(pitch)
+    self.pitch_hp.update(pitch)
 
     grade_accel = self._steady_grade_compensation()
     pitch_compensation = float(clip(
-      (math.sin(self.pitch_fast.x) * GRAVITY - grade_accel) * TRANSIENT_GRADE_GAIN,
+      math.sin(self.pitch_hp.x) * GRAVITY * TRANSIENT_GRADE_GAIN,
       -MAX_PITCH_COMPENSATION, MAX_PITCH_COMPENSATION))
 
     return grade_accel, pitch_compensation
@@ -126,9 +125,8 @@ class GradeEstimator:
     ))
     self.pitch_lp.x = self.pitch_before_dropout_rad * dropout_grade_scale
 
-    # Missing orientation suppresses the transient. Keep both estimates on the
-    # same held/decaying baseline so reacquisition cannot revive stale grade.
-    self.pitch_fast.x = self.pitch_lp.x
+    if dropout_grade_scale == 0.0:
+      self._clear_high_pass_state()
 
     return self._steady_grade_compensation(), 0.0
 
@@ -141,9 +139,14 @@ class GradeEstimator:
 
   def reset(self):
     self.pitch_lp.x = 0.0
-    self.pitch_fast.x = 0.0
+    self._clear_high_pass_state()
     self.missing_orientation_elapsed_s = 0.0
     self.pitch_before_dropout_rad = 0.0
+
+  def _clear_high_pass_state(self):
+    self.pitch_hp.x = 0.0
+    self.pitch_hp._f1.x = 0.0
+    self.pitch_hp._f2.x = 0.0
 
 
 class JerkLimiterState(Enum):

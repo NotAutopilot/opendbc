@@ -22,7 +22,7 @@ class TestPreAPFirmwareMatching(unittest.TestCase):
     self.assertTrue(exact)
     self.assertNotIn(PREAP_PLATFORM, matches)
     self.assertNotIn(CAR.TESLA_MODEL_S_PREAP, matches)
-    assert CAR.TESLA_MODEL_3 in matches
+    self.assertIn(CAR.TESLA_MODEL_3, matches)
 
   def test_unrelated_firmware_does_not_return_preap(self):
     car_fw = [CarFw(ecu=Ecu.eps, fwVersion=b"UNRELATED_FW_NOT_IN_DB", brand="tesla", address=0x730, subAddress=0)]

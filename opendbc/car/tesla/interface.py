@@ -1,7 +1,7 @@
 from opendbc.car import Bus, get_safety_config, structs
 from opendbc.car.interfaces import CarInterfaceBase
-from opendbc.car.tesla.carcontroller import CarController as TeslaCarController
-from opendbc.car.tesla.carstate import CarState as TeslaCarState
+from opendbc.car.tesla.carcontroller import CarController
+from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, DBC, FSD_14_FW, Ecu
 
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP, TeslaSafetyFlagsSP
@@ -40,8 +40,8 @@ def RadarInterface(CP, CP_SP):
 
 
 class CarInterface(CarInterfaceBase):
-  CarState: type[TeslaCarState | PreAPCarState] = TeslaCarState
-  CarController: type[TeslaCarController | PreAPCarController] = TeslaCarController
+  CarState = CarState
+  CarController = CarController
   RadarInterface = staticmethod(RadarInterface)
 
   def __init__(self, CP, CP_SP=None):
@@ -51,6 +51,7 @@ class CarInterface(CarInterfaceBase):
     if self._preap_platform:
       self.CarState = PreAPCarState
       self.CarController = PreAPCarController
+      self.RadarInterface = PreAPRadarInterface
     super().__init__(CP, CP_SP)
     if self._preap_platform:
       # Pre-AP resolves cluster speed itself, including a truthful zero on its first DI frame.

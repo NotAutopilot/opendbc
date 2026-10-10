@@ -1,28 +1,18 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from opendbc.can.parser import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.tesla.values import DBC, CANBUS, CAR
 from opendbc.car.interfaces import RadarInterfaceBase
 
-if TYPE_CHECKING:
-  from opendbc.car.tesla.preap.nap_conf import NAPConf
-  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch as _BoschTableFreezeWatch
-
-nap_conf: "NAPConf | None"
-BoschTableFreezeWatch: "type[_BoschTableFreezeWatch] | None"
-
 # Optional NAP config import (available on device/runtime)
 try:
-  from opendbc.car.tesla.preap.nap_conf import nap_conf as _nap_conf
-  nap_conf = _nap_conf
+  from opendbc.car.tesla.preap.nap_conf import nap_conf
 except ImportError:
   nap_conf = None
 
 try:
-  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch as _BoschTableFreezeWatch
-  BoschTableFreezeWatch = _BoschTableFreezeWatch
+  from opendbc.car.tesla.preap.radar_table_freeze import BoschTableFreezeWatch
 except ImportError:
   BoschTableFreezeWatch = None
 
@@ -35,48 +25,6 @@ BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
 
 IGNORE_HW_FAIL_PARAM = "NAPRadarIgnoreHwFail"
 IGNORE_HW_FAIL_PATH = "/data/params/d/NAPRadarIgnoreHwFail"
-
-UPSIDE_DOWN_PARAM = "NAPRadarUpsideDown"
-UPSIDE_DOWN_PATH = "/data/params/d/NAPRadarUpsideDown"
-
-
-def oriented_lateral(lat_dist, lat_speed, offset, upside_down):
-  """Car-frame lateral position and velocity, applied before track fusion.
-
-  An upside-down mount negates radar lateral position and lateral speed only.
-  The configured offset is added after that sign and is not negated with it.
-  Range, longitudinal speed, and longitudinal acceleration stay unchanged.
-  """
-  direction = -1.0 if upside_down else 1.0
-  return direction * float(lat_dist) + float(offset), direction * float(lat_speed)
-
-
-def _upside_down_from_params():
-  from openpilot.common.params import Params
-  return bool(Params().get_bool(UPSIDE_DOWN_PARAM))
-
-
-def _upside_down_from_file(path=None):
-  with open(path or UPSIDE_DOWN_PATH, "rb") as f:
-    return f.read().strip() == b"1"
-
-
-def _resolve_radar_upside_down():
-  """Params owns mounting; consult legacy JSON only when Params cannot be read."""
-  try:
-    return _upside_down_from_params()
-  except Exception:
-    pass
-  try:
-    return _upside_down_from_file()
-  except Exception:
-    pass
-  try:
-    if nap_conf is not None:
-      return bool(nap_conf.radar_upside_down)
-  except Exception:
-    pass
-  return False
 
 
 def _ignore_hw_fail_from_params():
@@ -171,9 +119,9 @@ class BoschTrackLifecycle:
 
 
 class RadarInterface(RadarInterfaceBase):
-  def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP | None = None):
-    # Standalone Pre-AP users have no SP settings; do not mutate the shared base.
-    super().__init__(CP, structs.CarParamsSP() if CP_SP is None else CP_SP)
+  def __init__(self, CP):
+    super().__init__(CP)
+    self.CP = CP
 
     self.continental_radar = False
     self.bosch_radar = CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP
@@ -209,20 +157,12 @@ class RadarInterface(RadarInterfaceBase):
     self.track_id = 0
     self.bosch_tracks = BoschTrackLifecycle()
     self.table_freeze = BoschTableFreezeWatch() if BoschTableFreezeWatch is not None else None
-    # Offset is a boot snapshot and is added after orientation correction.
-    # Upright: yRel = LatDist + offset. Inverted: yRel = -LatDist + offset.
-    # Offset stays in vehicle coordinates, independent of the physical mount.
+    # Keep parity with Tinkla radar lateral alignment behavior.
+    # For behind-nosecone installs, users can configure horizontal offset in meters.
     if self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and nap_conf is not None:
-      try:
-        self.radar_offset = float(nap_conf.radar_offset)
-      except Exception:
-        self.radar_offset = 0.0
+      self.radar_offset = float(nap_conf.radar_offset)
     else:
       self.radar_offset = 0.0
-    # Mount orientation is snapshotted here. A live toggle must not flip leads mid-drive.
-    self.radar_upside_down = (
-      self.CP.carFingerprint == CAR.TESLA_MODEL_S_PREAP and _resolve_radar_upside_down()
-    )
     self.ignore_hw_fail = _resolve_ignore_hw_fail()
 
   def update(self, can_msgs):
@@ -306,13 +246,11 @@ class RadarInterface(RadarInterfaceBase):
         self.track_id += 1
 
       # Parse track data
-      y_rel, yv_rel = oriented_lateral(
-        msg_a['LatDist'], msg_b['LatSpeed'], self.radar_offset, self.radar_upside_down)
       self.pts[i].dRel = msg_a['LongDist']
-      self.pts[i].yRel = y_rel
+      self.pts[i].yRel = msg_a['LatDist'] + self.radar_offset
       self.pts[i].vRel = msg_a['LongSpeed']
       self.pts[i].aRel = msg_a['LongAccel']
-      self.pts[i].yvRel = yv_rel
+      self.pts[i].yvRel = msg_b['LatSpeed']
       self.pts[i].measured = bool(msg_a['Meas'])
 
     ret.points = self.bosch_tracks.points if self.bosch_radar else list(self.pts.values())
@@ -334,13 +272,11 @@ class RadarInterface(RadarInterfaceBase):
     if msg_a["LongDist"] > 250.0 or msg_a["LongDist"] <= 0 or msg_a["ProbExist"] < 50.0:
       return None
 
-    y_rel, yv_rel = oriented_lateral(
-      msg_a['LatDist'], msg_b['LatSpeed'], self.radar_offset, self.radar_upside_down)
     return BoschTrackObservation(
       d_rel=msg_a['LongDist'],
-      y_rel=y_rel,
+      y_rel=msg_a['LatDist'] + self.radar_offset,
       v_rel=msg_a['LongSpeed'],
       a_rel=msg_a['LongAccel'],
-      yv_rel=yv_rel,
+      yv_rel=msg_b['LatSpeed'],
       measured=bool(msg_a['Meas']),
     )
