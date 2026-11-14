@@ -8,7 +8,7 @@ from opendbc.car.structs import CarParams, CarParamsT
 from opendbc.car.fingerprints import eliminate_incompatible_cars, all_legacy_fingerprint_cars
 from opendbc.car.fw_versions import ObdCallback, get_fw_versions_ordered, get_present_ecus, match_fw_to_car
 from opendbc.car.mock.values import CAR as MOCK
-from opendbc.car.tesla.nap_detect import AP_ECU_ADDRS, FORCED_PLATFORM, NAP_CAR_TYPE_AUTO, detect_legacy_platform, read_nap_car_type
+from opendbc.car.tesla.nap_detect import AP_ECU_ADDRS, FORCED_PLATFORM, NAP_CAR_TYPE_AUTO, ap_ecu_present, detect_legacy_platform, read_nap_car_type
 from opendbc.car.values import BRANDS
 from opendbc.car.vin import get_vin, is_valid_vin, VIN_UNKNOWN
 
@@ -88,11 +88,18 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
 
-  # NAP car type: forced types pin the platform; Auto picks it from CAN after the
-  # fingerprint window. None (unset) leaves stock fingerprinting alone.
+  # NAP car type: forced types pin the platform. Auto runs the CAN window first and
+  # queries FW only when the AP1 DAS ECU is there, to tell a Model S from a Model X;
+  # the query never runs on a Pre-AP car. None (unset) leaves stock fingerprinting alone.
   nap_car_type = None if fixed_fingerprint else read_nap_car_type()
-  if nap_car_type is not None:
-    fixed_fingerprint = FORCED_PLATFORM.get(nap_car_type, "")
+  nap_finger = None
+  if nap_car_type == NAP_CAR_TYPE_AUTO:
+    set_obd_multiplexing(False)
+    can_recv()
+    _, nap_finger = can_fingerprint(can_recv)
+    skip_fw_query = bool(skip_fw_query) or not ap_ecu_present(nap_finger)
+  elif nap_car_type is not None:
+    fixed_fingerprint = FORCED_PLATFORM[nap_car_type]
     skip_fw_query = True
 
   ecu_rx_addrs = set()
@@ -135,23 +142,31 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   # CAN fingerprint
   # drain CAN socket so we get the latest messages
   can_recv()
-  car_fingerprint, finger = can_fingerprint(can_recv)
+  if nap_finger is None:
+    car_fingerprint, finger = can_fingerprint(can_recv)
+  else:
+    car_fingerprint, finger = None, nap_finger  # NAP Auto already ran the CAN window, before the FW query
 
   exact_match = True
   source = CarParams.FingerprintSource.can
-
-  if nap_car_type == NAP_CAR_TYPE_AUTO:
-    car_fingerprint = detect_legacy_platform(finger)
-    carlog.warning({"event": "nap_car_detect", "mode": "auto", "result": car_fingerprint,
-                    "ap_ecu_addrs_seen": [hex(a) for a in AP_ECU_ADDRS if any(a in finger.get(b, {}) for b in (0, 2))]})
-  elif nap_car_type is not None:
-    carlog.warning({"event": "nap_car_detect", "mode": "forced", "result": fixed_fingerprint})
 
   # If FW query returns exactly 1 candidate, use it
   if len(fw_candidates) == 1:
     car_fingerprint = list(fw_candidates)[0]
     source = CarParams.FingerprintSource.fw
     exact_match = exact_fw_match
+
+  if nap_car_type == NAP_CAR_TYPE_AUTO:
+    car_fingerprint = detect_legacy_platform(finger, fw_candidates)
+    by_fw = car_fingerprint in fw_candidates
+    source = CarParams.FingerprintSource.fw if by_fw else CarParams.FingerprintSource.can
+    exact_match = exact_fw_match if by_fw else True
+    decided_by = "epas_fw" if by_fw else ("sdm1" if ap_ecu_present(finger) else "no_ap_ecu")
+    carlog.warning({"event": "nap_car_detect", "mode": "auto", "result": car_fingerprint, "decided_by": decided_by,
+                    "ap_ecu_addrs_seen": [hex(a) for a in AP_ECU_ADDRS if any(a in finger.get(b, {}) for b in (0, 2))],
+                    "fw_versions": [repr(fw.fwVersion) for fw in car_fw]})
+  elif nap_car_type is not None:
+    carlog.warning({"event": "nap_car_detect", "mode": "forced", "result": fixed_fingerprint})
 
   if fixed_fingerprint:
     car_fingerprint = fixed_fingerprint

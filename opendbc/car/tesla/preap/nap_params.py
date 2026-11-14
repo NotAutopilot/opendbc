@@ -40,7 +40,7 @@ class NAPParamKeys:
   BRAKE_FACTOR = "NAPBrakeFactor"
 
   # Vehicle
-  CAR_TYPE = "NAPCarType"  # 0=Auto, 1=Pre-AP, 2=AP1 (see opendbc/car/tesla/nap_detect.py)
+  CAR_TYPE = "NAPCarType"  # 0=Auto, 1=Pre-AP, 2=AP1 Model S, 3=AP1 Model X (see opendbc/car/tesla/nap_detect.py)
   ACTIVE_PROFILE = "NAPActiveProfile"  # state written by card, not a setting
 
   # Retired by CAR_TYPE; kept one release so stale values still load

@@ -1,4 +1,4 @@
-"""AP1 (TESLA_MODEL_S_HW1) car state, CAN builder, and controller tests."""
+"""AP1 (TESLA_MODEL_S_HW1 / TESLA_MODEL_X_HW1) car state, CAN builder, and controller tests."""
 import unittest
 
 from opendbc.can import CANPacker, CANParser
@@ -9,19 +9,25 @@ from opendbc.car.tesla.teslacan_legacy import TeslaCANRaven
 from opendbc.car.tesla.values import CANBUS, CarControllerParams
 
 HW1 = "TESLA_MODEL_S_HW1"
+HW1_X = "TESLA_MODEL_X_HW1"
 TESLA_CAN = DBC("tesla_can")
 SDM1_ADDR = TESLA_CAN.name_to_msg["SDM1"].address
 RCM_STATUS_ADDR = TESLA_CAN.name_to_msg["RCM_status"].address
 BODY_CONTROLS_ADDR = TESLA_CAN.name_to_msg["DAS_bodyControls"].address
 
 
-def make_hw1(fingerprint=None):
-  CarInterface = interfaces[HW1]
+def make_hw1(fingerprint=None, platform=HW1):
+  CarInterface = interfaces[platform]
   if fingerprint is None:
     fingerprint = {i: {} for i in range(8)}
     fingerprint[0][SDM1_ADDR] = 5  # an AP1 Model S sends SDM1
-  CP = CarInterface.get_params(HW1, fingerprint, [], alpha_long=False, is_release=False, docs=False)
+  CP = CarInterface.get_params(platform, fingerprint, [], alpha_long=False, is_release=False, docs=False)
   return CarInterface(CP)
+
+
+def make_hw1_x():
+  # a Model X has no SDM1; it reports the seatbelt in RCM_status
+  return make_hw1({i: {} for i in range(8)}, platform=HW1_X)
 
 
 def packet(message, values, bus):
@@ -66,6 +72,33 @@ class TestHW1CarState(unittest.TestCase):
     self.assertEqual(2, CI.CS.das_body_controls["DAS_highLowBeamDecision"])
     self.assertEqual(3, CI.CS.das_body_controls["DAS_wiperSpeed"])
     self.assertTrue(CI.can_parsers[Bus.ap_party].message_states[BODY_CONTROLS_ADDR].ignore_alive)
+
+
+class TestHW1ModelX(unittest.TestCase):
+  def test_blinkers_and_lever_level_come_from_the_stalk(self):
+    for lever, left, right in ((0, False, False), (1, True, False), (2, False, True), (3, False, False)):
+      with self.subTest(lever=lever):
+        CS = make_hw1_x().update(packet("STW_ACTN_RQ", {"TurnIndLvr_Stat": lever}, 0))
+        self.assertEqual((left, right), (CS.leftBlinker, CS.rightBlinker))
+        self.assertEqual(0 if lever == 3 else lever, CS.turnSignalStalkState)
+
+  def test_seatbelt_from_rcm_status(self):
+    CI = make_hw1_x()
+    self.assertIn(RCM_STATUS_ADDR, CI.can_parsers[Bus.chassis].message_states)
+    self.assertNotIn(SDM1_ADDR, CI.can_parsers[Bus.chassis].message_states)
+    self.assertFalse(CI.update(packet("RCM_status", {"RCM_buckleDriverStatus": 1}, 0)).seatbeltUnlatched)
+    self.assertTrue(CI.update(packet("RCM_status", {"RCM_buckleDriverStatus": 0}, 0)).seatbeltUnlatched)
+
+  def test_blinker_drive_while_engaged(self):
+    CI = make_hw1_x()
+    CI.update([])
+    CC = structs.CarControl()
+    CC.enabled = True
+    CC.leftBlinker = True
+    _, sends = CI.apply(CC.as_reader(), 0)
+    body_controls = [s for s in sends if s[0] == BODY_CONTROLS_ADDR]
+    self.assertEqual(1, len(body_controls))
+    self.assertEqual(1, decode(body_controls[0], "DAS_bodyControls")["DAS_turnIndicatorRequest"])
 
 
 class TestTeslaCANRaven(unittest.TestCase):
